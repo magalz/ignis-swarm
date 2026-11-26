@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ignis Swarm — Support &amp; Issue Portal</title>
+  <meta name="description" content="Official support and issue reporting portal for Ignis Swarm (Google Antigravity plugin)." />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --surface: #131722;
+      --surface-alt: #191f2e;
+      --border: #262f44;
+      --text: #eef2f9;
+      --muted: #98a4be;
+      --accent: #ff2a3d;
+      --accent-dark: #d90429;
+      --accent-soft: rgba(255, 42, 61, 0.14);
+      --ok: #22c55e;
+      --radius: 12px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fc;
+        --surface: #ffffff;
+        --surface-alt: #f0f3fa;
+        --border: #d8e0ef;
+        --text: #111827;
+        --muted: #4b5563;
+        --accent-soft: rgba(217, 4, 41, 0.08);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 36px 20px 64px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .logo {
+      width: 56px;
+      height: 56px;
+      flex: 0 0 auto;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.65rem;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .quick-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 13px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.86rem;
+      font-weight: 500;
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+
+    .pill:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    .pill.security {
+      border-color: rgba(255, 42, 61, 0.45);
+      background: var(--accent-soft);
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+    }
+
+    .tab {
+      border: 1px solid var(--border);
+      background: var(--surface-alt);
+      color: var(--muted);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .tab.active {
+      background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+      border-color: transparent;
+      color: #ffffff;
+    }
+
+    .notice {
+      background: var(--surface-alt);
+      border-left: 3px solid var(--accent);
+      padding: 11px 14px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .notice strong { color: var(--text); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.86rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    label .req {
+      color: var(--accent);
+      margin-left: 2px;
+    }
+
+    input[type="text"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 0.94rem;
+      transition: border-color 0.15s ease;
+    }
+
+    textarea.mono {
+      font-family: var(--mono);
+      font-size: 0.84rem;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 11px 20px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.94;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--surface-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--accent);
+    }
+
+    .status {
+      font-size: 0.86rem;
+      color: var(--ok);
+      min-height: 1.2em;
+    }
+
+    .hidden { display: none; }
+
+    footer {
+      margin-top: 28px;
+      font-size: 0.84rem;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    footer a {
+      color: var(--muted);
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="favicon.svg" alt="Ignis Swarm Logo" class="logo" />
+      <div>
+        <h1>Ignis Swarm Support</h1>
+        <p class="subtitle">Report bugs, request features, or browse documentation for the <code>ignis-swarm</code> Google Antigravity plugin.</p>
+      </div>
+    </header>
+
+    <nav class="quick-links" aria-label="Resources">
+      <a class="pill" href="https://github.com/magalz/ignis-swarm">GitHub Repository</a>
+      <a class="pill" href="https://github.com/magalz/ignis-swarm/wiki">Documentation Wiki</a>
+      <a class="pill" href="https://github.com/magalz/ignis-swarm/wiki/Architecture-Troubleshooting-and-FAQ">Troubleshooting &amp; FAQ</a>
+      <a class="pill security" href="https://github.com/magalz/ignis-swarm/security/advisories/new">Report Security Vulnerability (Private)</a>
+    </nav>
+
+    <main class="card">
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab active" id="tab-bug" role="tab" aria-selected="true">Bug / Problem Report</button>
+        <button type="button" class="tab" id="tab-feature" role="tab" aria-selected="false">Feature Request</button>
+      </div>
+
+      <div class="notice">
+        <strong>How reports are tracked:</strong> Submitting opens a pre-filled GitHub Issue on <code>magalz/ignis-swarm</code>, which automatically syncs two-way with our <strong>AGYSWM</strong> engineering board so you receive live status and comment updates.
+      </div>
+
+      <form id="bug-form">
+        <div class="field">
+          <label for="bug-title">Summary <span class="req">*</span></label>
+          <input type="text" id="bug-title" required placeholder="Short, specific description of the problem" />
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label for="bug-component">Affected Component <span class="req">*</span></label>
+            <select id="bug-component" required>
+              <option value="MCP Broker (ignis-swarm_broker / ignis-broker.mjs)">MCP Broker (ignis-swarm_broker / ignis-broker.mjs)</option>
+              <option value="Lifecycle Hooks (SessionStart / PreToolUse / PostToolUse / Compaction / Stop)">Lifecycle Hooks (SessionStart / PreToolUse / PostToolUse / Compaction / Stop)</option>
+              <option value="Onboarding (/ignis-onboarding)">Onboarding (/ignis-onboarding)</option>
+              <option value="Skills &amp; Swarm Workflow (/plan / /swarm / ignis-*)">Skills &amp; Swarm Workflow (/plan / /swarm / ignis-*)</option>
+              <option value="Blind Review Runner (blind-edge-hunter / run-blind-review.mjs)">Blind Review Runner (blind-edge-hunter / run-blind-review.mjs)</option>
+              <option value="Documentation / Wiki">Documentation / Wiki</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="bug-os">Operating System <span class="req">*</span></label>
+            <select id="bug-os" required>
+              <option value="Windows">Windows</option>
+              <option value="macOS">macOS</option>
+              <option value="Linux">Linux</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="bug-versions">Versions (Plugin, Node.js, Antigravity) <span class="req">*</span></label>
+          <input type="text" id="bug-versions" required value="ignis-swarm 1.0.0, Node v20.x, Antigravity" />
+        </div>
+
+        <div class="field">
+          <label for="bug-description">Problem Description &amp; Steps to Reproduce <span class="req">*</span></label>
+          <textarea id="bug-description" rows="4" required placeholder="1. Run '...'&#10;2. Observe '...'"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="bug-expected">Expected vs. Actual Behavior <span class="req">*</span></label>
+          <textarea id="bug-expected" rows="3" required placeholder="Expected: ...&#10;Actual: ..."></textarea>
+        </div>
+
+        <div class="field">
+          <label for="bug-logs">Relevant Logs / Output (Redacted)</label>
+          <textarea id="bug-logs" class="mono" rows="4" placeholder="Paste command output or errors here (redact any API keys or tokens)"></textarea>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="btn-primary">Continue to Submit Issue</button>
+          <button type="button" class="btn-secondary" id="copy-bug">Copy Markdown</button>
+          <span class="status" id="bug-status" role="status"></span>
+        </div>
+      </form>
+
+      <form id="feature-form" class="hidden">
+        <div class="field">
+          <label for="feat-title">Feature Summary <span class="req">*</span></label>
+          <input type="text" id="feat-title" required placeholder="Concise title for the proposed improvement" />
+        </div>
+
+        <div class="field">
+          <label for="feat-problem">Problem or Motivation <span class="req">*</span></label>
+          <textarea id="feat-problem" rows="4" required placeholder="What engineering problem does this solve?"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="feat-proposal">Proposed Solution <span class="req">*</span></label>
+          <textarea id="feat-proposal" rows="4" required placeholder="Describe the minimal, structural solution you have in mind."></textarea>
+        </div>
+
+        <div class="field">
+          <label for="feat-alternatives">Alternatives Considered</label>
+          <textarea id="feat-alternatives" rows="3" placeholder="Optional: other approaches or workarounds you considered"></textarea>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="btn-primary">Continue to Submit Feature Request</button>
+          <button type="button" class="btn-secondary" id="copy-feat">Copy Markdown</button>
+          <span class="status" id="feat-status" role="status"></span>
+        </div>
+      </form>
+    </main>
+
+    <footer>
+      <span>&copy; 2026 Ignis Dev &middot; MIT License</span>
+      <span>
+        <a href="https://github.com/magalz/ignis-swarm/issues">Browse Open Issues</a> &middot;
+        <a href="https://github.com/magalz/ignis-swarm/blob/main/CONTRIBUTING.md">Contributing</a> &middot;
+        <a href="https://github.com/magalz/ignis-swarm/blob/main/SECURITY.md">Security</a>
+      </span>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      const REPO_ISSUES_NEW = "https://github.com/magalz/ignis-swarm/issues/new";
+      const ua = navigator.userAgent || "";
+      const osSelect = document.getElementById("bug-os");
+      if (/Mac/i.test(ua)) osSelect.value = "macOS";
+      else if (/Linux/i.test(ua) && !/Android/i.test(ua)) osSelect.value = "Linux";
+      else osSelect.value = "Windows";
+
+      const tabBug = document.getElementById("tab-bug");
+      const tabFeat = document.getElementById("tab-feature");
+      const bugForm = document.getElementById("bug-form");
+      const featForm = document.getElementById("feature-form");
+
+      function selectTab(mode) {
+        const isBug = mode === "bug";
+        tabBug.classList.toggle("active", isBug);
+        tabBug.setAttribute("aria-selected", String(isBug));
+        tabFeat.classList.toggle("active", !isBug);
+        tabFeat.setAttribute("aria-selected", String(!isBug));
+        bugForm.classList.toggle("hidden", !isBug);
+        featForm.classList.toggle("hidden", isBug);
+      }
+
+      tabBug.addEventListener("click", () => selectTab("bug"));
+      tabFeat.addEventListener("click", () => selectTab("feature"));
+
+      bugForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const params = new URLSearchParams({
+          template: "bug_report.yml",
+          title: "[Bug]: " + document.getElementById("bug-title").value.trim(),
+          component: document.getElementById("bug-component").value,
+          os: document.getElementById("bug-os").value,
+          versions: document.getElementById("bug-versions").value.trim(),
+          description: document.getElementById("bug-description").value.trim(),
+          expected_actual: document.getElementById("bug-expected").value.trim(),
+          logs: document.getElementById("bug-logs").value.trim(),
+        });
+        window.open(REPO_ISSUES_NEW + "?" + params.toString(), "_blank", "noopener");
+      });
+
+      featForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const params = new URLSearchParams({
+          template: "feature_request.yml",
+          title: "[Feature]: " + document.getElementById("feat-title").value.trim(),
+          problem: document.getElementById("feat-problem").value.trim(),
+          proposal: document.getElementById("feat-proposal").value.trim(),
+          alternatives: document.getElementById("feat-alternatives").value.trim(),
+        });
+        window.open(REPO_ISSUES_NEW + "?" + params.toString(), "_blank", "noopener");
+      });
+
+      document.getElementById("copy-bug").addEventListener("click", async () => {
+        const md = [
+          "### Component",
+          document.getElementById("bug-component").value,
+          "",
+          "### Environment",
+          "- OS: " + document.getElementById("bug-os").value,
+          "- Versions: " + document.getElementById("bug-versions").value.trim(),
+          "",
+          "### Steps to Reproduce",
+          document.getElementById("bug-description").value.trim(),
+          "",
+          "### Expected vs. Actual",
+          document.getElementById("bug-expected").value.trim(),
+          "",
+          "### Logs",
+          "```",
+          document.getElementById("bug-logs").value.trim(),
+          "```",
+        ].join("\n");
+        await navigator.clipboard.writeText(md);
+        document.getElementById("bug-status").textContent = "Markdown copied.";
+      });
+
+      document.getElementById("copy-feat").addEventListener("click", async () => {
+        const md = [
+          "### Problem / Motivation",
+          document.getElementById("feat-problem").value.trim(),
+          "",
+          "### Proposed Solution",
+          document.getElementById("feat-proposal").value.trim(),
+          "",
+          "### Alternatives Considered",
+          document.getElementById("feat-alternatives").value.trim(),
+        ].join("\n");
+        await navigator.clipboard.writeText(md);
+        document.getElementById("feat-status").textContent = "Markdown copied.";
+      });
+    })();
+  </script>
+</body>
+</html>
