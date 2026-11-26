@@ -115,7 +115,7 @@ export function cleanupExpiredSpills(spillDir, ttlHours) {
     const fullPath = path.join(spillDir, entry.name);
     try {
       const stat = fs.statSync(fullPath);
-      if (now - stat.mtimeMs >= maxAgeMs) {
+      if (maxAgeMs === 0 || now - stat.mtimeMs >= maxAgeMs) {
         fs.rmSync(fullPath, { force: true });
         removed += 1;
       }
