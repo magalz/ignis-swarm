@@ -1,0 +1,73 @@
+name: Bug / Problem Report
+description: Report a bug, regression, hook issue, or MCP broker error in ignis-swarm
+title: "[Bug]: "
+labels: ["bug", "support-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue in **Ignis Swarm**!
+        For security vulnerabilities, please use [Private Vulnerability Reporting](https://github.com/magalz/ignis-swarm/security/advisories/new) instead of a public issue.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      options:
+        - MCP Broker (ignis-swarm_broker / ignis-broker.mjs)
+        - Lifecycle Hooks (SessionStart / PreToolUse / PostToolUse / Compaction / Stop)
+        - Onboarding (/ignis-onboarding)
+        - Skills & Swarm Workflow (/plan / /swarm / ignis-*)
+        - Blind Review Runner (blind-edge-hunter / run-blind-review.mjs)
+        - Documentation / Wiki
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions (Plugin, Node.js, Antigravity)
+      placeholder: "ignis-swarm 1.0.0, Node v20.x, Antigravity CLI/App"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description & Steps to Reproduce
+      placeholder: |
+        1. Run '...'
+        2. Observe '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs. Actual Behavior
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Command Output (Redacted)
+      description: Paste any error output (remove tokens or personal paths).
+      render: shell
+    validations:
+      required: false

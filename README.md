@@ -11,10 +11,12 @@
 
 <p align="center">
   <a href="https://github.com/magalz/ignis-swarm/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-orange" alt="Release v1.0.0" /></a>
+  <a href="https://codecov.io/gh/magalz/ignis-swarm"><img src="https://codecov.io/gh/magalz/ignis-swarm/graph/badge.svg" alt="Codecov Coverage" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-blue" alt="Zero Dependencies" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License" /></a>
   <a href="https://github.com/magalz/ignis-swarm/wiki"><img src="https://img.shields.io/badge/docs-GitHub%20Wiki-informational" alt="GitHub Wiki" /></a>
+  <a href="https://agyswarm.magalz.space"><img src="https://img.shields.io/badge/support-Report%20Issue-red" alt="Support Portal" /></a>
 </p>
 
 ---
@@ -193,6 +195,8 @@ node --test tests/*.test.mjs
 ```
 
 - Architecture Decision Records: [docs/adr/INDEX.md](docs/adr/INDEX.md)
+- Support & Issue Reporting: [agyswarm.magalz.space](https://agyswarm.magalz.space)
+- Security Policy: [SECURITY.md](SECURITY.md) · Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
 

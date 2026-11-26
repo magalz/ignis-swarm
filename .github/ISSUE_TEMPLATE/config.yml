@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support Portal (agyswarm.magalz.space)
+    url: https://agyswarm.magalz.space
+    about: Guided web form and troubleshooting resources for Ignis Swarm.
+  - name: Report a Security Vulnerability (Private)
+    url: https://github.com/magalz/ignis-swarm/security/advisories/new
+    about: Report security issues confidentially to the maintainer.
+  - name: Documentation & Troubleshooting Wiki
+    url: https://github.com/magalz/ignis-swarm/wiki
+    about: Read installation guides, CLI reference, hooks docs, and FAQ.
