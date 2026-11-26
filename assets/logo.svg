@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="ignis-red" x1="256" y1="56" x2="256" y2="456" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF2A3D"/>
+      <stop offset="100%" stop-color="#D90429"/>
+    </linearGradient>
+  </defs>
+  <rect x="52" y="52" width="408" height="408" rx="88" stroke="url(#ignis-red)" stroke-width="14"/>
+  <path d="M244 402 L198 380 L176 348 L170 296 L198 250 L204 226 L218 250 L214 274 L242 238 L252 198 L244 176 L284 218 L288 258 L278 286 L300 274 L314 246 L318 278 L336 312 L330 354 L302 384 L268 402 L292 346 L278 310 L256 326 L252 296 L222 336 L220 364 Z" stroke="url(#ignis-red)" stroke-width="11" stroke-linejoin="miter" stroke-miterlimit="6"/>
+  <polygon points="212,158 224,172 212,186 200,172" stroke="url(#ignis-red)" stroke-width="7" stroke-linejoin="miter"/>
+  <polygon points="248,144 256,162 238,158" stroke="url(#ignis-red)" stroke-width="7" stroke-linejoin="miter"/>
+  <polygon points="268,128 278,138 268,150" stroke="url(#ignis-red)" stroke-width="7" stroke-linejoin="miter"/>
+  <polygon points="292,166 302,182 292,198 282,182" stroke="url(#ignis-red)" stroke-width="7" stroke-linejoin="miter"/>
+  <polygon points="308,144 318,148 314,158 304,154" stroke="url(#ignis-red)" stroke-width="6.5" stroke-linejoin="miter"/>
+  <polygon points="326,204 332,216 320,226 318,212" stroke="url(#ignis-red)" stroke-width="6.5" stroke-linejoin="miter"/>
+  <polygon points="222,208 230,220 222,232 214,220" stroke="url(#ignis-red)" stroke-width="6.5" stroke-linejoin="miter"/>
+  <polygon points="188,186 196,194 188,202 180,194" stroke="url(#ignis-red)" stroke-width="6.5" stroke-linejoin="miter"/>
+  <polygon points="196,214 206,214 204,224" stroke="url(#ignis-red)" stroke-width="6.5" stroke-linejoin="miter"/>
+  <circle cx="256" cy="108" r="6" fill="#FF2A3D"/>
+</svg>

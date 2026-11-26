@@ -1,0 +1,48 @@
+---
+name: ignis-review
+description: Use for Level 1 per-task @verifier checks and Level 2 slice-end 3-lens final audit using the bundled read-only blind-edge-hunter subagent and an independent @acceptance-auditor.
+---
+
+# Ignis Review (Per-Task & 3-Lens Final Slice Audit)
+
+## Level 1: Per-Task `@verifier`
+Run after each nuclear worker reports completion on the `/swarm` board:
+1. **Scope check:** Verify `git diff --name-only` touches **only** the worker's assigned files.
+2. **BDD + TDD proof:** Confirm Red → Green evidence and that every `Given / When / Then` criterion has a real behavioral test.
+3. **Anti-cheat / Anti-mock:** Flag over-mocked internal units, weak/tautological assertions, skipped tests, or weakened pre-existing assertions.
+4. **Code hygiene:** Confirm zero narrative inline comments and no YAGNI bloat.
+5. **Run verification:** Execute the real test/build command yourself and report `PASS | ISSUES | BLOCKED` + observed coverage %.
+
+---
+
+## Level 2: Slice-End 3-Lens Final Audit
+Run **once** after all waves and `@doc-auditor` (Phase 3) finish. Combines 3 non-overlapping lenses across 2 isolated reviewers:
+
+### Reviewer A — `@blind-edge-hunter` (Blind Hunting + Edge Case Hunting)
+Routes according to the user's `reviewRouting.strategy` in `~/.ignis-broker/onboarding.json` (set via `/ignis-onboarding`):
+
+- **`antigravity_gemini_only`:** Invoke the bundled **`blind-edge-hunter`** subagent directly (`subagent: true`, `mainAgent: false`, `model: pro`, `inheritMcp: false`, read-only tools).
+- **`antigravity_first`:** Invoke the bundled Antigravity native `blind-edge-hunter` subagent first; if native quota is exhausted, run the headless fallback:
+  ```bash
+  node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto --fallback
+  ```
+  (`claude` Opus or `codex` Sol).
+- **`headless_always`:** Run the headless reviewer directly:
+  ```bash
+  node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto
+  ```
+  (`claude` Opus or `codex` Sol), falling back to the native `blind-edge-hunter` subagent **only** if `{ fallbackToNative: true }` is returned.
+
+In all routing modes:
+1. Pass **only** the diff range (`<base-sha>...HEAD`) and repository path — **never** include implementation plan files, issue tracker notes, or author rationales.
+2. Require concrete proof (`file:line` + trace or read-only command output) for every `HIGH`/`MEDIUM` finding and post the verbatim verdict (`PASS | ISSUES`) onto the `/swarm` board.
+
+### Reviewer B — `@acceptance-auditor` (Acceptance + Integration + Audit Compliance)
+Runs as an independent high-reasoning reviewer with full access to the approved plan, connected issue tracker (if any), and `docs/{adr,bdr}/`:
+
+- **Checklist:**
+  1. Every planned task, issue, and checklist item in the slice is genuinely satisfied by code + passing behavioral tests.
+  2. Cross-task integration seams across all tasks hold together end-to-end.
+  3. Every `[ADR]` / `[BDR]` flagged in the plan exists as its own file, is indexed in `INDEX.md`, and (when an issue tracker is connected) is linked/commented on the relevant card(s).
+  4. If UI/web files changed, run `/browser` verification on the live flow.
+  5. In **Critical Mode** (auth, concurrency, persistence/billing), run incremental mutation testing on the diff (`ignis-tdd-bdd`).

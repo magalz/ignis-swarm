@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "broker": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/scripts/ignis-broker.mjs", "mcp-bridge"]
+    }
+  }
+}

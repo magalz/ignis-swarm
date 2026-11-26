@@ -1,0 +1,57 @@
+{
+  "ignis-workspace-context": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./hooks/session-start.mjs",
+        "timeout": 5
+      }
+    ]
+  },
+  "ignis-safety-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./hooks/pre-tool-use.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "ignis-audit-tracker": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./hooks/post-tool-use.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "ignis-stop-gate": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./hooks/stop-gate.mjs",
+        "timeout": 8
+      }
+    ]
+  },
+  "ignis-compaction-watch": {
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ./hooks/compaction-watch.mjs",
+        "timeout": 3
+      }
+    ]
+  }
+}

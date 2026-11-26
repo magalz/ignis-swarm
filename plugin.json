@@ -1,0 +1,30 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "ignis-swarm",
+  "displayName": "Ignis Swarm",
+  "version": "1.0.0",
+  "description": "Contract-driven /swarm workflow with atomic wave planning, BDD+TDD verification, ADR/BDR audit trails, blind diff review, and a resilient MCP broker.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "/plan Plan the next feature slice using ignis-plan (YAGNI gate, frozen contracts, atomic waves, BDD criteria, and ADR/BDR flags)",
+    "/swarm Execute the approved slice plan in waves using ignis-swarm with nuclear briefs, TDD+BDD verification, and blind diff audit",
+    "Investigate and fix this regression using ignis-bug-fix (failing repro first, root-cause trace, minimal fix)"
+  ],
+  "author": {
+    "name": "magalz",
+    "url": "https://github.com/magalz"
+  },
+  "homepage": "https://github.com/magalz/ignis-swarm#readme",
+  "repository": "https://github.com/magalz/ignis-swarm",
+  "license": "MIT",
+  "keywords": [
+    "swarm",
+    "planning",
+    "tdd",
+    "bdd",
+    "code-review",
+    "adr",
+    "mcp-broker",
+    "workflow"
+  ]
+}
