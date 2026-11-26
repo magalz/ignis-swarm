@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run automated tests
+        run: node --test tests/*.test.mjs
+      - name: Check zero inline comments in hooks and scripts
+        shell: bash
+        run: |
+          if grep -rnE '(^|[[:space:]])//' hooks scripts; then
+            echo "Found banned inline comments in hooks/ or scripts/"
+            exit 1
+          fi
