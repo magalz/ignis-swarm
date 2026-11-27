@@ -207,12 +207,15 @@ test("the denial lists only the roots that lack a current record, each with its 
   assert.ok(!denied.reason.includes(command(repo)), denied.reason);
   assert.ok(denied.reason.includes("fallbackToNative: true"), denied.reason);
   assert.ok(!denied.reason.includes(ALREADY_COMPLETED), denied.reason);
+});
 
-  const bothMissing = gate({ cwd: repo, workspacePaths: [repo, other], strategy: "headless_always" });
-  assert.equal(bothMissing.decision, "deny");
-  assert.equal(bothMissing.reason.includes(command(other)), true, bothMissing.reason);
-  assert.equal(bothMissing.reason.includes(command(repo)), true, bothMissing.reason);
-  assert.match(bothMissing.reason, /\(backend=claude, model=opus\)/);
+test("when no root has a current record the denial lists every root and names the backend and model", (t) => {
+  const { gate, repo, other, command } = setup(t);
+  const denied = gate({ cwd: repo, workspacePaths: [repo, other] });
+  assert.equal(denied.decision, "deny");
+  assert.ok(denied.reason.includes(command(repo)), denied.reason);
+  assert.ok(denied.reason.includes(command(other)), denied.reason);
+  assert.match(denied.reason, /\(backend=claude, model=opus\)/);
 });
 
 test("GIT_DIR and GIT_WORK_TREE in the hook environment do not redirect root detection", (t) => {
