@@ -125,7 +125,7 @@ test("sanitizeConversationId keeps dots, trims, falls back to unknown and neutra
   }
 });
 
-test("evaluateCommand returns deny, ask or null in rule order", () => {
+test("evaluateCommand returns deny, force_ask or null in rule order", () => {
   const deny = evaluateCommand("git reset --hard HEAD~1");
   assert.equal(deny.decision, "deny");
   assert.match(deny.reason, /git reset --hard/);
