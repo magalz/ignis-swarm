@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { BROKER_VERSION } from "./config.mjs";
+import { BROKER_VERSION, safeUrl } from "./config.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const STDERR_RING_LIMIT = 200;
@@ -182,8 +182,43 @@ export function killProcessTree(pid) {
   } catch {}
 }
 
+const MIN_SECRET_LENGTH = 4;
+
+function secretCandidates(config) {
+  const found = [];
+  const add = (v) => {
+    if (typeof v === "string" && v.length >= MIN_SECRET_LENGTH) found.push(v);
+  };
+  for (const v of config?.secretValues || []) add(v);
+  for (const v of Object.values(config?.headers || {})) {
+    add(v);
+    const m = /^\s*\S+\s+(\S.*)$/.exec(String(v));
+    if (m) add(m[1].trim());
+  }
+  if (typeof config?.url === "string") {
+    try {
+      const u = new URL(config.url);
+      add(u.username);
+      add(u.password);
+      for (const [, v] of u.searchParams) add(v);
+      for (const pair of u.search.replace(/^\?/, "").split("&")) {
+        const eq = pair.indexOf("=");
+        if (eq >= 0) add(pair.slice(eq + 1));
+      }
+    } catch {}
+  }
+  return [...new Set(found)].sort((a, b) => b.length - a.length);
+}
+
+export function redactSecrets(text, config) {
+  let out = String(text ?? "");
+  for (const secret of secretCandidates(config)) out = out.split(secret).join("***");
+  return out;
+}
+
 export class McpStdioAdapter {
-  constructor({ command, args, env, cwd, startupTimeoutMs, requestTimeoutMs }) {
+  constructor({ command, args, env, cwd, startupTimeoutMs, requestTimeoutMs, redact }) {
+    this.redactConfig = redact || null;
     this.command = command;
     this.args = args || [];
     this.env = env || {};
@@ -195,6 +230,10 @@ export class McpStdioAdapter {
     this.pending = new Map();
     this.alive = false;
     this.stderrRing = [];
+  }
+
+  _err(kind, message) {
+    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
   }
 
   static async start(opts) {
@@ -216,13 +255,13 @@ export class McpStdioAdapter {
         ...resolved.options,
       });
     } catch (err) {
-      throw new BrokerError("startup", `failed spawning \`${this.command}\`: ${err.message}`);
+      throw this._err("startup", `failed spawning \`${this.command}\`: ${err.message}`);
     }
 
     this.alive = true;
 
     this.proc.on("error", (err) => {
-      this._failAll(new BrokerError("startup", `spawn error for \`${this.command}\`: ${err.message}`));
+      this._failAll(this._err("startup", `spawn error for \`${this.command}\`: ${err.message}`));
     });
 
     this.proc.on("exit", (code, signal) => {
@@ -230,7 +269,7 @@ export class McpStdioAdapter {
       const msg = tail
         ? `stdio child exited (code=${code}, signal=${signal}); stderr: ${tail}`
         : `stdio child exited (code=${code}, signal=${signal})`;
-      this._failAll(new BrokerError("transport", msg));
+      this._failAll(this._err("transport", msg));
     });
 
     if (this.proc.stderr) {
@@ -258,7 +297,7 @@ export class McpStdioAdapter {
           clearTimeout(entry.timer);
           if (msg.error) {
             entry.reject(
-              new BrokerError("tool_execution", msg.error.message || "MCP JSON-RPC error")
+              this._err("tool_execution", msg.error.message || "MCP JSON-RPC error")
             );
           } else {
             entry.resolve(msg.result ?? null);
@@ -266,7 +305,7 @@ export class McpStdioAdapter {
         }
       });
       outRl.on("close", () => {
-        this._failAll(new BrokerError("transport", "stdio child stdout closed (EOF)"));
+        this._failAll(this._err("transport", "stdio child stdout closed (EOF)"));
       });
     }
 
@@ -283,7 +322,7 @@ export class McpStdioAdapter {
       this._notify("notifications/initialized", {});
     } catch (err) {
       await this.shutdown();
-      throw new BrokerError("startup", `MCP initialize failed: ${err.message}`);
+      throw this._err("startup", `MCP initialize failed: ${err.message}`);
     }
   }
 
@@ -306,7 +345,7 @@ export class McpStdioAdapter {
   _request(method, params, timeoutMs) {
     return new Promise((resolve, reject) => {
       if (!this.alive || !this.proc?.stdin) {
-        reject(new BrokerError("transport", "stdio child is not alive"));
+        reject(this._err("transport", "stdio child is not alive"));
         return;
       }
       const id = this.nextId++;
@@ -315,7 +354,7 @@ export class McpStdioAdapter {
           if (method !== "initialize") {
             this._notify("notifications/cancelled", { requestId: id, reason: "timeout" });
           }
-          reject(new BrokerError("timeout", `timeout after ${timeoutMs}ms`));
+          reject(this._err("timeout", `timeout after ${timeoutMs}ms`));
         }
       }, timeoutMs);
 
@@ -325,7 +364,7 @@ export class McpStdioAdapter {
         if (err && this.pending.delete(id)) {
           clearTimeout(timer);
           this.alive = false;
-          reject(new BrokerError("transport", `stdin write error: ${err.message}`));
+          reject(this._err("transport", `stdin write error: ${err.message}`));
         }
       });
     });
@@ -371,7 +410,9 @@ export class McpStdioAdapter {
   }
 
   lastStderr() {
-    return this.stderrRing.length > 0 ? this.stderrRing.join("\n") : null;
+    return this.stderrRing.length > 0
+      ? redactSecrets(this.stderrRing.join("\n"), this.redactConfig)
+      : null;
   }
 }
 
@@ -418,7 +459,8 @@ function parseSseJsonRpc(body, expectedId) {
 }
 
 export class McpHttpAdapter {
-  constructor({ url, headers, startupTimeoutMs, requestTimeoutMs }) {
+  constructor({ url, headers, startupTimeoutMs, requestTimeoutMs, redact }) {
+    this.redactConfig = redact || { url, headers };
     this.url = url;
     this.headers = headers || {};
     this.startupTimeoutMs = startupTimeoutMs;
@@ -426,6 +468,10 @@ export class McpHttpAdapter {
     this.sessionId = null;
     this.nextId = 1;
     this.alive = true;
+  }
+
+  _err(kind, message) {
+    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
   }
 
   static async connect(opts) {
@@ -443,7 +489,7 @@ export class McpHttpAdapter {
       await adapter._notify("notifications/initialized", {}, adapter.startupTimeoutMs);
     } catch (err) {
       adapter.alive = false;
-      throw new BrokerError("startup", `HTTP MCP initialize failed: ${err.message}`);
+      throw adapter._err("startup", `HTTP MCP initialize failed: ${err.message}`);
     }
     return adapter;
   }
@@ -487,10 +533,10 @@ export class McpHttpAdapter {
         if (method !== "initialize") {
           void this._notify("notifications/cancelled", { requestId: id, reason: "timeout" }, 5000);
         }
-        throw new BrokerError("timeout", `timeout after ${timeoutMs}ms`);
+        throw this._err("timeout", `timeout after ${timeoutMs}ms`);
       }
       this.alive = false;
-      throw new BrokerError("transport", `HTTP request failed: ${err.message}`);
+      throw this._err("transport", `HTTP request failed: ${err.message}`);
     }
 
     const sid = resp.headers.get("mcp-session-id");
@@ -499,11 +545,11 @@ export class McpHttpAdapter {
     if (resp.status === 404 || resp.status >= 500) {
       this.alive = false;
       const body = await resp.text().catch(() => "");
-      throw new BrokerError("transport", `HTTP ${resp.status} from ${this.url}: ${body.slice(0, 240)}`);
+      throw this._err("transport", `HTTP ${resp.status} from ${safeUrl(this.url)}: ${body.slice(0, 240)}`);
     }
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      throw new BrokerError("protocol", `HTTP ${resp.status} from ${this.url}: ${body.slice(0, 240)}`);
+      throw this._err("protocol", `HTTP ${resp.status} from ${safeUrl(this.url)}: ${body.slice(0, 240)}`);
     }
 
     const ct = (resp.headers.get("content-type") || "").toLowerCase();
@@ -511,7 +557,7 @@ export class McpHttpAdapter {
     const msg = ct.includes("text/event-stream") ? parseSseJsonRpc(text, id) : JSON.parse(text);
 
     if (msg.error) {
-      throw new BrokerError("tool_execution", msg.error.message || "MCP HTTP JSON-RPC error");
+      throw this._err("tool_execution", msg.error.message || "MCP HTTP JSON-RPC error");
     }
     return msg.result ?? null;
   }
