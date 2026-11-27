@@ -164,16 +164,7 @@ export class BrokerError extends Error {
 }
 
 const KILL_GRACE_MS = 1500;
-
-function pidAlive(pid) {
-  for (const target of [-pid, pid]) {
-    try {
-      process.kill(target, 0);
-      return true;
-    } catch {}
-  }
-  return false;
-}
+const KILL_TIMEOUT_MS = 4000;
 
 function signalTree(pid, signal) {
   try {
@@ -196,6 +187,7 @@ export function killProcessTree(pid) {
         const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
           stdio: "ignore",
           windowsHide: true,
+          timeout: KILL_TIMEOUT_MS,
         });
         killer.on("error", () => resolve());
         killer.on("exit", () => resolve());
@@ -208,7 +200,7 @@ export function killProcessTree(pid) {
   return new Promise((resolve) => {
     const deadline = Date.now() + KILL_GRACE_MS;
     const poll = setInterval(() => {
-      if (!pidAlive(pid)) {
+      if (!signalTree(pid, 0)) {
         clearInterval(poll);
         resolve();
       } else if (Date.now() >= deadline) {

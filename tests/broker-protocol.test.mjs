@@ -6,6 +6,10 @@ import { spawn } from "node:child_process";
 import { McpStdioAdapter, killProcessTree } from "../scripts/broker/adapters.mjs";
 import { mkTemp } from "./helpers.mjs";
 
+const brokerHome = mkTemp("ignis-proto-home-");
+process.env.IGNIS_BROKER_HOME = brokerHome;
+process.env.IGNIS_BROKER_DATA = brokerHome;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function writeServer(dir, name, mode) {
@@ -27,6 +31,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (mode === "exit-after-init") setTimeout(() => process.exit(0), 50);
   } else if (msg.method === "tools/call") {
     callId = msg.id;
+    if (mode === "hang") return;
     if (mode === "ping") send({ id: callId, method: "ping" });
     else if (mode === "sampling") send({ id: 900, method: "sampling/createMessage", params: {} });
     else if (mode === "notify") send({ method: "notifications/message", params: {} });
@@ -118,6 +123,27 @@ test("a child that exits after initialize yields a transport error and no uncaug
   }
 });
 
+test("a stdin error rejects pending calls as transport and is not uncaught", async () => {
+  const dir = mkTemp("ignis-proto-");
+  const { script } = writeServer(dir, "hang", "hang");
+  const uncaught = [];
+  const spy = (err) => uncaught.push(err);
+  process.on("uncaughtException", spy);
+  const adapter = await startAdapter(script);
+  try {
+    const call = adapter.callTool("t", {});
+    const rejected = assert.rejects(call, (err) => err.kind === "transport");
+    await sleep(100);
+    adapter.proc.stdin.destroy(Object.assign(new Error("EPIPE"), { code: "EPIPE" }));
+    await rejected;
+    await sleep(100);
+    assert.deepEqual(uncaught, []);
+  } finally {
+    process.removeListener("uncaughtException", spy);
+    await adapter.shutdown();
+  }
+});
+
 test("killProcessTree is non-blocking and kills a child that ignores SIGTERM", async () => {
   const child = spawn(
     process.execPath,
@@ -142,12 +168,12 @@ test("killProcessTree is non-blocking and kills a child that ignores SIGTERM", a
     }, 20);
     const pending = killProcessTree(child.pid);
     assert.ok(pending && typeof pending.then === "function", "returns a promise");
-    await pending;
+    const ticksAtSettle = await pending.then(() => ticks);
+    assert.ok(ticksAtSettle > 0, "event loop ticked while the kill was in progress");
     const deadline = Date.now() + 5000;
     while (!exited && Date.now() < deadline) await sleep(25);
     clearInterval(iv);
     assert.ok(exited, "child is dead");
-    assert.ok(ticks > 0, "event loop kept ticking");
   } finally {
     try {
       child.kill("SIGKILL");
