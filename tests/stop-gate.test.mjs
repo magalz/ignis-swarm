@@ -200,3 +200,23 @@ test("stop-gate checks the ADR INDEX in cwd when cwd is not in a git repository"
   assert.equal(out.decision, "continue");
   assert.match(out.reason, /Missing docs\/bdr\/INDEX\.md/);
 });
+
+test("stop-gate asks for a manual review when the working diff exceeds 64 MB", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  const chunk = `${"0123456789abcdef".repeat(8)}\n`.repeat(8192);
+  const fd = fs.openSync(path.join(repo, "huge.dat"), "w");
+  try {
+    for (let i = 0; i < 66; i++) fs.writeSync(fd, chunk);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const { out } = runStopGate(box, repo);
+  assert.deepEqual(out, {
+    decision: "continue",
+    reason:
+      "ignis-swarm stop-gate: the working diff is larger than 64 MB and could not be scanned for test shortcuts; review it manually.",
+  });
+  assert.deepEqual(runStopGate(box, repo, { continuationActive: true }).out, {});
+});
