@@ -46,6 +46,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (mode === "ping") send({ id: callId, method: "ping" });
     else if (mode === "sampling") send({ id: 900, method: "sampling/createMessage", params: {} });
     else if (mode === "notify") send({ method: "notifications/message", params: {} });
+    else if (mode === "badmethod") {
+      send({ id: callId, method: 42, result: { content: [{ type: "text", text: "fake" }] } });
+      send({ id: callId, method: null, result: { content: [{ type: "text", text: "fake" }] } });
+      send({ id: callId, result: { content: [{ type: "text", text: "real" }] } });
+    }
   } else if (msg.id === callId && callId !== null && !msg.method) {
     fs.writeFileSync(record, JSON.stringify(msg));
     send({ id: callId, result: { content: [{ type: "text", text: "real" }] } });
@@ -107,6 +112,18 @@ test("an unknown server request gets -32601 and the real result still arrives", 
 test("a server notification is ignored", async () => {
   const dir = mkTemp("ignis-proto-");
   const { script } = writeServer(dir, "notify", "notify");
+  const adapter = await startAdapter(script);
+  try {
+    const res = await adapter.callTool("t", {});
+    assert.equal(res.content[0]?.text, "real");
+  } finally {
+    await adapter.shutdown();
+  }
+});
+
+test("a message with a non-string method and the call's id never settles the call", async () => {
+  const dir = mkTemp("ignis-proto-");
+  const { script } = writeServer(dir, "badmethod", "badmethod");
   const adapter = await startAdapter(script);
   try {
     const res = await adapter.callTool("t", {});
