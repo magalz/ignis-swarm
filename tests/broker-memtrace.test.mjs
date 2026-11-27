@@ -85,8 +85,21 @@ describe("memtrace CLI fallback", () => {
   });
 
   test("a value that looks like a flag is never passed to the CLI", async () => {
-    for (const value of ["--help", "--repo=/x", "-l", "  --limit"]) {
+    for (const value of ["--help", "--repo=/x", "-l", "  --limit", "-", "\t-x", " -x"]) {
       assert.equal(await run("callers", { symbol: value }), null);
+    }
+    assert.equal(fs.existsSync(argvFile), false);
+  });
+
+  test("a value that cmd.exe could expand or unquote is never passed to the CLI", async () => {
+    const values = [
+      "%COMPUTERNAME:~6,1%%COMPUTERNAME:~6,1%help",
+      "%USERNAME%",
+      "a!PATH!b",
+      "x y\\",
+    ];
+    for (const value of values) {
+      assert.equal(await run("find", { query: value }), null);
     }
     assert.equal(fs.existsSync(argvFile), false);
   });
