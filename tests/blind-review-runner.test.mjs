@@ -71,9 +71,23 @@ const mcpConfig =
     ? null
     : { path: configPath, exists: fs.existsSync(configPath), content: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : null };
 const payload = { argv, stdin, mcpConfig };
-process.stdout.write(JSON.stringify(payload));
+process.stdout.write(JSON.stringify(payload) + "\\nStatus: PASS\\n");
 `;
   fs.writeFileSync(shimPath, code.trimStart(), "utf8");
+  return shimPath;
+}
+
+function captured(output) {
+  return JSON.parse(output.split("\n")[0]);
+}
+
+function createOutputShim(dir, name, text) {
+  const shimPath = path.join(dir, `${name}.mjs`);
+  fs.writeFileSync(
+    shimPath,
+    `import fs from "node:fs";\nfs.readFileSync(0, "utf8");\nprocess.stdout.write(${JSON.stringify(text)});\n`,
+    "utf8"
+  );
   return shimPath;
 }
 
@@ -150,11 +164,11 @@ test("antigravity_first returns native without --fallback and invokes claude shi
     assert.equal(secondJson.model, "opus");
     assert.ok(secondJson.diffBytes > 0);
 
-    const captured = JSON.parse(secondJson.output);
-    assert.equal(captured.argv[0], "-p");
-    assert.ok(captured.argv[1].length > 0);
-    const configAt = captured.argv.indexOf("--mcp-config");
-    assert.deepEqual(captured.argv.slice(2, configAt), [
+    const seen = captured(secondJson.output);
+    assert.equal(seen.argv[0], "-p");
+    assert.ok(seen.argv[1].length > 0);
+    const configAt = seen.argv.indexOf("--mcp-config");
+    assert.deepEqual(seen.argv.slice(2, configAt), [
       "--model",
       "opus",
       "--effort",
@@ -167,12 +181,12 @@ test("antigravity_first returns native without --fallback and invokes claude shi
       "Glob",
       "--strict-mcp-config",
     ]);
-    assert.equal(path.basename(captured.argv[configAt + 1]), "mcp-config.json");
-    assert.deepEqual(captured.argv.slice(configAt + 2), ["--no-session-persistence"]);
-    assert.equal(captured.mcpConfig.exists, true);
-    assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
-    assert.match(captured.stdin, /export const value = 2;/);
-    assert.match(captured.stdin, /diff --git a\/app\.js b\/app\.js/);
+    assert.equal(path.basename(seen.argv[configAt + 1]), "mcp-config.json");
+    assert.deepEqual(seen.argv.slice(configAt + 2), ["--no-session-persistence"]);
+    assert.equal(seen.mcpConfig.exists, true);
+    assert.equal(seen.mcpConfig.content, '{"mcpServers":{}}');
+    assert.match(seen.stdin, /export const value = 2;/);
+    assert.match(seen.stdin, /diff --git a\/app\.js b\/app\.js/);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
     fs.rmSync(shimDir, { recursive: true, force: true });
@@ -207,7 +221,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
     assert.equal(withModelJson.backend, "codex");
     assert.equal(withModelJson.model, "gpt-6.2-sol");
 
-    const capturedWithModel = JSON.parse(withModelJson.output);
+    const capturedWithModel = captured(withModelJson.output);
     assert.deepEqual(capturedWithModel.argv, [
       "-m",
       "gpt-6.2-sol",
@@ -241,7 +255,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
     assert.equal(withoutModelJson.backend, "codex");
     assert.equal(withoutModelJson.model, null);
 
-    const capturedWithoutModel = JSON.parse(withoutModelJson.output);
+    const capturedWithoutModel = captured(withoutModelJson.output);
     assert.deepEqual(capturedWithoutModel.argv, [
       "exec",
       "--sandbox",
@@ -358,13 +372,13 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
       assert.equal(out.useNative, false);
-      const captured = JSON.parse(out.output);
-      assert.equal(captured.argv[0], "-p");
-      assert.ok(!captured.argv[1].includes("\n"));
-      assert.ok(captured.argv.includes("--strict-mcp-config"));
-      assert.ok(captured.argv.includes("--no-session-persistence"));
-      assert.equal(captured.mcpConfig.exists, true);
-      assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
+      const seen = captured(out.output);
+      assert.equal(seen.argv[0], "-p");
+      assert.ok(!seen.argv[1].includes("\n"));
+      assert.ok(seen.argv.includes("--strict-mcp-config"));
+      assert.ok(seen.argv.includes("--no-session-persistence"));
+      assert.equal(seen.mcpConfig.exists, true);
+      assert.equal(seen.mcpConfig.content, '{"mcpServers":{}}');
     }
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -579,7 +593,7 @@ test("a state that cannot be written is reported on stderr in non-JSON mode afte
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.match(JSON.parse(res.stdout).stdin, /export const value = 2;/);
+    assert.match(captured(res.stdout).stdin, /export const value = 2;/);
     assert.ok(
       res.stderr.includes(`review state could not be recorded at ${reviewStatePath(dataDir, repo)}`),
       `stderr was: ${res.stderr}`
@@ -630,12 +644,12 @@ test("claude receives an existing MCP config file during the run and its temp di
     const echo = createEchoShim(shimDir, "echo-config");
     const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: echo });
     assert.equal(res.status, 0, res.stderr);
-    const captured = JSON.parse(JSON.parse(res.stdout).output);
-    assert.ok(captured.argv.includes("--strict-mcp-config"));
-    assert.ok(path.isAbsolute(captured.mcpConfig.path));
-    assert.equal(captured.mcpConfig.exists, true);
-    assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
-    assert.equal(fs.existsSync(path.dirname(captured.mcpConfig.path)), false);
+    const seen = captured(JSON.parse(res.stdout).output);
+    assert.ok(seen.argv.includes("--strict-mcp-config"));
+    assert.ok(path.isAbsolute(seen.mcpConfig.path));
+    assert.equal(seen.mcpConfig.exists, true);
+    assert.equal(seen.mcpConfig.content, '{"mcpServers":{}}');
+    assert.equal(fs.existsSync(path.dirname(seen.mcpConfig.path)), false);
 
     const recorder = path.join(shimDir, "record-then-fail.mjs");
     const recorded = path.join(shimDir, "recorded-config-path.txt");
@@ -742,13 +756,14 @@ test(
     withFixture(({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, headlessRouting());
       const cmdPath = path.join(shimDir, "claude-plain.cmd");
-      fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
+      fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\necho Status: PASS\r\n", "utf8");
       const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
       assert.equal(out.useNative, false);
       assert.equal(out.fallbackToNative, false);
-      assert.equal(out.output.trim(), "review");
+      assert.equal(out.verdict, "PASS");
+      assert.match(out.output, /^review\r?\nStatus: PASS\r?\n?$/);
     });
   }
 );
@@ -808,8 +823,7 @@ test("uncommitted working-tree edits are included when --base HEAD is passed", (
     assert.equal(out.useNative, false);
     assert.equal(out.fallbackToNative, false);
     assert.ok(out.diffBytes > 0, `expected non-empty diff, got diffBytes=${out.diffBytes}`);
-    const captured = JSON.parse(out.output);
-    assert.match(captured.stdin, /export const value = 3;/);
+    assert.match(captured(out.output).stdin, /export const value = 3;/);
   });
 });
 
@@ -943,3 +957,124 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
   });
 });
 
+
+const NO_VERDICT_EMPTY = "headless reviewer returned no verdict (empty output)";
+const NO_VERDICT_NO_STATUS = "headless reviewer returned no verdict (no Status line)";
+
+function runReviewer(fixture, text, extraArgs = []) {
+  const { dataDir, shimDir, repo } = fixture;
+  writeOnboarding(dataDir, headlessRouting());
+  const shim = createOutputShim(shimDir, `out-${fs.readdirSync(shimDir).length}`, text);
+  const res = runCli([...runArgs(repo), ...extraArgs], { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: shim });
+  assert.equal(res.status, 0, res.stderr);
+  return res;
+}
+
+function assertNoVerdictFallback(fixture, res, reason) {
+  const out = JSON.parse(res.stdout);
+  assert.equal(out.useNative, true);
+  assert.equal(out.fallbackToNative, true);
+  assert.equal(out.reason, reason);
+  assert.ok(!("verdict" in out));
+  assert.equal(assertState(fixture.dataDir, fixture.repo, "fallback").reason, reason);
+  assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), true);
+}
+
+test("a headless run that exits 0 with empty or whitespace-only output records a fallback state", () => {
+  withFixture((fixture) => {
+    for (const text of ["", "  \n\t\n"]) {
+      assertNoVerdictFallback(fixture, runReviewer(fixture, text), NO_VERDICT_EMPTY);
+    }
+  });
+});
+
+test("a headless run whose output has no Status line records a fallback state", () => {
+  withFixture((fixture) => {
+    const texts = [
+      "app.js line 1 looks fine to me.\n",
+      "Overall Status: PASS\n",
+      "Status: PASSED\n",
+      "Status: unknown\n",
+      "The reviewer wrote Status: ISSUES in the middle of a sentence.\n",
+    ];
+    for (const text of texts) {
+      assertNoVerdictFallback(fixture, runReviewer(fixture, text), NO_VERDICT_NO_STATUS);
+    }
+  });
+});
+
+test("Status: PASS is a success with verdict PASS, the reviewed state and the reviewer output printed", () => {
+  withFixture((fixture) => {
+    const text = "No HIGH or MEDIUM issues found.\nStatus: PASS\n";
+    const res = runReviewer(fixture, text);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, false);
+    assert.equal(out.fallbackToNative, false);
+    assert.equal(out.verdict, "PASS");
+    assert.equal(out.output, text);
+    assert.equal(assertState(fixture.dataDir, fixture.repo, "reviewed").reason, null);
+    assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), false);
+
+    const plain = runCli(
+      ["--base", "base-ref", "--cwd", fixture.repo, "--backend", "auto"],
+      {
+        IGNIS_BROKER_DATA: fixture.dataDir,
+        IGNIS_CLAUDE_CMD: path.join(fixture.shimDir, `out-${fs.readdirSync(fixture.shimDir).length - 1}.mjs`),
+      }
+    );
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(plain.stdout, text);
+  });
+});
+
+test("the verdict is case-insensitive, accepts markdown decoration and is normalised to upper case", () => {
+  withFixture((fixture) => {
+    const cases = [
+      ["Found a race condition in app.js.\n\n**Status: issues**\n", "ISSUES"],
+      ["  `Status: pass`\n", "PASS"],
+      ["*Status : Issues*", "ISSUES"],
+      ["STATUS: PASS", "PASS"],
+    ];
+    for (const [text, verdict] of cases) {
+      const out = JSON.parse(runReviewer(fixture, text).stdout);
+      assert.equal(out.useNative, false, text);
+      assert.equal(out.fallbackToNative, false, text);
+      assert.equal(out.verdict, verdict, text);
+    }
+    assertState(fixture.dataDir, fixture.repo, "reviewed");
+    assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), false);
+  });
+});
+
+test("when the output holds two Status lines the last one wins", () => {
+  withFixture((fixture) => {
+    const issuesLast = JSON.parse(runReviewer(fixture, "Status: PASS\nOn reflection, one bug.\nStatus: ISSUES\n").stdout);
+    assert.equal(issuesLast.verdict, "ISSUES");
+    const passLast = JSON.parse(runReviewer(fixture, "Status: ISSUES\nRetracted.\nStatus: PASS\n").stdout);
+    assert.equal(passLast.verdict, "PASS");
+  });
+});
+
+test("the review prompt passed to claude and to codex carries the Status instruction", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const claude = JSON.parse(
+      runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-echo") }).stdout
+    );
+    assert.equal(claude.verdict, "PASS");
+    const prompt = captured(claude.output).argv[1];
+    assert.match(prompt, /Status: PASS/);
+    assert.match(prompt, /Status: ISSUES/);
+    assert.match(prompt, /final line/);
+    assert.match(prompt, /HIGH or MEDIUM/);
+    assert.ok(!prompt.includes("\n"));
+    assert.ok(!prompt.includes('"'));
+
+    writeOnboarding(dataDir, { ...headlessRouting(), headlessBackend: "codex" });
+    const codex = JSON.parse(
+      runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: createEchoShim(shimDir, "codex-echo") }).stdout
+    );
+    assert.equal(codex.verdict, "PASS");
+    assert.match(captured(codex.output).stdin, /Status: PASS[\s\S]*Status: ISSUES/);
+  });
+});
