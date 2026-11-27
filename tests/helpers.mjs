@@ -100,14 +100,10 @@ function stopLeftoverDaemons(dirs, env) {
 }
 
 function removeTree(root) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-      return;
-    } catch (err) {
-      if (attempt === 2) process.emitWarning(`could not remove ${root}: ${err.message}`);
-      else sleepSync(1000);
-    }
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 });
+  } catch (err) {
+    process.emitWarning(`could not remove ${root}: ${err.message}`);
   }
 }
 

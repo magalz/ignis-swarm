@@ -10,7 +10,6 @@ import { fileURLToPath } from "node:url";
 import { postToDaemon } from "../scripts/broker/bridge.mjs";
 import { isolatedEnv, waitUntil } from "./helpers.mjs";
 
-const WAIT_MS = 30_000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
 
@@ -201,22 +200,11 @@ function startBridge(t, env) {
     bridge.kill();
   });
   const lines = [];
-  const waiters = [];
   const rl = readline.createInterface({ input: bridge.stdout });
   rl.on("line", (line) => {
     lines.push(JSON.parse(line));
-    for (const w of waiters.splice(0)) w();
   });
-  const waitFor = async (n) => {
-    const deadline = Date.now() + WAIT_MS;
-    while (lines.length < n) {
-      if (Date.now() > deadline) throw new Error(`only ${lines.length} of ${n} bridge replies arrived`);
-      await new Promise((resolve) => {
-        waiters.push(resolve);
-        setTimeout(resolve, 250);
-      });
-    }
-  };
+  const waitFor = (n) => waitUntil(`${n} bridge replies`, () => lines.length >= n);
   const exited = new Promise((resolve) => bridge.on("close", (code) => resolve(code)));
   return { bridge, lines, waitFor, exited };
 }
