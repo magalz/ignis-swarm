@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readTrustedLocalConfig } from "./trust.mjs";
 
 export const BROKER_VERSION = "1.0.1";
 
@@ -161,7 +162,7 @@ export function resolveRepoRoot(cwd) {
   }
 }
 
-export function resolveConfig(home, cwd) {
+export function resolveConfig(home, cwd, dataDir = brokerDataDir(home)) {
   const globalPath = path.join(home, "servers.json");
   const dotenv = loadDotenv(home);
 
@@ -185,21 +186,26 @@ export function resolveConfig(home, cwd) {
   let localPath = null;
   let localConfigError = null;
   let localFile = null;
+  let localTrusted = false;
 
   if (cwd) {
     const found = discoverLocalConfig(cwd);
     if (found) {
       localPath = found;
-      try {
-        const raw = fs.readFileSync(found, "utf8");
-        const parsed = JSON.parse(raw);
+      const read = readTrustedLocalConfig(dataDir, found);
+      if (read.error) {
+        localConfigError = `invalid local config ${found}: ${read.error.message}`;
+      } else if (read.status !== "trusted") {
+        const dir = path.dirname(path.dirname(found));
+        const why = read.status === "changed" ? "changed since it was trusted" : "not trusted yet";
+        localConfigError = `untrusted local config ${found}: ${why}; review it, then run: ignis-broker trust --cwd "${dir}"`;
+      } else {
+        localTrusted = true;
         localFile = {
-          version: parsed.version ?? 1,
-          defaults: parsed.defaults ?? {},
-          servers: parsed.servers ?? {},
+          version: read.parsed.version ?? 1,
+          defaults: read.parsed.defaults ?? {},
+          servers: read.parsed.servers ?? {},
         };
-      } catch (err) {
-        localConfigError = `invalid local config ${found}: ${err.message}`;
       }
     }
   }
@@ -255,6 +261,7 @@ export function resolveConfig(home, cwd) {
     localPath,
     globalPath,
     localConfigError,
+    localTrusted,
   };
 }
 

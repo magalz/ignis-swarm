@@ -37,7 +37,7 @@ function pause(ms) {
   Atomics.wait(SLEEP_VIEW, 0, 0, ms);
 }
 
-function renameWithRetry(from, to) {
+export function renameWithRetry(from, to) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       fs.renameSync(from, to);

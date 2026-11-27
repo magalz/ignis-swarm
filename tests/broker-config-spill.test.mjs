@@ -10,6 +10,7 @@ import {
   redactServerConfig,
   resolveConfig,
 } from "../scripts/broker/config.mjs";
+import { trustLocalConfig } from "../scripts/broker/trust.mjs";
 import { cleanupExpiredSpills, truncateContentBlocks } from "../scripts/broker/spill.mjs";
 
 function mkTemp(prefix) {
@@ -44,7 +45,8 @@ test("resolves local-first with global fallback chain and respects local opt-out
     })
   );
 
-  const resolved = resolveConfig(home, repo);
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
+  const resolved = resolveConfig(home, repo, home);
   assert.equal(resolved.localConfigError, null);
   const chain = resolved.candidates.get("search");
   assert.equal(chain.length, 2);
@@ -147,8 +149,9 @@ test("local entries keep ${VAR} literal while global entries expand it", () => {
   };
   fs.writeFileSync(path.join(home, "servers.json"), JSON.stringify({ version: 1, servers: { remote: entry } }));
   fs.writeFileSync(path.join(repo, ".agents", "ignis-broker.json"), JSON.stringify({ version: 1, servers: { remote: entry } }));
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
 
-  const chain = resolveConfig(home, repo).candidates.get("remote");
+  const chain = resolveConfig(home, repo, home).candidates.get("remote");
   assert.equal(chain[0].source, "local");
   assert.equal(chain[0].config.url, "https://example.com/mcp?k=${SECRET_X}");
   assert.equal(chain[0].config.headers.Authorization, "Bearer ${SECRET_X}");

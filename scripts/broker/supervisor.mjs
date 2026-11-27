@@ -258,7 +258,7 @@ export class Supervisor {
   }
 
   async list(req = {}) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     if (!req.server) {
       const poolSnap = await this._poolSnapshot();
       const servers = [];
@@ -306,7 +306,7 @@ export class Supervisor {
   }
 
   async describe(req) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const chain = resolved.candidates.get(req.server);
     if (!chain) {
       throw new BrokerError("server_not_found", `server not found: ${req.server}`);
@@ -326,7 +326,7 @@ export class Supervisor {
   }
 
   async call(req) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const chain = resolved.candidates.get(req.server);
     if (!chain) {
       throw new BrokerError("server_not_found", `server not found: ${req.server}`);
@@ -465,7 +465,7 @@ export class Supervisor {
   }
 
   async status(req = {}) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const poolSnap = await this._poolSnapshot();
     const servers = [];
 
@@ -515,7 +515,7 @@ export class Supervisor {
 
   async maintenanceSweep() {
     try {
-      const resolved = resolveConfig(this.brokerHome, null);
+      const resolved = resolveConfig(this.brokerHome, null, this.dataDir);
       const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
       const now = Date.now();
       for (const [key, entry] of [...this.pool.entries()]) {

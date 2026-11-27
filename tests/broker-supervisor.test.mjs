@@ -7,6 +7,7 @@ import path from "node:path";
 import { McpHttpAdapter, tryCliFallback } from "../scripts/broker/adapters.mjs";
 import { isDaemonVersionAcceptable } from "../scripts/broker/lifecycle.mjs";
 import { Supervisor } from "../scripts/broker/supervisor.mjs";
+import { trustLocalConfig } from "../scripts/broker/trust.mjs";
 
 function mkTemp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -72,6 +73,7 @@ test("supervisor retries after crash and fails over local to global with metadat
     })
   );
 
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
   const sup = new Supervisor(home, home, 0);
   const res = await sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo });
 
@@ -631,6 +633,7 @@ test("supervisor sends a local http entry's ${VAR} headers and url literally, ne
       },
     })
   );
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
 
   const sup = new Supervisor(home, home, 0);
   try {

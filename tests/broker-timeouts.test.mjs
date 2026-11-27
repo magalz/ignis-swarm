@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { Supervisor } from "../scripts/broker/supervisor.mjs";
+import { trustLocalConfig } from "../scripts/broker/trust.mjs";
 import { mkTemp } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -116,6 +117,7 @@ test("a timeout does not fail over from local to global", async (t) => {
     path.join(repo, ".agents", "ignis-broker.json"),
     JSON.stringify({ version: 1, servers: { demo: entry(local.script) } })
   );
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
   await assert.rejects(
     sup.call({ server: "demo", tool: "slow", arguments: {}, cwd: repo }),
     (e) => e.kind === "timeout"
