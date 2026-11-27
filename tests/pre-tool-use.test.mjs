@@ -191,6 +191,12 @@ const ROWS = [
   ['Write-Host "a`t"; git reset --hard', "deny", RESET_HARD],
   ['Write-Host "done`n"', null],
   ['Write-Host "a`n"; Write-Host "git reset --hard"', null],
+  ['Write-Host `"x; git reset --hard', "deny", RESET_HARD],
+  ["Write-Host `'x; git push -f origin main", "deny", FORCE_MAIN],
+  ['Write-Host "a`"b"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host `"a`"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host `"git reset --hard`"', null],
+  ['Write-Host `"x`"; git status', null],
   ['cd "C:\\Users\\x"', null],
   ['& "C:\\Program Files\\Git\\cmd\\git.exe" status', null],
 
