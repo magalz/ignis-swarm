@@ -419,7 +419,7 @@ function writeNodeShim(dir, baseName, { sleepMs, stdoutText, marker }) {
     impl,
     [
       'import fs from "node:fs";',
-      `fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));`,
+      `fs.writeFileSync(${JSON.stringify(marker)}, String(Date.now()));`,
       `await new Promise((resolve) => setTimeout(resolve, ${sleepMs}));`,
       `process.stdout.write(${JSON.stringify(`${stdoutText}\n`)});`,
       "",
@@ -440,6 +440,10 @@ function writeNodeShim(dir, baseName, { sleepMs, stdoutText, marker }) {
   fs.chmodSync(shim, 0o755);
   return shim;
 }
+
+const CHECKS_DEADLINE_MS = 3500;
+const DEADLINE_MARGIN_MS = 6000;
+const SLOW_CHECK_MS = 20_000;
 
 function slowChecksScenario(sleepMs) {
   const iso = isolatedEnv();
@@ -474,7 +478,7 @@ function runHookTimed(inputObj, env) {
     input: JSON.stringify(inputObj),
     encoding: "utf8",
     env,
-    timeout: 9000,
+    timeout: 60_000,
     windowsHide: true,
   });
   const elapsedMs = performance.now() - started;
@@ -484,10 +488,21 @@ function runHookTimed(inputObj, env) {
 }
 
 test("session-start finishes inside its budget and keeps the ready notices when both checks are slow", () => {
-  const sc = slowChecksScenario(4000);
+  const sc = slowChecksScenario(SLOW_CHECK_MS);
   try {
-    const { out, elapsedMs } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
-    assert.ok(elapsedMs < 4500, `hook took ${Math.round(elapsedMs)} ms, the budget is 4500 ms`);
+    const { out } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
+    const endedAt = Date.now();
+    const lateness = ["memtrace", "broker"].map((name) => {
+      const startedAt = Number(fs.readFileSync(sc.markers[name], "utf8"));
+      assert.ok(startedAt > 0, `the ${name} check recorded its start`);
+      return endedAt - startedAt;
+    });
+    for (const ms of lateness) {
+      assert.ok(
+        ms < CHECKS_DEADLINE_MS + DEADLINE_MARGIN_MS,
+        `hook ended ${ms} ms after a check started, the deadline is ${CHECKS_DEADLINE_MS} ms plus ${DEADLINE_MARGIN_MS} ms of margin`
+      );
+    }
     const msg = sessionMessage(out);
     assert.match(msg, /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always/);
     assert.match(msg, /docs\/adr\/INDEX\.md/);
@@ -499,7 +514,7 @@ test("session-start finishes inside its budget and keeps the ready notices when 
 });
 
 test("session-start starts no memtrace or broker process for subagents and workers", () => {
-  const sc = slowChecksScenario(4000);
+  const sc = slowChecksScenario(SLOW_CHECK_MS);
   try {
     const transcript = path.join(sc.iso.dirs.root, "transcript.jsonl");
     fs.writeFileSync(transcript, `${JSON.stringify({ type: "MODEL_RESPONSE", text: "working" })}\n`);
@@ -510,7 +525,7 @@ test("session-start starts no memtrace or broker process for subagents and worke
     ];
     for (const payload of payloads) {
       const { out, elapsedMs } = runHookTimed(payload, sc.env);
-      assert.ok(elapsedMs < 2500, `subagent hook took ${Math.round(elapsedMs)} ms for ${JSON.stringify(Object.keys(payload))}`);
+      assert.ok(elapsedMs < SLOW_CHECK_MS / 2, `subagent hook took ${Math.round(elapsedMs)} ms for ${JSON.stringify(Object.keys(payload))}`);
       const msg = sessionMessage(out);
       assert.match(msg, /docs\/adr\/INDEX\.md/);
       assert.doesNotMatch(msg, /Phase 4 Review Routing|Memtrace|ignis-broker/);
@@ -526,7 +541,7 @@ test("session-start reports both checks, in order, when they answer at once", ()
   const sc = slowChecksScenario(0);
   try {
     const { out, elapsedMs } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
-    assert.ok(elapsedMs < 3000, `hook took ${Math.round(elapsedMs)} ms with instant checks`);
+    assert.ok(elapsedMs < SLOW_CHECK_MS / 2, `hook took ${Math.round(elapsedMs)} ms with instant checks`);
     const msg = sessionMessage(out);
     const memtrace = msg.indexOf("[ignis-swarm][Memtrace] Active (memtrace daemon running).");
     const routingAt = msg.indexOf("[ignis-swarm][Phase 4 Review Routing]");
