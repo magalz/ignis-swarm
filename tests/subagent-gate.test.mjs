@@ -75,9 +75,11 @@ test("a fresh fallback record for the repository allows blind-edge-hunter, also 
   assert.equal(gate({ cwd: sub }).decision, "allow");
 });
 
-test("a record made for a subdirectory is the repository record, and another repository stays denied", (t) => {
+test("a record belongs to one repository root only", (t) => {
   const { mark, gate, repo, other, sub } = setup(t);
   mark(sub, "fallback");
+  assert.equal(gate({ cwd: repo }).decision, "deny");
+  mark(repo, "fallback");
   assert.equal(gate({ cwd: repo }).decision, "allow");
   assert.equal(gate({ cwd: other }).decision, "deny");
 });

@@ -1,11 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { brokerDataDir, brokerHome } from "../scripts/broker/config.mjs";
-import {
-  defaultOnboardingState,
-  hasFreshNativeFallback,
-  loadOnboardingState,
-} from "../scripts/broker/onboarding.mjs";
+import { defaultOnboardingState, loadOnboardingState } from "../scripts/broker/onboarding.mjs";
+import { reviewGateDecision } from "../scripts/broker/review-state.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -33,15 +30,13 @@ export function evaluateSubagent(payload) {
   if (routing.strategy !== "headless_always") return null;
   const dirs = [payload.cwd, ...(Array.isArray(payload.workspacePaths) ? payload.workspacePaths : [])]
     .filter((dir) => typeof dir === "string" && dir.trim());
-  let fresh = false;
-  if (dirs.length > 0) {
-    try {
-      fresh = hasFreshNativeFallback(dataDir, dirs);
-    } catch {
-      fresh = false;
-    }
+  let allowed = false;
+  try {
+    allowed = reviewGateDecision(dataDir, dirs).allow;
+  } catch {
+    allowed = false;
   }
-  if (fresh) return null;
+  if (allowed) return null;
   const backend = routing.headlessBackend || "unconfigured";
   const model =
     routing.headlessModel ||

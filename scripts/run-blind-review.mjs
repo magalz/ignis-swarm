@@ -6,13 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
-import {
-  blindReviewStatePath,
-  defaultOnboardingState,
-  detectCli,
-  loadOnboardingState,
-  recordBlindReviewState,
-} from "./broker/onboarding.mjs";
+import { defaultOnboardingState, detectCli, loadOnboardingState } from "./broker/onboarding.mjs";
+import { recordReviewState, reviewStatePath } from "./broker/review-state.mjs";
+import { gitToplevel, headSha } from "./lib/git-changes.mjs";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
@@ -268,24 +264,29 @@ function runSmokeTest(opts) {
   };
 }
 
-function resolveWorkspaceRoot(cwd) {
-  const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  const top = (res.stdout || "").trim();
-  if (!res.error && res.status === 0 && top) {
-    return top;
-  }
-  return cwd;
+function gitEnv() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !/^GIT_(DIR|WORK_TREE)$/i.test(key))
+  );
 }
 
-function persistState(cwd, fallbackToNative, reason) {
+function reviewStatus(result) {
+  if (result.fallbackToNative === true) return "fallback";
+  return result.diffBytes === 0 ? "empty" : "reviewed";
+}
+
+function persistState(cwd, result) {
+  const env = gitEnv();
   try {
-    recordBlindReviewState(brokerDataDir(brokerHome()), resolveWorkspaceRoot(cwd), {
-      fallbackToNative,
-      reason,
+    const top = gitToplevel(cwd, { env });
+    if (!top.root) {
+      return top.notGit ? `${cwd} is not inside a git repository` : top.error.message;
+    }
+    const status = reviewStatus(result);
+    recordReviewState(brokerDataDir(brokerHome()), top.root, {
+      status,
+      reason: status === "fallback" ? result.reason || null : null,
+      headSha: headSha(top.root, { env }),
     });
     return null;
   } catch (err) {
@@ -293,13 +294,15 @@ function persistState(cwd, fallbackToNative, reason) {
   }
 }
 
+function stateHintPath(cwd) {
+  const dataDir = brokerDataDir(brokerHome());
+  const top = gitToplevel(cwd, { env: gitEnv() });
+  return top.root ? reviewStatePath(dataDir, top.root) : path.dirname(reviewStatePath(dataDir, cwd));
+}
+
 function withState(cwd, result, persist = true) {
   if (!persist) return result;
-  const stateError = persistState(
-    cwd,
-    result.fallbackToNative === true,
-    result.fallbackToNative ? result.reason || null : null
-  );
+  const stateError = persistState(cwd, result);
   return stateError === null ? result : { ...result, stateError };
 }
 
@@ -470,14 +473,13 @@ function main() {
   const result = runBlindReview(opts);
   if (opts.json || opts.smokeTest || result.useNative) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.useNative && result.stateError) {
-      const statePath = blindReviewStatePath(brokerDataDir(brokerHome()));
-      process.stderr.write(
-        `fallback marker could not be recorded at ${statePath}: ${result.stateError}\n`
-      );
-    }
   } else {
     process.stdout.write(result.output || "");
+  }
+  if (result.stateError) {
+    process.stderr.write(
+      `review state could not be recorded at ${stateHintPath(opts.cwd)}: ${result.stateError}\n`
+    );
   }
 }
 
