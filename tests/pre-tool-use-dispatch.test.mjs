@@ -81,12 +81,18 @@ test("empty stdin gets no opinion and one stderr line", () => {
   }
 });
 
-test("stdin that is valid JSON but not an object gets no opinion and one stderr line", () => {
-  for (const input of ["null", "7", '"text"', "[]", '[{"toolCall":{"name":"run_command"}}]']) {
+test("stdin that is valid JSON but not a payload object gets no opinion and one stderr line", () => {
+  for (const input of ["null", "7", '"text"', "[]", '[{"toolCall":{"name":"run_command"}}]', "{}"]) {
     const { out, stderr } = runHook(input);
     assert.deepEqual(out, NO_OPINION, input);
     assert.equal(stderr.trim(), UNREADABLE_LINE, input);
   }
+});
+
+test("a payload that starts with a byte order mark is still read", () => {
+  const { out, stderr } = runHook("﻿" + toolPayload("RunCommand", { CommandLine: "git reset --hard" }));
+  assert.equal(out.decision, "deny");
+  assert.equal(stderr, "");
 });
 
 test("a readable payload writes nothing to stderr", () => {
