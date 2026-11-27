@@ -236,3 +236,22 @@ test("a deleted config trusted through a linked parent folder is revoked through
   assert.equal(revokeLocalConfig(home, viaLink), true);
   assert.deepEqual(listTrustedLocalConfigs(home), []);
 });
+
+test("an invalid local config error carries line and column but never the file content", (t) => {
+  const { home, file } = fixture(t);
+  const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+  fs.writeFileSync(file, `{"a":1,\n  "b": x${secret}}`);
+  const read = readTrustedLocalConfig(home, file);
+  assert.equal(read.error.message.includes(secret), false);
+  assert.equal(read.error.message, "invalid JSON at line 2, column 8");
+});
+
+test("a corrupt trust store names no file content", (t) => {
+  const { home, file } = fixture(t);
+  const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+  fs.writeFileSync(trustStorePath(home), `{"a":1,\n  "b": x${secret}}`);
+  assert.throws(
+    () => trustLocalConfig(home, file),
+    (err) => err.message.endsWith(": invalid JSON at line 2, column 8") && !err.message.includes(secret)
+  );
+});

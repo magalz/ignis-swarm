@@ -207,3 +207,84 @@ test("discoverLocalConfig treats a worktree-style .git file as a repository root
   assert.equal(discoverLocalConfig(path.join(root, "pkg")), file);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+const syntaxErrorForms = {
+  "unexpected token": (secret) => `{"a":1,\n  "b": x${secret}}`,
+  "expected property name": (secret) => `{"a":1,\n  "b": "${secret}",\n}`,
+};
+const syntaxErrorWhere = { "unexpected token": "line 2, column 8", "expected property name": "line 3, column 1" };
+
+for (const [form, build] of Object.entries(syntaxErrorForms)) {
+  test(`a global config syntax error (${form}) reports line and column and never quotes the file`, () => {
+    const home = mkTemp("ignis-cfg-perr-home-");
+    const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+    fs.writeFileSync(path.join(home, "servers.json"), build(secret));
+    let message = "";
+    try {
+      resolveConfig(home, null);
+    } catch (err) {
+      message = err.message;
+    }
+    assert.equal(message.includes(secret), false, "the message quoted file content");
+    assert.equal(message.includes("Unexpected"), false);
+    assert.equal(message.includes("Expected"), false);
+    assert.ok(message.startsWith(`invalid global config ${path.join(home, "servers.json")}: `), message);
+    assert.ok(message.endsWith(`invalid JSON at ${syntaxErrorWhere[form]}`), message);
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  test(`a local config syntax error (${form}) reports line and column and never quotes the file`, () => {
+    const home = mkTemp("ignis-cfg-perr-lhome-");
+    const repo = mkTemp("ignis-cfg-perr-repo-");
+    fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+    fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+    const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+    fs.writeFileSync(path.join(repo, ".agents", "ignis-broker.json"), build(secret));
+    const resolved = resolveConfig(home, repo);
+    const message = resolved.localConfigError;
+    assert.ok(message, "no localConfigError");
+    assert.equal(message.includes(secret), false, "localConfigError quoted file content");
+    assert.match(message, /^invalid local config /);
+    assert.ok(message.endsWith(`invalid JSON at ${syntaxErrorWhere[form]}`), message);
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+}
+
+test("trust refuses a syntax error with line and column and never quotes the file", () => {
+  const home = mkTemp("ignis-cfg-perr-thome-");
+  const repo = mkTemp("ignis-cfg-perr-trepo-");
+  fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+  const file = path.join(repo, ".agents", "ignis-broker.json");
+  const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+  fs.writeFileSync(file, syntaxErrorForms["unexpected token"](secret));
+  assert.throws(
+    () => trustLocalConfig(home, file),
+    (err) => !err.message.includes(secret) && err.message.endsWith("invalid JSON at line 2, column 8")
+  );
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test("an mcp_config.json syntax error never quotes the file", () => {
+  const dir = mkTemp("ignis-cfg-perr-mcp-");
+  const file = path.join(dir, "mcp_config.json");
+  const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
+  fs.writeFileSync(file, syntaxErrorForms["unexpected token"](secret));
+  assert.throws(
+    () => importMcpConfig(file),
+    (err) => !err.message.includes(secret) && err.message.endsWith("invalid JSON at line 2, column 8")
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a number error reports the column V8 gives, not the scanner's", () => {
+  const dir = mkTemp("ignis-cfg-perr-num-");
+  const file = path.join(dir, "mcp_config.json");
+  fs.writeFileSync(file, '{"a": 1e}');
+  assert.throws(
+    () => importMcpConfig(file),
+    (err) => err.message.endsWith("invalid JSON at line 1, column 9")
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});

@@ -1,7 +1,8 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readTrustedLocalConfig } from "./trust.mjs";
+import { parseJsonSafely, readTrustedLocalConfig } from "./trust.mjs";
 
 export const BROKER_VERSION = "1.0.1";
 
@@ -179,8 +180,7 @@ export function resolveConfig(home, cwd, dataDir = brokerDataDir(home)) {
   let globalFile = { version: 1, defaults: {}, servers: {} };
   if (fs.existsSync(globalPath)) {
     try {
-      const raw = fs.readFileSync(globalPath, "utf8");
-      const parsed = JSON.parse(raw);
+      const parsed = parseJsonSafely(fs.readFileSync(globalPath, "utf8"));
       globalFile = {
         version: parsed.version ?? 1,
         defaults: parsed.defaults ?? {},
@@ -303,8 +303,12 @@ export function redactServerConfig(cfg) {
 const BROKER_SELF_NAMES = new Set(["ignis-broker", "broker", "ignis-swarm_broker"]);
 
 export function importMcpConfig(fromPath, onlyServers = null) {
-  const raw = fs.readFileSync(fromPath, "utf8");
-  const json = JSON.parse(raw);
+  let json;
+  try {
+    json = parseJsonSafely(fs.readFileSync(fromPath, "utf8"));
+  } catch (err) {
+    throw new Error(`invalid MCP config ${fromPath}: ${err.message}`);
+  }
   if (!json.mcpServers || typeof json.mcpServers !== "object") {
     throw new Error(`missing mcpServers object in ${fromPath}`);
   }
@@ -354,7 +358,12 @@ function readServersFile(home) {
   if (!fs.existsSync(dest)) {
     return { dest, data: { version: 1, defaults: {}, servers: {} } };
   }
-  const parsed = JSON.parse(fs.readFileSync(dest, "utf8"));
+  let parsed;
+  try {
+    parsed = parseJsonSafely(fs.readFileSync(dest, "utf8"));
+  } catch (err) {
+    throw new Error(`invalid global config ${dest}: ${err.message}`);
+  }
   return {
     dest,
     data: {
@@ -376,7 +385,7 @@ export function discoverMcpConfig(fromPath, home) {
   if (!fromPath || !fs.existsSync(fromPath)) return [];
   let json;
   try {
-    json = JSON.parse(fs.readFileSync(fromPath, "utf8"));
+    json = parseJsonSafely(fs.readFileSync(fromPath, "utf8"));
   } catch {
     return [];
   }
@@ -457,8 +466,9 @@ function secretVarName(server, key) {
   return `IGNIS_${server}_${key}`.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
 
-export function externalizeSecrets(servers) {
+function externalizeSecrets(servers) {
   const secrets = new Map();
+  const owners = new Map();
   const out = {};
   for (const [name, cfg] of Object.entries(servers || {})) {
     const next = { ...cfg };
@@ -481,12 +491,31 @@ export function externalizeSecrets(servers) {
           throw new Error(`two different values map to ${varName} (server ${name}, ${field} ${key}); rename one key or server`);
         }
         secrets.set(varName, value);
+        owners.set(varName, { server: name, field, key });
         next[field][key] = "${" + varName + "}";
       }
     }
     out[name] = next;
   }
-  return { servers: out, secrets };
+  return { servers: out, secrets, owners };
+}
+
+export function prepareSecrets(home, servers) {
+  const { data } = readServersFile(home);
+  const ext = externalizeSecrets(servers);
+  for (const [varName, owner] of ext.owners) {
+    const ref = "${" + varName + "}";
+    for (const [other, cfg] of Object.entries(data.servers)) {
+      if (other === owner.server || !cfg || typeof cfg !== "object") continue;
+      const strings = [cfg.url, ...Object.values(cfg.env || {}), ...Object.values(cfg.headers || {})];
+      if (strings.some((v) => typeof v === "string" && v.includes(ref))) {
+        throw new Error(
+          `cannot store ${owner.field} ${owner.key} of server ${owner.server} as ${varName}: server ${other} already uses it; rename one server or key`
+        );
+      }
+    }
+  }
+  return ext;
 }
 
 export function writeDotenvSecrets(home, secrets) {
@@ -508,9 +537,9 @@ export function writeDotenvSecrets(home, secrets) {
   });
   for (const [key, value] of pending) updated.push(rendered(key, value));
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  const tmp = path.join(home, `.env.${process.pid}.tmp`);
+  const tmp = path.join(home, `.env.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
   try {
-    fs.writeFileSync(tmp, updated.join(eol) + eol, { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(tmp, updated.join(eol) + eol, { encoding: "utf8", mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, envPath);
   } catch (err) {
     fs.rmSync(tmp, { force: true });
