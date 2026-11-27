@@ -128,7 +128,7 @@ test("an uncaught async error is logged, daemon.json is removed and the exit cod
     iso.cleanup();
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  const { closed } = startHarness(iso, work, `setTimeout(() => { throw new Error("crash-test-boom"); }, 300);`);
+  const closed = startHarness(iso, work, `setTimeout(() => { throw new Error("crash-test-boom"); }, 300);`);
   const code = await closed;
   assert.equal(code, 1);
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
@@ -152,8 +152,7 @@ ${body}
     stdio: "ignore",
   });
   const killer = setTimeout(() => child.kill("SIGKILL"), 8000);
-  const closed = new Promise((resolve) => child.once("close", resolve)).finally(() => clearTimeout(killer));
-  return { child, closed };
+  return new Promise((resolve) => child.once("close", resolve)).finally(() => clearTimeout(killer));
 }
 
 test("an unhandled rejection is logged, daemon.json is removed and the exit code is 1", async (t) => {
@@ -164,7 +163,7 @@ test("an unhandled rejection is logged, daemon.json is removed and the exit code
     iso.cleanup();
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  const { closed } = startHarness(iso, work, `setTimeout(() => { Promise.reject(new Error("reject-test-boom")); }, 300);`);
+  const closed = startHarness(iso, work, `setTimeout(() => { Promise.reject(new Error("reject-test-boom")); }, 300);`);
   assert.equal(await closed, 1);
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
   const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
@@ -184,14 +183,13 @@ test("a crash trims daemon.log past 256 KiB and appends the new line at the end"
   fs.writeFileSync(logFile, "old-line\n".repeat(Math.ceil(before / 9)));
   const prefilled = fs.statSync(logFile).size;
   assert.ok(prefilled > 256 * 1024);
-  const { closed } = startHarness(iso, work, `setTimeout(() => { throw new Error("trim-test-boom"); }, 300);`);
+  const closed = startHarness(iso, work, `setTimeout(() => { throw new Error("trim-test-boom"); }, 300);`);
   assert.equal(await closed, 1);
   const size = fs.statSync(logFile).size;
   assert.ok(size < prefilled, `log did not shrink: ${size} >= ${prefilled}`);
   const lines = fs.readFileSync(logFile, "utf8").split("\n");
   const lastIdx = lines.findLastIndex((l) => /trim-test-boom/.test(l));
   assert.ok(lastIdx >= 0, "the crash line is missing");
-  assert.match(lines.slice(lastIdx).join("\n"), /trim-test-boom/);
   assert.equal(lines.slice(lastIdx + 1).some((l) => l.includes("old-line")), false, "old lines follow the new one");
 });
 
@@ -235,7 +233,7 @@ setInterval(() => {}, 1000);
   writeIdleConfig(iso, {
     demo: { transport: "stdio", command: process.execPath, args: [mock], requestTimeoutMs: 20_000 },
   });
-  const { closed } = startHarness(
+  const closed = startHarness(
     iso,
     work,
     `
