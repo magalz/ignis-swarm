@@ -21,7 +21,10 @@ const BLIND_REVIEW_PROMPT = [
   "Identify correctness bugs, edge cases, security vulnerabilities, race conditions, and contract violations.",
   "Do not assume external context or invent requirements not visible in the diff.",
   "Report concrete findings with file paths and line references, or state clearly if no issues are found.",
+  "End your answer with exactly one final line, either Status: PASS or Status: ISSUES.",
+  "Use Status: PASS when you found no HIGH or MEDIUM issues, otherwise use Status: ISSUES.",
 ].join(" ");
+const VERDICT_LINE = /^\s*[*_`]*\s*Status\s*:\s*(PASS|ISSUES)\b/gim;
 
 const VALID_BACKENDS = new Set(["auto", "native", "claude", "codex"]);
 
@@ -264,6 +267,11 @@ function runSmokeTest(opts) {
   };
 }
 
+function parseVerdict(output) {
+  const matches = [...output.matchAll(VERDICT_LINE)];
+  return matches.length === 0 ? null : matches[matches.length - 1][1].toUpperCase();
+}
+
 function gitEnv() {
   return Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !/^GIT_(DIR|WORK_TREE)$/i.test(key))
@@ -452,6 +460,23 @@ export function runBlindReview(opts) {
     );
   }
 
+  const output = res.stdout || "";
+  const verdict = parseVerdict(output);
+  if (verdict === null) {
+    const detail = output.trim() ? "no Status line" : "empty output";
+    return withState(
+      opts.cwd,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: `headless reviewer returned no verdict (${detail})`,
+        base: opts.base,
+        diffBytes,
+      },
+      shouldPersist
+    );
+  }
+
   return withState(
     opts.cwd,
     {
@@ -461,7 +486,8 @@ export function runBlindReview(opts) {
       model: resolvedModel,
       base: opts.base,
       diffBytes,
-      output: res.stdout || "",
+      verdict,
+      output,
       stderr: res.stderr || "",
     },
     shouldPersist
