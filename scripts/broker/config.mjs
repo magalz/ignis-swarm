@@ -451,6 +451,74 @@ export function mergeServersConfig(home, incomingServers, opts = {}) {
   return { dest, ...data };
 }
 
+const ENV_REF_RE = /\$\{[^}]+\}/;
+
+function secretVarName(server, key) {
+  return `IGNIS_${server}_${key}`.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+export function externalizeSecrets(servers) {
+  const secrets = new Map();
+  const out = {};
+  for (const [name, cfg] of Object.entries(servers || {})) {
+    const next = { ...cfg };
+    for (const field of ["env", "headers"]) {
+      const rec = cfg?.[field];
+      if (!rec || typeof rec !== "object") continue;
+      next[field] = {};
+      for (const [key, raw] of Object.entries(rec)) {
+        if (raw === null || raw === undefined) continue;
+        const value = String(raw);
+        if (ENV_REF_RE.test(value)) {
+          next[field][key] = raw;
+          continue;
+        }
+        if (/[\r\n]/.test(value)) {
+          throw new Error(`${field} value ${key} of server ${name} contains a line break and cannot be stored in .env`);
+        }
+        const varName = secretVarName(name, key);
+        if (secrets.has(varName) && secrets.get(varName) !== value) {
+          throw new Error(`two different values map to ${varName} (server ${name}, ${field} ${key}); rename one key or server`);
+        }
+        secrets.set(varName, value);
+        next[field][key] = "${" + varName + "}";
+      }
+    }
+    out[name] = next;
+  }
+  return { servers: out, secrets };
+}
+
+export function writeDotenvSecrets(home, secrets) {
+  if (secrets.size === 0) return [];
+  const envPath = path.join(home, ".env");
+  const raw = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw === "" ? [] : raw.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const pending = new Map(secrets);
+  const rendered = (key, value) => `${key}="${value}"`;
+  const updated = lines.map((line) => {
+    const eq = line.indexOf("=");
+    if (eq <= 0 || line.trim().startsWith("#")) return line;
+    const key = line.slice(0, eq).trim();
+    if (!secrets.has(key)) return line;
+    pending.delete(key);
+    return rendered(key, secrets.get(key));
+  });
+  for (const [key, value] of pending) updated.push(rendered(key, value));
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const tmp = path.join(home, `.env.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmp, updated.join(eol) + eol, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tmp, envPath);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  return [...secrets.keys()];
+}
+
 export function addHttpServer(home, { name, url, authEnv, headerName }) {
   if (!name || typeof name !== "string") throw new Error("server name is required");
   if (!url || typeof url !== "string") throw new Error("server url is required");
