@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
 import { brokerDataDir, brokerHome, resolveConfig } from "../scripts/broker/config.mjs";
 import { readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState, probeEnvironment } from "../scripts/broker/onboarding.mjs";
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function readStdin() {
   try {
@@ -157,6 +160,27 @@ function buildOnboardingNotice(home, dataDir) {
   );
 }
 
+function buildReviewRoutingNotice(routing) {
+  const strategy = routing?.strategy;
+  if (strategy !== "headless_always" && strategy !== "antigravity_first") return null;
+  const backend = routing.headlessBackend || "unconfigured";
+  const model =
+    routing.headlessModel ||
+    (backend === "claude" ? "opus" : backend === "unconfigured" ? "none" : "config-default");
+  const effort = routing.effort || "high";
+  const runnerPath = path.resolve(PLUGIN_ROOT, "scripts", "run-blind-review.mjs");
+  if (strategy === "headless_always") {
+    return (
+      `[ignis-swarm][Phase 4 Review Routing] strategy=headless_always (backend=${backend}, model=${model}, effort=${effort}). ` +
+      `Mandatory: run \`node "${runnerPath}" --base <base-sha> --backend auto\` BEFORE native \`blind-edge-hunter\` (native fallback allowed only if \`fallbackToNative: true\`).`
+    );
+  }
+  return (
+    `[ignis-swarm][Phase 4 Review Routing] strategy=antigravity_first (native Gemini Pro \`blind-edge-hunter\` first; headless fallback=${backend}/${model}, effort=${effort}). ` +
+    `If native quota runs out, run \`node "${runnerPath}" --base <base-sha> --backend auto --fallback\`.`
+  );
+}
+
 function checkMemtraceStatus(cwd) {
   const cmd = (process.env.IGNIS_MEMTRACE_CMD || "").trim() || "memtrace";
   let resolved;
@@ -215,8 +239,14 @@ async function main() {
         messages.push(buildOnboardingNotice(home, dataDir));
       } catch {}
     }
-  } else if (onboarding.memtrace?.enabled === true) {
-    messages.push(checkMemtraceStatus(cwd));
+  } else {
+    if (onboarding.memtrace?.enabled === true) {
+      messages.push(checkMemtraceStatus(cwd));
+    }
+    if (isInteractiveUserSession(payload)) {
+      const notice = buildReviewRoutingNotice(onboarding.reviewRouting);
+      if (notice) messages.push(notice);
+    }
   }
 
   const indexHint = checkDecisionIndexes(cwd);

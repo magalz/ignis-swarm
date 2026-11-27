@@ -30,7 +30,7 @@ Read these bundled references as needed:
 ## Wave Boundary: Active Compaction Check
 At the end of **every wave**, follow [compaction-checkpoints.md](./references/compaction-checkpoints.md):
 - The deterministic `PostInvocation` compaction watcher (`hooks/compaction-watch.mjs`) monitors turn/context pressure and alerts when a compaction boundary is reached.
-- Pause cleanly at a wave boundary (never mid-task) and emit a **complete, pre-filled `/compact Preserve: ...`** command populated with the real live slice state (never `<placeholder>` text) before dispatching the next wave.
+- Pause cleanly at a wave boundary (never mid-task) and tell the user to run `/compact` (via the slash menu) with a **complete, pre-filled payload-only `Preserve: ...` block** populated with the real live slice state (never `<placeholder>` text) in the same message, before dispatching the next wave. Never emit a code block starting with `/compact` or `/swarm` (it would be sent as plain text).
 
 ## Phase 3: Auditable Documentation Gate (`@doc-auditor`)
 Once the final coding wave passes `@verifier`:
@@ -40,10 +40,10 @@ Once the final coding wave passes `@verifier`:
 
 ## Phase 4: 3-Lens Final Slice Audit
 Spawn the final audit per `ignis-review` Level 2:
-1. **`@blind-edge-hunter`** — route via `reviewRouting.strategy` in `onboarding.json` (`antigravity_gemini_only`, `antigravity_first`, or `headless_always`), using `node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto` or the bundled read-only `blind-edge-hunter` subagent (`inheritMcp: false`, `model: pro`), passing **only** the git diff range (`<base-sha>...HEAD`) with zero access to plans or issue trackers.
+1. **`@blind-edge-hunter`** — route via `reviewRouting.strategy` in `onboarding.json` (`antigravity_gemini_only`, `antigravity_first`, or `headless_always`). Native `blind-edge-hunter` (`model: pro`, `inheritMcp: false`) runs **Gemini Pro**, not native Claude Opus. `SessionStart` injects `[ignis-swarm][Phase 4 Review Routing]` with the resolved `scripts/run-blind-review.mjs` path for `headless_always`/`antigravity_first`. Under `headless_always`, run `node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto` FIRST; `PreToolUse` blocks `invoke_subagent(TypeName: "blind-edge-hunter")` until a fresh `fallbackToNative: true` marker is recorded. Pass **only** the git diff scope (`run-blind-review.mjs --base <base-sha>` diffs from the merge-base of `<base-sha>` through the current working tree, covering committed and uncommitted tracked changes; for native `blind-edge-hunter`, pass `<base-sha>...HEAD` plus any uncommitted tracked changes) with zero access to plans or issue trackers.
 2. **`@acceptance-auditor`** — independent high-reasoning reviewer with full access to the plan, opt-in issue tracker (if active), and `docs/{adr,bdr}/`.
 
 ## Phase 5: Closure & Hard Compaction Checkpoint
 1. Fix any proven `HIGH`/`MEDIUM` findings from Phase 4 and re-verify.
 2. Present a concise **Audit Summary** (waves completed, issues closed, ADRs/BDRs created, observed coverage by module, Phase 4 verdict).
-3. Emit a **complete, pre-filled post-slice `/compact Preserve: ...`** command with the real closed-slice state (never `<placeholder>` text).
+3. Tell the user to run `/compact` (via the slash menu) with a **complete, pre-filled payload-only `Preserve: ...` block** reflecting the real closed-slice state (never `<placeholder>` text).

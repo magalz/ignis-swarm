@@ -147,8 +147,9 @@ function main() {
   const activeKb = Math.round(activeBytes / 1024);
   const message =
     `[ignis-swarm][Compaction Checkpoint] Active transcript is ~${activeKb} KB (threshold: ${thresholdKb} KB). ` +
-    `Pause at the end of the current step/wave and emit a complete, pre-filled ` +
-    `\`/compact Preserve: <exact dynamic state>\` command (active goal, modified files, key decisions/ADRs, open blockers, and exact next step) so the user can compact cleanly without losing state.`;
+    `Pause at the end of the current step/wave and tell the user to run /compact manually via the slash menu. ` +
+    `Emit only the payload as a copyable block starting with \`Preserve: <exact dynamic state>\` ` +
+    `(active goal, modified files, key decisions/ADRs, open blockers, and exact next step); do NOT put /compact inside the copyable block.`;
 
   process.stdout.write(
     JSON.stringify({

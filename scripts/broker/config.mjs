@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const BROKER_VERSION = "1.0.0";
+export const BROKER_VERSION = "1.0.1";
 
 export const DEFAULT_CONFIG = Object.freeze({
   requestTimeoutMs: 120_000,
