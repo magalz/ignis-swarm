@@ -235,17 +235,7 @@ test("ensureDaemon kills an old-version daemon that ignores shutdown and starts 
     iso.cleanup();
   });
   const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "fake daemon.json");
-  const saved = { IGNIS_BROKER_HOME: process.env.IGNIS_BROKER_HOME, IGNIS_BROKER_DATA: process.env.IGNIS_BROKER_DATA };
-  Object.assign(process.env, { IGNIS_BROKER_HOME: iso.dirs.brokerHome, IGNIS_BROKER_DATA: dataDir });
-  let fresh;
-  try {
-    fresh = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  const fresh = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
   assert.equal(isPidAlive(oldInfo.pid), false, "the old daemon is dead");
   assert.notEqual(fresh.pid, oldInfo.pid);
   assert.equal(isPidAlive(fresh.pid), true);

@@ -187,7 +187,6 @@ async function waitUntilGone(pid, ms) {
 }
 
 async function killAndWait(pid) {
-  if (!isPidAlive(pid)) return true;
   try {
     process.kill(pid, "SIGTERM");
   } catch {}
