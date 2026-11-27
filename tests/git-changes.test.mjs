@@ -30,8 +30,8 @@ function write(dir, relPath, content) {
   fs.writeFileSync(target, content);
 }
 
-function readIndex(dir) {
-  const file = path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"]), "index");
+function readIndex(dir, env) {
+  const file = path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"], { env }), "index");
   return fs.existsSync(file) ? fs.readFileSync(file) : null;
 }
 
@@ -63,7 +63,7 @@ test("collectChanges: a modified tracked file and a new untracked file both appe
     write(dir, "tracked.txt", "two\n");
     write(dir, "new.txt", "brand new\n");
     const statusBefore = runGit(dir, ["status", "--porcelain"], { env });
-    const indexBefore = readIndex(dir);
+    const indexBefore = readIndex(dir, env);
 
     const result = collectChanges(dir, { env });
 
@@ -76,7 +76,7 @@ test("collectChanges: a modified tracked file and a new untracked file both appe
     assert.deepEqual(result.untracked, ["new.txt"]);
     assert.equal(result.bytes, Buffer.byteLength(result.diff));
     assert.equal(runGit(dir, ["status", "--porcelain"], { env }), statusBefore);
-    assert.ok(sameIndex(readIndex(dir), indexBefore), "the real index must be byte-identical");
+    assert.ok(sameIndex(readIndex(dir, env), indexBefore), "the real index must be byte-identical");
     assert.match(statusBefore, /\?\? new\.txt/, "new.txt must still be untracked for git");
   });
 });
@@ -114,12 +114,15 @@ test("collectChanges: a diff over maxBytes returns too_large without throwing", 
     assert.equal(overSlack.diff, "");
     assert.equal(overSlack.bytes, 0);
 
+    const exact = collectChanges(dir, { env, maxBytes: full.bytes });
+    assert.equal(exact.error, null, "exactly maxBytes is allowed");
+    assert.equal(exact.diff, full.diff);
+    assert.equal(collectChanges(dir, { env, maxBytes: full.bytes - 1 }).error?.code, "too_large", "one byte over maxBytes is refused");
+
     write(dir, "big.txt", `${"y".repeat(100)}\n`.repeat(1000));
     const overBuffer = collectChanges(dir, { env, maxBytes: 1024 });
     assert.equal(overBuffer.error?.code, "too_large");
     assert.equal(overBuffer.diff, "");
-
-    assert.equal(collectChanges(dir, { env, maxBytes: full.bytes }).error, null, "exactly maxBytes is allowed");
   });
 });
 
@@ -152,9 +155,9 @@ test("collectChanges works in a linked worktree and leaves both indexes untouche
       write(linked, "tracked.txt", "two\n");
       write(linked, "linked-new.txt", "in the linked worktree\n");
       write(dir, "main-only.txt", "in the main worktree\n");
-      const mainIndex = readIndex(dir);
-      const linkedIndex = readIndex(linked);
       const linkedStatus = runGit(linked, ["status", "--porcelain"], { env });
+      const mainIndex = readIndex(dir, env);
+      const linkedIndex = readIndex(linked, env);
       assert.ok(linkedIndex, "the linked worktree has its own index");
 
       const top = gitToplevel(linked, { env });
@@ -166,8 +169,8 @@ test("collectChanges works in a linked worktree and leaves both indexes untouche
       assert.match(result.diff, /^\+two$/m);
       assert.ok(!result.diff.includes("main-only.txt"));
       assert.deepEqual(result.untracked, ["linked-new.txt"]);
-      assert.ok(sameIndex(readIndex(dir), mainIndex), "the main worktree index must be untouched");
-      assert.ok(sameIndex(readIndex(linked), linkedIndex), "the linked worktree index must be untouched");
+      assert.ok(sameIndex(readIndex(dir, env), mainIndex), "the main worktree index must be untouched");
+      assert.ok(sameIndex(readIndex(linked, env), linkedIndex), "the linked worktree index must be untouched");
       assert.equal(runGit(linked, ["status", "--porcelain"], { env }), linkedStatus);
     } finally {
       rmTemp(linked);
@@ -194,7 +197,7 @@ test("a repository with no commits: headSha is unborn and added and untracked fi
 
     write(dir, "added.txt", "staged\n");
     runGit(dir, ["add", "added.txt"], { env });
-    const indexBefore = readIndex(dir);
+    const indexBefore = readIndex(dir, env);
     const result = collectChanges(dir, { env });
 
     assert.equal(result.error, null);
@@ -202,7 +205,7 @@ test("a repository with no commits: headSha is unborn and added and untracked fi
     assert.match(result.diff, /^\+staged$/m);
     assert.match(result.diff, /^diff --git a\/loose\.txt b\/loose\.txt$/m);
     assert.deepEqual(result.untracked, ["loose.txt"]);
-    assert.ok(sameIndex(readIndex(dir), indexBefore));
+    assert.ok(sameIndex(readIndex(dir, env), indexBefore));
     assert.equal(headSha(dir, { env }), "unborn");
   });
 });
@@ -306,7 +309,8 @@ test("collectChanges honours base and unified and rejects an unusable base", () 
 
     const noContext = collectChanges(dir, { env, unified: 0 });
     assert.equal(noContext.error, null);
-    assert.ok(!noContext.diff.includes(" line 11"), "unified 0 has no context lines");
+    assert.doesNotMatch(noContext.diff, /^ line 11$/m, "unified 0 has no context lines");
+    assert.match(noContext.diff, /^@@ -12 \+12 @@/m, "unified 0 reaches git as --unified=0");
     const wideContext = collectChanges(dir, { env, unified: 8 });
     assert.match(wideContext.diff, /^ line 4$/m, "unified 8 reaches eight lines back");
 
