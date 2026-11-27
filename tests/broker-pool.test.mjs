@@ -128,14 +128,17 @@ test("a failing shutdown does not stop the sweep and is reported redacted", asyn
   first.adapter.shutdown = async () => {
     throw new Error(`shutdown failed with ${secret} and sweep-secret-token-9876`);
   };
-  t.after(realShutdown);
-  for (const e of sup.pool.values()) e.lastUsed = Date.now() - 60_000;
-  await sup.maintenanceSweep();
-  assert.equal(sup.pool.has(second.key), false);
-  const status = await sup.status({});
-  assert.ok(Array.isArray(status.sweepErrors));
-  assert.equal(status.sweepErrors.length, 1);
-  const message = status.sweepErrors[0].message;
-  assert.match(message, /shutdown failed/);
-  assert.equal(message.includes("sweep-secret-token-9876"), false);
+  try {
+    for (const e of sup.pool.values()) e.lastUsed = Date.now() - 60_000;
+    await sup.maintenanceSweep();
+    assert.equal(sup.pool.has(second.key), false);
+    const status = await sup.status({});
+    assert.ok(Array.isArray(status.sweepErrors));
+    assert.equal(status.sweepErrors.length, 1);
+    const message = status.sweepErrors[0].message;
+    assert.match(message, /shutdown failed/);
+    assert.equal(message.includes("sweep-secret-token-9876"), false);
+  } finally {
+    await realShutdown();
+  }
 });
