@@ -238,7 +238,6 @@ async function cmdList({ home, dataDir, flags, positional, cwd, asJson }) {
       console.log(`${t.name}: ${t.summary}`);
     }
   }
-  return;
 }
 
 async function cmdDescribe({ home, dataDir, positional, cwd, asJson }) {
@@ -251,7 +250,6 @@ async function cmdDescribe({ home, dataDir, positional, cwd, asJson }) {
     console.log(`${res.schema.name} — ${res.schema.description}`);
     console.log(JSON.stringify(res.schema.inputSchema, null, 2));
   }
-  return;
 }
 
 async function cmdCall({ home, dataDir, flags, positional, cwd, asJson }) {
@@ -276,7 +274,6 @@ async function cmdCall({ home, dataDir, flags, positional, cwd, asJson }) {
     }
   }
   if (res.isError) process.exitCode = 1;
-  return;
 }
 
 async function cmdStatus({ home, dataDir, cwd, asJson }) {
@@ -294,7 +291,6 @@ async function cmdStatus({ home, dataDir, cwd, asJson }) {
       );
     }
   }
-  return;
 }
 
 async function cmdRestart({ home, dataDir, flags, positional, cwd, asJson }) {
@@ -303,7 +299,6 @@ async function cmdRestart({ home, dataDir, flags, positional, cwd, asJson }) {
     cwd: flags.cwd ? cwd : undefined,
   });
   console.log(asJson ? JSON.stringify(res, null, 2) : `evicted ${res.evicted} pooled backend(s).`);
-  return;
 }
 
 async function cmdImportMcp({ home, flags }) {
@@ -334,7 +329,6 @@ async function cmdImportMcp({ home, flags }) {
   }
   if (wrote.length > 0) console.log(`Stored ${wrote.length} secret(s) in ${path.join(home, ".env")}: ${wrote.join(", ")}`);
   console.log(`Your original ${sourcePath} was NOT modified.`);
-  return;
 }
 
 async function cmdDiscoverMcp({ home, flags, asJson }) {
@@ -352,7 +346,6 @@ async function cmdDiscoverMcp({ home, flags, asJson }) {
       console.log(`  - ${item.name} [${item.transport}]${extra}`);
     }
   }
-  return;
 }
 
 async function cmdRegisterMcp({ home, flags, asJson }) {
@@ -402,7 +395,6 @@ async function cmdRegisterMcp({ home, flags, asJson }) {
       console.log(`  - ${name} [${cfg.transport}]${extra}`);
     }
   }
-  return;
 }
 
 async function cmdAddHttpMcp({ home, flags, positional, asJson }) {
@@ -418,7 +410,6 @@ async function cmdAddHttpMcp({ home, flags, positional, asJson }) {
   } else {
     console.log(`Added HTTP server ${name} (${url}) to ${merged.dest}`);
   }
-  return;
 }
 
 async function cmdUnregisterMcp({ home, positional, asJson }) {
@@ -430,7 +421,6 @@ async function cmdUnregisterMcp({ home, positional, asJson }) {
   } else {
     console.log(removed ? `Removed server ${name}.` : `Server ${name} not found.`);
   }
-  return;
 }
 
 async function cmdOnboarding({ home, dataDir, flags }) {
