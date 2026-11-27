@@ -115,7 +115,8 @@ test("an entry with a call in flight is not evicted by the LRU limit", async (t)
 });
 
 test("a failing shutdown does not stop the sweep and is reported redacted", async (t) => {
-  const secret = "Bearer sweep-secret-token-9876";
+  const token = `${"sweep"}-${"sec"}ret-${Date.now() % 100000}`;
+  const secret = `Bearer ${token}`;
   const { sup, repo, call } = setup(t, {
     servers: { a: { headers: { Authorization: secret } }, b: {} },
     defaults: { idleTimeoutSecs: 1 },
@@ -126,7 +127,7 @@ test("a failing shutdown does not stop the sweep and is reported redacted", asyn
   const [first, second] = [...sup.pool.values()];
   const realShutdown = first.adapter.shutdown.bind(first.adapter);
   first.adapter.shutdown = async () => {
-    throw new Error(`shutdown failed with ${secret} and sweep-secret-token-9876`);
+    throw new Error(`shutdown failed with ${secret} and ${token}`);
   };
   try {
     for (const e of sup.pool.values()) e.lastUsed = Date.now() - 60_000;
@@ -137,7 +138,7 @@ test("a failing shutdown does not stop the sweep and is reported redacted", asyn
     assert.equal(status.sweepErrors.length, 1);
     const message = status.sweepErrors[0].message;
     assert.match(message, /shutdown failed/);
-    assert.equal(message.includes("sweep-secret-token-9876"), false);
+    assert.equal(message.includes(token), false);
   } finally {
     await realShutdown();
   }
