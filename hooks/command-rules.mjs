@@ -7,6 +7,7 @@ const FORCE_PUSH_REASON = "ignis-swarm requires explicit user confirmation befor
 const MIRROR_REASON = "ignis-swarm requires explicit user confirmation before `git push --mirror` overwrites remote refs.";
 const CLEAN_FORCE_REASON = "ignis-swarm requires explicit user confirmation before `git clean -f` deletes untracked files.";
 const NESTING_REASON = "ignis-swarm requires explicit user confirmation before running deeply nested shell wrappers.";
+const WORK_REASON = "ignis-swarm requires explicit user confirmation before analysing an oversized command line.";
 
 const DESTRUCTIVE_RULES = [
   {
@@ -65,10 +66,12 @@ const CMD_FLAG = /^\/[ck]$/i;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const HEREDOC_OPERATOR = /-?[ \t]*(?:'([A-Za-z_][\w.-]*)'|"([A-Za-z_][\w.-]*)"|([A-Za-z_][\w.-]*))/y;
 const DELIMITER_LINE = /^\t*[A-Za-z_][\w.-]*$/;
-const ESCAPABLE = "\"'\\;()|&<>";
-const ESCAPE_TRIGGER = /\\["';()|&<>]/;
+const ESCAPABLE = "\"'\\;()";
+const ESCAPE_TRIGGER = /\\["';()]/;
 const RANK = { deny: 2, force_ask: 1 };
 const MAX_DEPTH = 8;
+const MAX_WORK = 3_000_000;
+let work = 0;
 
 const deny = (reason) => ({ decision: "deny", reason });
 const forceAsk = (reason) => ({ decision: "force_ask", reason });
@@ -137,7 +140,7 @@ function firstAtOrAfter(starts, position) {
   return low < starts.length ? starts[low] : -1;
 }
 
-function scan(script, escapes, stringMode) {
+function scan(script, escapes, stringMode, ticks) {
   const segments = [];
   const stack = [];
   let frame = newFrame("top", stringMode);
@@ -203,7 +206,7 @@ function scan(script, escapes, stringMode) {
         frame.current += ch;
         frame.blanked += " ";
       }
-    } else if (ch === "`") {
+    } else if (ticks && ch === "`") {
       open("tick");
     } else if (ch === "$" && next === "(") {
       open("dollar");
@@ -529,10 +532,15 @@ function evaluateScript(script, depth, stringMode = false) {
   let verdict = null;
   for (const joined of variants) {
     const modes = ESCAPE_TRIGGER.test(joined) ? [true, false] : [false];
+    const tickModes = joined.includes("`") ? [true, false] : [true];
     for (const escapes of modes) {
-      for (const segment of scan(joined, escapes, stringMode)) {
-        verdict = strongest(verdict, evaluateSegment(segment, depth));
-        if (verdict?.decision === "deny") return verdict;
+      for (const ticks of tickModes) {
+        work += joined.length;
+        if (work > MAX_WORK) return strongest(verdict, forceAsk(WORK_REASON));
+        for (const segment of scan(joined, escapes, stringMode, ticks)) {
+          verdict = strongest(verdict, evaluateSegment(segment, depth));
+          if (verdict?.decision === "deny") return verdict;
+        }
       }
     }
   }
@@ -541,5 +549,6 @@ function evaluateScript(script, depth, stringMode = false) {
 
 export function evaluateCommand(commandLine) {
   if (typeof commandLine !== "string" || !commandLine.trim()) return null;
+  work = 0;
   return evaluateScript(commandLine, 0);
 }
