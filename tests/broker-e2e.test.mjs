@@ -1,21 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
+import { isolatedEnv, waitUntil } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
 
-function mkTemp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
+const CLI_TIMEOUT_MS = 60_000;
+const WAIT_MS = 30_000;
 
-test("e2e CLI lazy-starts daemon, imports MCPs with summary list, and mcp-bridge survives daemon kill", async () => {
-  const home = mkTemp("ignis-e2e-home-");
+test("isolatedEnv cleanup stops a daemon the test left running and removes its folder", { timeout: 120_000 }, async () => {
+  const iso = isolatedEnv();
+  const started = spawnSync(process.execPath, [BROKER_ENTRY, "status", "--json"], {
+    encoding: "utf8",
+    env: iso.env,
+    timeout: CLI_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  let pid = 0;
+  let survived = true;
+  try {
+    assert.equal(started.status, 0, started.stderr);
+    pid = JSON.parse(started.stdout).pid;
+    assert.ok(isPidAlive(pid), "the lazy-started daemon is running");
+  } finally {
+    iso.cleanup();
+    survived = isPidAlive(pid);
+    if (pid && survived) process.kill(pid, "SIGKILL");
+  }
+  assert.equal(survived, false, "cleanup stopped the daemon");
+  assert.equal(fs.existsSync(iso.dirs.root), false, "the iso folder is gone");
+});
+
+test("e2e CLI lazy-starts daemon, imports MCPs with summary list, and mcp-bridge survives daemon kill", { timeout: 180_000 }, async (t) => {
+  const iso = isolatedEnv();
+  const home = iso.dirs.root;
+  const env = iso.env;
+  t.after(() => {
+    try {
+      spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
+        encoding: "utf8",
+        env,
+        timeout: CLI_TIMEOUT_MS,
+        windowsHide: true,
+      });
+    } finally {
+      iso.cleanup();
+    }
+  });
   const mockScript = path.join(home, "mock_e2e.mjs");
   fs.writeFileSync(
     mockScript,
@@ -46,12 +83,10 @@ rl.on("line", (line) => {
     })
   );
 
-  const env = { ...process.env, IGNIS_BROKER_HOME: home, IGNIS_BROKER_DATA: home };
-
   const imp = spawnSync(process.execPath, [BROKER_ENTRY, "import-mcp", "--from", srcMcp], {
     encoding: "utf8",
     env,
-    timeout: 10_000,
+    timeout: CLI_TIMEOUT_MS,
     windowsHide: true,
   });
   assert.equal(imp.status, 0, imp.stderr);
@@ -62,7 +97,7 @@ rl.on("line", (line) => {
   const st = spawnSync(process.execPath, [BROKER_ENTRY, "status", "--json"], {
     encoding: "utf8",
     env,
-    timeout: 10_000,
+    timeout: CLI_TIMEOUT_MS,
     windowsHide: true,
   });
   assert.equal(st.status, 0, st.stderr);
@@ -75,8 +110,16 @@ rl.on("line", (line) => {
     windowsHide: true,
   });
 
+  t.after(() => bridge.kill());
   const rl = readline.createInterface({ input: bridge.stdout });
-  const nextLine = () => new Promise((resolve) => rl.once("line", (line) => resolve(JSON.parse(line))));
+  const nextLine = () =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no bridge reply in time")), WAIT_MS);
+      rl.once("line", (line) => {
+        clearTimeout(timer);
+        resolve(JSON.parse(line));
+      });
+    });
 
   bridge.stdin.write(
     `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1.0" } } })}\n`
@@ -97,10 +140,11 @@ rl.on("line", (line) => {
   const stopRes = spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
     encoding: "utf8",
     env,
-    timeout: 10_000,
+    timeout: CLI_TIMEOUT_MS,
     windowsHide: true,
   });
   assert.equal(stopRes.status, 0, stopRes.stderr);
+  await waitUntil("the killed daemon to exit", () => !isPidAlive(stJson.pid));
 
   bridge.stdin.write(
     `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "ping", arguments: {} } } })}\n`
@@ -117,7 +161,7 @@ rl.on("line", (line) => {
   const listFlagsRes = spawnSync(
     process.execPath,
     [BROKER_ENTRY, "list", "--json", "demo"],
-    { encoding: "utf8", env, timeout: 10_000, windowsHide: true }
+    { encoding: "utf8", env, timeout: CLI_TIMEOUT_MS, windowsHide: true }
   );
   assert.equal(listFlagsRes.status, 0, listFlagsRes.stderr);
   const listFlagsJson = JSON.parse(listFlagsRes.stdout);
@@ -126,12 +170,12 @@ rl.on("line", (line) => {
   const callFlagsRes = spawnSync(
     process.execPath,
     [BROKER_ENTRY, "call", "--full", "demo", "ping", "--max-bytes=1024"],
-    { encoding: "utf8", env, timeout: 10_000, windowsHide: true }
+    { encoding: "utf8", env, timeout: CLI_TIMEOUT_MS, windowsHide: true }
   );
   assert.equal(callFlagsRes.status, 0, callFlagsRes.stderr);
   assert.match(callFlagsRes.stdout, /pong-node-e2e/);
 
-  const daemonInfo = JSON.parse(fs.readFileSync(path.join(home, "daemon.json"), "utf8"));
+  const daemonInfo = JSON.parse(fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.json"), "utf8"));
   const badJsonResp = await fetch(`http://127.0.0.1:${daemonInfo.port}/v1/status`, {
     method: "POST",
     headers: {
@@ -145,12 +189,4 @@ rl.on("line", (line) => {
   bridge.stdin.end();
   rl.close();
   await new Promise((r) => bridge.once("exit", r));
-
-  spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
-    encoding: "utf8",
-    env,
-    timeout: 10_000,
-    windowsHide: true,
-  });
-  fs.rmSync(home, { recursive: true, force: true });
 });

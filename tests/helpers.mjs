@@ -4,6 +4,10 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
+
+const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 
 const TEST_GIT_NAME = "Ignis Test";
 const TEST_GIT_EMAIL = "ignis-test@example.invalid";
@@ -32,6 +36,84 @@ function withoutStrippedEnv(source) {
 
 export function mkTemp(prefix = "ignis-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export async function waitUntil(label, predicate, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function waitForExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (isPidAlive(pid) && Date.now() < deadline) sleepSync(50);
+  return !isPidAlive(pid);
+}
+
+function isBrokerDaemon(pid) {
+  const query =
+    process.platform === "win32"
+      ? spawnSync("powershell", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`], { encoding: "utf8", timeout: 20_000, windowsHide: true })
+      : spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+  const text = comparablePath(query.stdout ?? "");
+  return OWN_ENTRIES.some((entry) => text.includes(entry)) && /\bdaemon\b/.test(text);
+}
+
+// Only a daemon started from this checkout's broker entry counts: the user's own
+// daemon runs the same file name from another folder and must never be stopped.
+function comparablePath(text) {
+  const forward = text.replaceAll("\\", "/");
+  return process.platform === "win32" ? forward.toLowerCase() : forward;
+}
+
+const OWN_ENTRIES = [...new Set([BROKER_ENTRY, fs.realpathSync.native(BROKER_ENTRY)].map(comparablePath))];
+
+function killTree(pid) {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 20_000, windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {}
+}
+
+/**
+ * Stop the broker daemon an isolated test left behind: its daemon.json is in one of
+ * the iso folders. Only a pid recorded there and still running the broker's daemon
+ * entry is touched, so a daemon from any other folder is never reached.
+ */
+function stopLeftoverDaemons(dirs, env) {
+  const seen = new Set();
+  for (const dir of [dirs.brokerData, dirs.brokerHome, dirs.home, dirs.root]) {
+    let pid;
+    try {
+      pid = JSON.parse(fs.readFileSync(path.join(dir, "daemon.json"), "utf8")).pid;
+    } catch {
+      continue;
+    }
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || seen.has(pid) || !isPidAlive(pid)) continue;
+    seen.add(pid);
+    if (!isBrokerDaemon(pid)) continue;
+    spawnSync(process.execPath, [BROKER_ENTRY, "stop"], { env, timeout: 15_000, windowsHide: true });
+    if (waitForExit(pid, 3000)) continue;
+    killTree(pid);
+    waitForExit(pid, 5000);
+  }
+}
+
+function removeTree(root) {
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 });
+  } catch (err) {
+    process.emitWarning(`could not remove ${root}: ${err.message}`);
+  }
 }
 
 /**
@@ -73,7 +155,12 @@ export function isolatedEnv(overrides = {}) {
     env,
     dirs,
     cleanup() {
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      try {
+        stopLeftoverDaemons(dirs, env);
+      } catch (err) {
+        process.emitWarning(`could not stop a daemon in ${root}: ${err.message}`);
+      }
+      removeTree(root);
     },
   };
 }

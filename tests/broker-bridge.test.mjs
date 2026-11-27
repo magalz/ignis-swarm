@@ -8,7 +8,7 @@ import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { postToDaemon } from "../scripts/broker/bridge.mjs";
-import { isolatedEnv } from "./helpers.mjs";
+import { isolatedEnv, waitUntil } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
@@ -139,7 +139,11 @@ function setupBroker(t) {
   fs.writeFileSync(
     mockScript,
     `
+import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+const dir = path.dirname(fileURLToPath(import.meta.url));
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const msg = JSON.parse(line);
@@ -149,8 +153,15 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "slow", inputSchema: { type: "object" } }, { name: "fast", inputSchema: { type: "object" } }] } });
   } else if (msg.method === "tools/call") {
     const reply = () => send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: msg.params.name }], isError: false } });
-    if (msg.params.name === "slow") setTimeout(reply, 2500);
-    else reply();
+    if (msg.params.name === "slow") {
+      fs.writeFileSync(path.join(dir, "slow.started"), "");
+      const poll = setInterval(() => {
+        if (fs.existsSync(path.join(dir, "slow.release"))) {
+          clearInterval(poll);
+          reply();
+        }
+      }, 20);
+    } else reply();
   }
 });
 `
@@ -183,23 +194,17 @@ function startBridge(t, env) {
     stdio: ["pipe", "pipe", "ignore"],
     windowsHide: true,
   });
-  const killTimer = setTimeout(() => bridge.kill(), 50_000);
+  const killTimer = setTimeout(() => bridge.kill(), 100_000);
   t.after(() => {
     clearTimeout(killTimer);
     bridge.kill();
   });
   const lines = [];
-  const waiters = [];
   const rl = readline.createInterface({ input: bridge.stdout });
   rl.on("line", (line) => {
     lines.push(JSON.parse(line));
-    for (const w of waiters.splice(0)) w();
   });
-  const waitFor = async (n) => {
-    while (lines.length < n) {
-      await new Promise((resolve) => waiters.push(resolve));
-    }
-  };
+  const waitFor = (n) => waitUntil(`${n} bridge replies`, () => lines.length >= n);
   const exited = new Promise((resolve) => bridge.on("close", (code) => resolve(code)));
   return { bridge, lines, waitFor, exited };
 }
@@ -212,12 +217,15 @@ const slowCall = (id) =>
     params: { name: "broker_call", arguments: { server: "demo", tool: "slow", arguments: {} } },
   })}\n`;
 
-test("e2e a ping sent during a slow tools/call is answered first", { timeout: 60_000 }, async (t) => {
+test("e2e a ping sent during a slow tools/call is answered first", { timeout: 150_000 }, async (t) => {
   const iso = setupBroker(t);
   const b = startBridge(t, iso.env);
   b.bridge.stdin.write(slowCall(1));
-  await new Promise((r) => setTimeout(r, 200));
+  await waitUntil("the slow call to start", () => fs.existsSync(path.join(iso.dirs.root, "slow.started")));
   b.bridge.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" })}\n`);
+  await b.waitFor(1);
+  assert.equal(b.lines[0].id, 2, "the ping reply arrived while the slow call was still held");
+  fs.writeFileSync(path.join(iso.dirs.root, "slow.release"), "");
   await b.waitFor(2);
   assert.deepEqual(
     b.lines.map((l) => l.id),
@@ -228,11 +236,13 @@ test("e2e a ping sent during a slow tools/call is answered first", { timeout: 60
   await b.exited;
 });
 
-test("e2e closing stdin waits for the in-flight reply and exits 0", { timeout: 60_000 }, async (t) => {
+test("e2e closing stdin waits for the in-flight reply and exits 0", { timeout: 150_000 }, async (t) => {
   const iso = setupBroker(t);
   const b = startBridge(t, iso.env);
   b.bridge.stdin.write(slowCall(1));
+  await waitUntil("the slow call to start", () => fs.existsSync(path.join(iso.dirs.root, "slow.started")));
   b.bridge.stdin.end();
+  fs.writeFileSync(path.join(iso.dirs.root, "slow.release"), "");
   const code = await b.exited;
   assert.equal(code, 0);
   assert.equal(b.lines.length, 1);

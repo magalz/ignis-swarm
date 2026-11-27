@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
 import {
   initGitRepo,
@@ -11,6 +12,7 @@ import {
   mkTemp,
   runGit,
   runNode,
+  waitUntil,
   writeMockStdioServer,
   writeOnboardingState,
 } from "./helpers.mjs";
@@ -181,6 +183,29 @@ test("isolatedEnv cleanup removes every temp dir it created and is idempotent", 
   for (const dir of dirs) assert.ok(!fs.existsSync(dir), `${dir} is removed by cleanup`);
   assert.ok(!fs.existsSync(iso.env.GIT_CONFIG_GLOBAL));
   iso.cleanup();
+});
+
+test("isolatedEnv cleanup leaves alone a daemon recorded in its folder that runs another checkout's broker", async () => {
+  const iso = isolatedEnv();
+  const elsewhere = mkTemp("ignis-other-checkout-");
+  const fakeEntry = path.join(elsewhere, "scripts", "ignis-broker.mjs");
+  fs.mkdirSync(path.dirname(fakeEntry), { recursive: true });
+  fs.writeFileSync(fakeEntry, "setInterval(() => {}, 1000);\n");
+  const other = spawn(process.execPath, [fakeEntry, "daemon"], { cwd: os.tmpdir(), stdio: "ignore", windowsHide: true });
+  const exited = new Promise((resolve) => other.once("exit", resolve));
+  try {
+    await waitUntil("the other daemon to start", () => isPidAlive(other.pid), 10_000);
+    fs.writeFileSync(path.join(iso.dirs.brokerData, "daemon.json"), JSON.stringify({ pid: other.pid }));
+
+    iso.cleanup();
+
+    assert.equal(isPidAlive(other.pid), true, "a daemon from another checkout must survive cleanup");
+    assert.equal(fs.existsSync(iso.dirs.root), false, "the iso folder is still removed");
+  } finally {
+    other.kill("SIGKILL");
+    await exited;
+    fs.rmSync(elsewhere, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 test("initGitRepo commits even when the real global config signs commits with a broken gpg", () => {
