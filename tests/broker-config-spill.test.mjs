@@ -277,3 +277,14 @@ test("an mcp_config.json syntax error never quotes the file", () => {
   );
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("a number error reports the column V8 gives, not the scanner's", () => {
+  const dir = mkTemp("ignis-cfg-perr-num-");
+  const file = path.join(dir, "mcp_config.json");
+  fs.writeFileSync(file, '{"a": 1e}');
+  assert.throws(
+    () => importMcpConfig(file),
+    (err) => err.message.endsWith("invalid JSON at line 1, column 9")
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});

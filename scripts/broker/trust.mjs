@@ -125,8 +125,10 @@ function jsonErrorOffset(text) {
 export function parseJsonSafely(text) {
   try {
     return JSON.parse(text);
-  } catch {
-    const at = jsonErrorOffset(text);
+  } catch (err) {
+    const given = /in JSON at position (\d+)(?: \(line \d+ column \d+\))?$/.exec(err.message);
+    const reported = given ? Number(given[1]) : -1;
+    const at = reported >= 0 && reported <= text.length ? reported : jsonErrorOffset(text);
     if (at < 0) throw new Error("invalid JSON");
     const before = text.slice(0, at);
     const line = before.split("\n").length;

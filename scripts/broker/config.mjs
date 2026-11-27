@@ -466,7 +466,7 @@ function secretVarName(server, key) {
   return `IGNIS_${server}_${key}`.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
 
-export function externalizeSecrets(servers) {
+function externalizeSecrets(servers) {
   const secrets = new Map();
   const owners = new Map();
   const out = {};
