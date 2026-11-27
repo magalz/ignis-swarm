@@ -146,8 +146,7 @@ export class Supervisor {
     let excess = siblings.length - maxInstances + 1;
     while (excess > 0 && idle.length > 0) {
       const [, entry] = idle.shift();
-      this._retire(entry);
-      await this._drain(entry);
+      await this._evictEntry(entry);
       excess -= 1;
     }
   }
@@ -577,20 +576,20 @@ export class Supervisor {
   async restart(req = {}) {
     const targetScope = req.cwd ? resolveRepoRoot(req.cwd) : null;
     const toRemove = [];
-    for (const [key, entry] of this.pool.entries()) {
+    for (const entry of this.pool.values()) {
       const serverMatch = !req.server || entry.server === req.server;
       const scopeMatch = !targetScope || entry.scope === targetScope;
       if (serverMatch && scopeMatch) {
-        toRemove.push([key, entry]);
+        toRemove.push(entry);
       }
     }
     let failure = null;
-    for (const [, entry] of toRemove) {
+    for (const entry of toRemove) {
       this._retire(entry);
     }
-    for (const [, entry] of toRemove) {
+    for (const entry of toRemove) {
       try {
-        await this._drain(entry);
+        await this._drain(entry, true);
       } catch (err) {
         failure ??= err;
       }
@@ -624,8 +623,7 @@ export class Supervisor {
           maxIdleMs > 0 &&
           now - entry.lastUsed >= maxIdleMs
         ) {
-          this._retire(entry);
-          await this._drain(entry);
+          await this._evictEntry(entry);
         }
       } catch (err) {
         this._recordSweepError(err, [entry.redact], entry);
