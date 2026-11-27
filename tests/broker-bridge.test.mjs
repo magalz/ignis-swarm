@@ -8,19 +8,9 @@ import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { postToDaemon } from "../scripts/broker/bridge.mjs";
-import { isolatedEnv } from "./helpers.mjs";
+import { isolatedEnv, waitUntil } from "./helpers.mjs";
 
 const WAIT_MS = 30_000;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitUntil(label, predicate, timeoutMs = WAIT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await sleep(25);
-  }
-}
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
 

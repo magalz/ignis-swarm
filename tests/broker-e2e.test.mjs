@@ -5,32 +5,14 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { isolatedEnv } from "./helpers.mjs";
+import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
+import { isolatedEnv, waitUntil } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
 
 const CLI_TIMEOUT_MS = 60_000;
 const WAIT_MS = 30_000;
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(label, predicate, timeoutMs = WAIT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await sleep(50);
-  }
-}
 
 test("isolatedEnv cleanup stops a daemon the test left running and removes its folder", { timeout: 120_000 }, async () => {
   const iso = isolatedEnv();
@@ -41,15 +23,18 @@ test("isolatedEnv cleanup stops a daemon the test left running and removes its f
     windowsHide: true,
   });
   let pid = 0;
+  let survived = true;
   try {
     assert.equal(started.status, 0, started.stderr);
     pid = JSON.parse(started.stdout).pid;
-    assert.ok(pidAlive(pid), "the lazy-started daemon is running");
+    assert.ok(isPidAlive(pid), "the lazy-started daemon is running");
   } finally {
     iso.cleanup();
-    if (pid && pidAlive(pid)) process.kill(pid, "SIGKILL");
+    survived = isPidAlive(pid);
+    if (pid && survived) process.kill(pid, "SIGKILL");
   }
-  await waitUntil("the daemon to exit", () => !pidAlive(pid), 5000);
+  assert.equal(survived, false, "cleanup stopped the daemon");
+  await waitUntil("the daemon to exit", () => !isPidAlive(pid), 5000);
   assert.equal(fs.existsSync(iso.dirs.root), false, "the iso folder is gone");
 });
 
@@ -160,7 +145,7 @@ rl.on("line", (line) => {
     windowsHide: true,
   });
   assert.equal(stopRes.status, 0, stopRes.stderr);
-  await waitUntil("the killed daemon to exit", () => !pidAlive(stJson.pid));
+  await waitUntil("the killed daemon to exit", () => !isPidAlive(stJson.pid));
 
   bridge.stdin.write(
     `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "ping", arguments: {} } } })}\n`

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 
 const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 
@@ -41,19 +42,18 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+export async function waitUntil(label, predicate, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 
 function waitForExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  while (pidAlive(pid) && Date.now() < deadline) sleepSync(50);
-  return !pidAlive(pid);
+  while (isPidAlive(pid) && Date.now() < deadline) sleepSync(50);
+  return !isPidAlive(pid);
 }
 
 function isBrokerDaemon(pid) {
@@ -89,7 +89,7 @@ function stopLeftoverDaemons(dirs, env) {
     } catch {
       continue;
     }
-    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || seen.has(pid) || !pidAlive(pid)) continue;
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || seen.has(pid) || !isPidAlive(pid)) continue;
     seen.add(pid);
     if (!isBrokerDaemon(pid)) continue;
     spawnSync(process.execPath, [BROKER_ENTRY, "stop"], { env, timeout: 15_000, windowsHide: true });
