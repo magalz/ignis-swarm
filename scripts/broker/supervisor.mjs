@@ -91,6 +91,7 @@ export class Supervisor {
     this.startedAt = Date.now();
     this.pool = new Map();
     this.pendingConnects = new Map();
+    this.retiredEntries = new Set();
     this.recentFallbacks = [];
     this.sweepErrors = [];
   }
