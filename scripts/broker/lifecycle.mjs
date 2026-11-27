@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { killProcessTree } from "./adapters.mjs";
 import { BROKER_VERSION } from "./config.mjs";
 
 export function daemonInfoPath(dataDir) {
@@ -187,6 +188,10 @@ async function waitUntilGone(pid, ms) {
 }
 
 async function killAndWait(pid) {
+  if (process.platform === "win32") {
+    await killProcessTree(pid);
+    return waitUntilGone(pid, KILL_WAIT_MS);
+  }
   try {
     process.kill(pid, "SIGTERM");
   } catch {}
@@ -195,6 +200,10 @@ async function killAndWait(pid) {
     process.kill(pid, "SIGKILL");
   } catch {}
   return waitUntilGone(pid, KILL_WAIT_MS);
+}
+
+function notExited(pid) {
+  return new Error(`ignis-broker daemon pid ${pid} did not exit`);
 }
 
 async function shutdownAndKill(info) {
@@ -214,7 +223,7 @@ export async function stopDaemon(dataDir) {
     }
     return false;
   }
-  if (!(await shutdownAndKill(info))) return true;
+  if (!(await shutdownAndKill(info))) throw notExited(info.pid);
   try {
     fs.rmSync(daemonInfoPath(dataDir), { force: true });
   } catch {}
@@ -264,6 +273,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
           throw new Error("could not stop the outdated ignis-broker daemon");
         }
       }
+      if (!h && isPidAlive(recheck.pid) && !(await killAndWait(recheck.pid))) throw notExited(recheck.pid);
       try {
         fs.rmSync(daemonInfoPath(dataDir), { force: true });
       } catch {}

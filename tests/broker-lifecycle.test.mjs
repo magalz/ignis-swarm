@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { BROKER_VERSION } from "../scripts/broker/config.mjs";
 import { acquireLock, ensureDaemon, isPidAlive, readDaemonInfo, stopDaemon } from "../scripts/broker/lifecycle.mjs";
 import { truncateContentBlocks } from "../scripts/broker/spill.mjs";
@@ -313,4 +313,119 @@ test("stopDaemon keeps daemon.json while a pid that does not answer health is st
   assert.equal(await stopDaemon(dataDir), false);
   assert.equal(isPidAlive(info.pid), true, "the unresponsive daemon is not killed");
   assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json still points at the live pid");
+});
+
+function pinPid(pid) {
+  const original = process.kill;
+  process.kill = (target, signal) => {
+    if (target === pid && signal !== 0 && signal !== undefined) return true;
+    return original.call(process, target, signal);
+  };
+  return () => {
+    process.kill = original;
+  };
+}
+
+const UNPINNABLE = { skip: !POSIX && "win32 kills through taskkill, which a signal pin cannot intercept" };
+
+test("stopDaemon throws and keeps daemon.json when the pid survives every kill", UNPINNABLE, async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const child = startFakeDaemon(iso.dirs.root, dataDir, BROKER_VERSION);
+  let unpin = () => {};
+  t.after(() => {
+    unpin();
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "fake daemon.json");
+  unpin = pinPid(info.pid);
+  await assert.rejects(stopDaemon(dataDir), new RegExp(`daemon pid ${info.pid} did not exit`));
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json still points at the live pid");
+});
+
+test("ignis-broker stop exits non-zero and names the pid when the daemon cannot be killed", UNPINNABLE, async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const child = startFakeDaemon(iso.dirs.root, dataDir, BROKER_VERSION);
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "fake daemon.json");
+  const harness = path.join(iso.dirs.root, "stop-harness.mjs");
+  fs.writeFileSync(
+    harness,
+    `
+const pid = Number(process.argv[2]);
+const original = process.kill;
+process.kill = (target, signal) => (target === pid && signal !== 0 && signal !== undefined ? true : original.call(process, target, signal));
+process.argv = [process.argv[0], ${JSON.stringify(BIN)}, "stop"];
+await import(${JSON.stringify(pathToFileURL(BIN).href)});
+`
+  );
+  const res = runNode(harness, [String(info.pid)], { env: iso.env, timeoutMs: 20_000 });
+  assert.equal(res.timedOut, false);
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, new RegExp(`error: ignis-broker daemon pid ${info.pid} did not exit`));
+  assert.doesNotMatch(res.stdout, /stopped/);
+  assert.equal(isPidAlive(info.pid), true);
+});
+
+test("ensureDaemon kills a hung daemon that no longer answers health before it spawns a new one", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "mute-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const hung = spawn(process.execPath, [script, dataDir], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(hung.pid);
+    killQuietly(readDaemonInfo(dataDir)?.pid);
+    iso.cleanup();
+  });
+  const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "mute daemon.json");
+  const fresh = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
+  assert.equal(isPidAlive(oldInfo.pid), false, "the hung daemon is dead");
+  assert.notEqual(fresh.pid, oldInfo.pid);
+  assert.equal(isPidAlive(fresh.pid), true);
+  assert.equal(await stopDaemon(dataDir), true);
+});
+
+test("ensureDaemon throws instead of spawning a second daemon when the hung pid survives", UNPINNABLE, async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "mute-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const hung = spawn(process.execPath, [script, dataDir], { stdio: "ignore", windowsHide: true });
+  let unpin = () => {};
+  t.after(() => {
+    unpin();
+    killQuietly(hung.pid);
+    killQuietly(readDaemonInfo(dataDir)?.pid);
+    iso.cleanup();
+  });
+  const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "mute daemon.json");
+  unpin = pinPid(oldInfo.pid);
+  await assert.rejects(ensureDaemon(iso.dirs.brokerHome, dataDir, BIN), new RegExp(`daemon pid ${oldInfo.pid} did not exit`));
+  assert.equal(readDaemonInfo(dataDir)?.pid, oldInfo.pid, "daemon.json was not replaced by a second daemon");
+});
+
+const TERM_IGNORING_DAEMON = FAKE_DAEMON.replace("setInterval", 'process.on("SIGTERM", () => {});\nsetInterval');
+
+test("stopDaemon escalates from SIGTERM to SIGKILL for a daemon that traps SIGTERM", { skip: !POSIX && "SIGTERM semantics are POSIX-only" }, async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "term-daemon.mjs");
+  fs.writeFileSync(script, TERM_IGNORING_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir, BROKER_VERSION], { stdio: "ignore" });
+  const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "term daemon.json");
+  assert.equal(await stopDaemon(dataDir), true);
+  assert.equal((await exited).signal, "SIGKILL", "ended by SIGKILL after it ignored SIGTERM");
+  assert.equal(isPidAlive(info.pid), false);
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), false);
 });

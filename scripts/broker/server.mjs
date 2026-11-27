@@ -13,6 +13,7 @@ import { Supervisor } from "./supervisor.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const DAEMON_LOG_MAX_BYTES = 256 * 1024;
+const CRASH_SHUTDOWN_MS = 2000;
 const IDLE_CHECK_MIN_MS = 250;
 const IDLE_CHECK_MAX_MS = 30_000;
 
@@ -354,7 +355,7 @@ export async function runDaemon(home, dataDir, port = 0) {
     const delay = Math.min(IDLE_CHECK_MAX_MS, Math.max(IDLE_CHECK_MIN_MS, limit / 4));
     const timer = setTimeout(() => {
       if (shuttingDown) return;
-      if (inFlight === 0 && Date.now() - lastActivity >= idleLimitMs()) {
+      if (inFlight === 0 && Date.now() - lastActivity >= limit) {
         void idleShutdown();
         return;
       }
@@ -373,8 +374,11 @@ export async function runDaemon(home, dataDir, port = 0) {
     process.exit(0);
   }
 
-  function crash(err) {
+  async function crash(err) {
     appendDaemonLog(dataDir, err);
+    try {
+      await Promise.race([supervisor.shutdown(), new Promise((resolve) => setTimeout(resolve, CRASH_SHUTDOWN_MS))]);
+    } catch {}
     removeDaemonInfoIfOwner(dataDir, process.pid);
     process.exit(1);
   }

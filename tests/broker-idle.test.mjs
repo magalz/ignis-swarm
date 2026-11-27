@@ -128,15 +128,22 @@ test("an uncaught async error is logged, daemon.json is removed and the exit cod
     iso.cleanup();
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
+  const closed = startHarness(iso, work, `setTimeout(() => { throw new Error("crash-test-boom"); }, 300);`);
+  const code = await closed;
+  assert.equal(code, 1);
+  assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
+  const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
+  assert.match(log, /crash-test-boom/);
+});
+
+function startHarness(iso, work, body) {
   const harness = path.join(work, "crash-harness.mjs");
   fs.writeFileSync(
     harness,
     `
 import { runDaemon } from ${JSON.stringify(SERVER_URL)};
 await runDaemon(process.argv[2], process.argv[3], 0);
-setTimeout(() => {
-  throw new Error("crash-test-boom");
-}, 300);
+${body}
 `
   );
   const child = spawn(process.execPath, [harness, iso.dirs.brokerHome, iso.dirs.brokerData], {
@@ -145,10 +152,104 @@ setTimeout(() => {
     stdio: "ignore",
   });
   const killer = setTimeout(() => child.kill("SIGKILL"), 8000);
-  const code = await new Promise((resolve) => child.once("close", resolve));
-  clearTimeout(killer);
-  assert.equal(code, 1);
+  return new Promise((resolve) => child.once("close", resolve)).finally(() => clearTimeout(killer));
+}
+
+test("an unhandled rejection is logged, daemon.json is removed and the exit code is 1", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-reject-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const closed = startHarness(iso, work, `setTimeout(() => { Promise.reject(new Error("reject-test-boom")); }, 300);`);
+  assert.equal(await closed, 1);
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
   const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
-  assert.match(log, /crash-test-boom/);
+  assert.match(log, /reject-test-boom/);
+});
+
+test("a crash trims daemon.log past 256 KiB and appends the new line at the end", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-logtrim-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const logFile = path.join(iso.dirs.brokerData, "daemon.log");
+  const before = 300 * 1024;
+  fs.writeFileSync(logFile, "old-line\n".repeat(Math.ceil(before / 9)));
+  const prefilled = fs.statSync(logFile).size;
+  assert.ok(prefilled > 256 * 1024);
+  const closed = startHarness(iso, work, `setTimeout(() => { throw new Error("trim-test-boom"); }, 300);`);
+  assert.equal(await closed, 1);
+  const size = fs.statSync(logFile).size;
+  assert.ok(size < prefilled, `log did not shrink: ${size} >= ${prefilled}`);
+  const lines = fs.readFileSync(logFile, "utf8").split("\n");
+  const lastIdx = lines.findLastIndex((l) => /trim-test-boom/.test(l));
+  assert.ok(lastIdx >= 0, "the crash line is missing");
+  assert.equal(lines.slice(lastIdx + 1).some((l) => l.includes("old-line")), false, "old lines follow the new one");
+});
+
+test("a crash shuts the supervisor down so a pooled child that ignores stdin EOF dies", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-crash-child-");
+  const pidFile = path.join(work, "child.pid");
+  const trigger = path.join(work, "go");
+  let childPid;
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    if (childPid) {
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {}
+    }
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const mock = path.join(work, "stubborn-mock.mjs");
+  fs.writeFileSync(
+    mock,
+    `
+import fs from "node:fs";
+import readline from "node:readline";
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } });
+  } else if (msg.method === "tools/list") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", inputSchema: { type: "object" } }] } });
+  } else if (msg.method === "tools/call") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "pong" }], isError: false } });
+  }
+});
+setInterval(() => {}, 1000);
+`
+  );
+  writeIdleConfig(iso, {
+    demo: { transport: "stdio", command: process.execPath, args: [mock], requestTimeoutMs: 20_000 },
+  });
+  const closed = startHarness(
+    iso,
+    work,
+    `
+const fs = await import("node:fs");
+setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(trigger)})) throw new Error("crash-child-boom");
+}, 100);
+`
+  );
+  await waitFor(() => fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), 8000);
+  const res = runNode(BIN, ["call", "demo", "ping"], { env: iso.env, timeoutMs: 15_000 });
+  assert.match(res.stdout, /pong/, `call failed: ${res.stderr}`);
+  childPid = Number(fs.readFileSync(pidFile, "utf8"));
+  assert.ok(isPidAlive(childPid));
+  fs.writeFileSync(trigger, "1");
+  assert.equal(await closed, 1);
+  const dead = await waitFor(() => !isPidAlive(childPid), 4000);
+  assert.equal(dead, true, "the pooled child survived the daemon crash");
 });
