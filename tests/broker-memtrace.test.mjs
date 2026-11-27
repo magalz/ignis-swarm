@@ -79,14 +79,16 @@ beforeEach(() => {
 const run = (tool, args) => tryCliFallback("memtrace", tool, args, iso.dirs.root, 20_000);
 
 describe("memtrace CLI fallback", () => {
-  test("a query that looks like a flag arrives last, after --, with options before it", async () => {
-    await run("find_symbol", { query: "--help", limit: 5 });
-    assert.deepEqual(readArgv(), ["find", "--limit", "5", "--", "--help"]);
+  test("the value comes last, with options before it", async () => {
+    await run("find_symbol", { query: "Widget render", limit: 5 });
+    assert.deepEqual(readArgv(), ["find", "--limit", "5", "Widget render"]);
   });
 
-  test("without a limit the argv is subcommand, --, value", async () => {
-    await run("callers", { symbol: "--repo=/x" });
-    assert.deepEqual(readArgv(), ["callers", "--", "--repo=/x"]);
+  test("a value that looks like a flag is never passed to the CLI", async () => {
+    for (const value of ["--help", "--repo=/x", "-l", "  --limit"]) {
+      assert.equal(await run("callers", { symbol: value }), null);
+    }
+    assert.equal(fs.existsSync(argvFile), false);
   });
 
   for (const [alias, sub] of ALIASES) {
@@ -98,9 +100,7 @@ describe("memtrace CLI fallback", () => {
         fs.rmSync(argvFile, { force: true });
         await run(alias, args);
         const argv = readArgv();
-        assert.equal(argv[0], sub);
-        assert.equal(argv[argv.length - 2], "--");
-        assert.equal(argv[argv.length - 1], `v-${keys[i]}`);
+        assert.deepEqual(argv, [sub, `v-${keys[i]}`]);
       }
     });
   }
