@@ -61,9 +61,18 @@ function isBrokerDaemon(pid) {
     process.platform === "win32"
       ? spawnSync("powershell", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`], { encoding: "utf8", timeout: 20_000, windowsHide: true })
       : spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
-  const text = query.stdout ?? "";
-  return /ignis-broker\.mjs/.test(text) && /\bdaemon\b/.test(text);
+  const text = comparablePath(query.stdout ?? "");
+  return OWN_ENTRIES.some((entry) => text.includes(entry)) && /\bdaemon\b/.test(text);
 }
+
+// Only a daemon started from this checkout's broker entry counts: the user's own
+// daemon runs the same file name from another folder and must never be stopped.
+function comparablePath(text) {
+  const forward = text.replaceAll("\\", "/");
+  return process.platform === "win32" ? forward.toLowerCase() : forward;
+}
+
+const OWN_ENTRIES = [...new Set([BROKER_ENTRY, fs.realpathSync.native(BROKER_ENTRY)].map(comparablePath))];
 
 function killTree(pid) {
   if (process.platform === "win32") {

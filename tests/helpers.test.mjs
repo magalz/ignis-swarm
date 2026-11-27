@@ -191,7 +191,8 @@ test("isolatedEnv cleanup leaves alone a daemon recorded in its folder that runs
   const fakeEntry = path.join(elsewhere, "scripts", "ignis-broker.mjs");
   fs.mkdirSync(path.dirname(fakeEntry), { recursive: true });
   fs.writeFileSync(fakeEntry, "setInterval(() => {}, 1000);\n");
-  const other = spawn(process.execPath, [fakeEntry, "daemon"], { cwd: elsewhere, stdio: "ignore", windowsHide: true });
+  const other = spawn(process.execPath, [fakeEntry, "daemon"], { cwd: os.tmpdir(), stdio: "ignore", windowsHide: true });
+  const exited = new Promise((resolve) => other.once("exit", resolve));
   try {
     await waitUntil("the other daemon to start", () => isPidAlive(other.pid), 10_000);
     fs.writeFileSync(path.join(iso.dirs.brokerData, "daemon.json"), JSON.stringify({ pid: other.pid }));
@@ -202,7 +203,7 @@ test("isolatedEnv cleanup leaves alone a daemon recorded in its folder that runs
     assert.equal(fs.existsSync(iso.dirs.root), false, "the iso folder is still removed");
   } finally {
     other.kill("SIGKILL");
-    await waitUntil("the other daemon to exit", () => !isPidAlive(other.pid), 10_000);
+    await exited;
     fs.rmSync(elsewhere, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

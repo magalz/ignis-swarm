@@ -34,7 +34,6 @@ test("isolatedEnv cleanup stops a daemon the test left running and removes its f
     if (pid && survived) process.kill(pid, "SIGKILL");
   }
   assert.equal(survived, false, "cleanup stopped the daemon");
-  await waitUntil("the daemon to exit", () => !isPidAlive(pid), 5000);
   assert.equal(fs.existsSync(iso.dirs.root), false, "the iso folder is gone");
 });
 
