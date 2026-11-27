@@ -39,6 +39,50 @@ function compactSummary(desc) {
   return first.length <= 140 ? first : `${first.slice(0, 137)}...`;
 }
 
+function routeMeta({ server, source, idx, primarySource, localError, cwd, retried, truncated, spillPath }) {
+  const fallbackFrom =
+    idx > 0 ? primarySource : localError && source === "global" ? "local" : null;
+  return {
+    server,
+    source,
+    ...(fallbackFrom ? { fallbackFrom } : {}),
+    ...(localError ? { localError } : {}),
+    ...(cwd ? { cwd } : {}),
+    retried,
+    truncated,
+    ...(spillPath ? { spillPath } : {}),
+  };
+}
+
+function fallbackEvent(server, from, to, reason, cwd) {
+  return {
+    ts: String(Math.floor(Date.now() / 1000)),
+    server,
+    from,
+    to,
+    reason,
+    ...(cwd ? { cwd } : {}),
+  };
+}
+
+function summarizeServers(candidates, poolSnap) {
+  const servers = [];
+  for (const [name, chain] of candidates.entries()) {
+    const primary = chain[0];
+    const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
+    servers.push({
+      name,
+      primarySource: primary.source,
+      hasGlobalFallback: chain.length > 1,
+      perWorkspace: primary.config.perWorkspace,
+      transport: primary.config.transport,
+      state: activeWorkspaces > 0 ? "connected" : "idle",
+      activeWorkspaces,
+    });
+  }
+  return servers;
+}
+
 export class Supervisor {
   constructor(brokerHome, dataDir, port = 0) {
     this.brokerHome = brokerHome;
@@ -202,23 +246,18 @@ export class Supervisor {
 
       if (existing?.cachedTools && existing.configDigest === configDigest && (await existing.adapter.isAlive())) {
         existing.lastUsed = Date.now();
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
         return {
           tools: existing.cachedTools,
-          meta: {
+          meta: routeMeta({
             server: serverName,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(cwd ? { cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd,
             retried: false,
             truncated: false,
-          },
+          }),
         };
       }
 
@@ -239,36 +278,26 @@ export class Supervisor {
           }
         }
         entry.cachedTools = tools;
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
         return {
           tools,
-          meta: {
+          meta: routeMeta({
             server: serverName,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(cwd ? { cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd,
             retried,
             truncated: false,
-          },
+          }),
         };
       } catch (err) {
         const bErr = sanitizeError(err, [candidate.config]);
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
-          this._recordFallback({
-            ts: String(Math.floor(Date.now() / 1000)),
-            server: serverName,
-            from: candidate.source,
-            to: chain[idx + 1].source,
-            reason: bErr.message,
-            ...(cwd ? { cwd } : {}),
-          });
+          this._recordFallback(
+            fallbackEvent(serverName, candidate.source, chain[idx + 1].source, bErr.message, cwd)
+          );
           lastError = bErr;
           continue;
         }
@@ -300,22 +329,8 @@ export class Supervisor {
     const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     if (!req.server) {
       const poolSnap = await this._poolSnapshot();
-      const servers = [];
-      for (const [name, chain] of resolved.candidates.entries()) {
-        const primary = chain[0];
-        const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
-        servers.push({
-          name,
-          primarySource: primary.source,
-          hasGlobalFallback: chain.length > 1,
-          perWorkspace: primary.config.perWorkspace,
-          transport: primary.config.transport,
-          state: activeWorkspaces > 0 ? "connected" : "idle",
-          activeWorkspaces,
-        });
-      }
       return {
-        servers,
+        servers: summarizeServers(resolved.candidates, poolSnap),
         ...(resolved.localConfigError ? { localConfigError: resolved.localConfigError } : {}),
       };
     }
@@ -411,40 +426,30 @@ export class Supervisor {
           spillDir,
           Boolean(req.full)
         );
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
 
         return {
           content: trunc.content,
           isError: res.isError,
-          meta: {
+          meta: routeMeta({
             server: req.server,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(req.cwd ? { cwd: req.cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd: req.cwd,
             retried,
             truncated: trunc.truncated,
-            ...(trunc.spillPath ? { spillPath: trunc.spillPath } : {}),
-          },
+            spillPath: trunc.spillPath,
+          }),
         };
       } catch (err) {
         const bErr = sanitizeError(err, [candidate.config]);
         if (bErr.kind === "timeout") throw bErr;
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
-          this._recordFallback({
-            ts: String(Math.floor(Date.now() / 1000)),
-            server: req.server,
-            from: candidate.source,
-            to: chain[idx + 1].source,
-            reason: bErr.message,
-            ...(req.cwd ? { cwd: req.cwd } : {}),
-          });
+          this._recordFallback(
+            fallbackEvent(req.server, candidate.source, chain[idx + 1].source, bErr.message, req.cwd)
+          );
           lastError = bErr;
           continue;
         }
@@ -472,14 +477,9 @@ export class Supervisor {
         throw sanitizeError(err, chain.map((c) => c.config));
       }
       if (cliRes) {
-        this._recordFallback({
-          ts: String(Math.floor(Date.now() / 1000)),
-          server: req.server,
-          from: chain[chain.length - 1].source,
-          to: "cli_fallback",
-          reason: lastError.message,
-          ...(req.cwd ? { cwd: req.cwd } : {}),
-        });
+        this._recordFallback(
+          fallbackEvent(req.server, chain[chain.length - 1].source, "cli_fallback", lastError.message, req.cwd)
+        );
         const trunc = truncateContentBlocks(
           cliRes.content,
           maxBytes,
@@ -511,21 +511,6 @@ export class Supervisor {
   async status(req = {}) {
     const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const poolSnap = await this._poolSnapshot();
-    const servers = [];
-
-    for (const [name, chain] of resolved.candidates.entries()) {
-      const primary = chain[0];
-      const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
-      servers.push({
-        name,
-        primarySource: primary.source,
-        hasGlobalFallback: chain.length > 1,
-        perWorkspace: primary.config.perWorkspace,
-        transport: primary.config.transport,
-        state: activeWorkspaces > 0 ? "connected" : "idle",
-        activeWorkspaces,
-      });
-    }
 
     return {
       pid: process.pid,
@@ -534,7 +519,7 @@ export class Supervisor {
       port: this.port,
       ...(resolved.localPath ? { localConfigPath: resolved.localPath } : {}),
       ...(resolved.localConfigError ? { localConfigError: resolved.localConfigError } : {}),
-      servers,
+      servers: summarizeServers(resolved.candidates, poolSnap),
       pool: poolSnap,
       recentFallbacks: [...this.recentFallbacks],
       sweepErrors: [...this.sweepErrors],

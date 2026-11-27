@@ -247,8 +247,40 @@ export function redactSecrets(text, config) {
   return out;
 }
 
-export class McpStdioAdapter {
+class McpAdapterBase {
+  _err(kind, message) {
+    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
+  }
+
+  async listTools() {
+    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
+    const tools = Array.isArray(res?.tools) ? res.tools : [];
+    return tools
+      .filter((t) => t && typeof t.name === "string")
+      .map((t) => ({
+        name: t.name,
+        description: typeof t.description === "string" ? t.description : "",
+        inputSchema: t.inputSchema || { type: "object", properties: {} },
+        ...(t.annotations ? { annotations: t.annotations } : {}),
+      }));
+  }
+
+  async callTool(tool, args) {
+    const res = await this._request(
+      "tools/call",
+      { name: tool, arguments: args && typeof args === "object" ? args : {} },
+      this.requestTimeoutMs
+    );
+    return {
+      content: Array.isArray(res?.content) ? res.content : [],
+      isError: Boolean(res?.isError),
+    };
+  }
+}
+
+export class McpStdioAdapter extends McpAdapterBase {
   constructor({ command, args, env, cwd, startupTimeoutMs, requestTimeoutMs, redact }) {
+    super();
     this.redactConfig = redact || null;
     this.command = command;
     this.args = args || [];
@@ -261,10 +293,6 @@ export class McpStdioAdapter {
     this.pending = new Map();
     this.alive = false;
     this.stderrRing = [];
-  }
-
-  _err(kind, message) {
-    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
   }
 
   static async start(opts) {
@@ -425,31 +453,6 @@ export class McpStdioAdapter {
     });
   }
 
-  async listTools() {
-    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
-    const tools = Array.isArray(res?.tools) ? res.tools : [];
-    return tools
-      .filter((t) => t && typeof t.name === "string")
-      .map((t) => ({
-        name: t.name,
-        description: typeof t.description === "string" ? t.description : "",
-        inputSchema: t.inputSchema || { type: "object", properties: {} },
-        ...(t.annotations ? { annotations: t.annotations } : {}),
-      }));
-  }
-
-  async callTool(tool, args) {
-    const res = await this._request(
-      "tools/call",
-      { name: tool, arguments: args && typeof args === "object" ? args : {} },
-      this.requestTimeoutMs
-    );
-    return {
-      content: Array.isArray(res?.content) ? res.content : [],
-      isError: Boolean(res?.isError),
-    };
-  }
-
   async isAlive() {
     return Boolean(this.alive && this.proc && this.proc.exitCode === null && !this.proc.killed);
   }
@@ -462,12 +465,6 @@ export class McpStdioAdapter {
     } catch {}
     this.proc = null;
     if (pid) await killProcessTree(pid);
-  }
-
-  lastStderr() {
-    return this.stderrRing.length > 0
-      ? redactSecrets(this.stderrRing.join("\n"), this.redactConfig)
-      : null;
   }
 }
 
@@ -513,8 +510,9 @@ function parseSseJsonRpc(body, expectedId) {
   );
 }
 
-export class McpHttpAdapter {
+export class McpHttpAdapter extends McpAdapterBase {
   constructor({ url, headers, startupTimeoutMs, requestTimeoutMs, redact }) {
+    super();
     this.redactConfig = redact || { url, headers };
     this.url = url;
     this.headers = headers || {};
@@ -523,10 +521,6 @@ export class McpHttpAdapter {
     this.sessionId = null;
     this.nextId = 1;
     this.alive = true;
-  }
-
-  _err(kind, message) {
-    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
   }
 
   static async connect(opts) {
@@ -617,41 +611,12 @@ export class McpHttpAdapter {
     return msg.result ?? null;
   }
 
-  async listTools() {
-    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
-    const tools = Array.isArray(res?.tools) ? res.tools : [];
-    return tools
-      .filter((t) => t && typeof t.name === "string")
-      .map((t) => ({
-        name: t.name,
-        description: typeof t.description === "string" ? t.description : "",
-        inputSchema: t.inputSchema || { type: "object", properties: {} },
-        ...(t.annotations ? { annotations: t.annotations } : {}),
-      }));
-  }
-
-  async callTool(tool, args) {
-    const res = await this._request(
-      "tools/call",
-      { name: tool, arguments: args && typeof args === "object" ? args : {} },
-      this.requestTimeoutMs
-    );
-    return {
-      content: Array.isArray(res?.content) ? res.content : [],
-      isError: Boolean(res?.isError),
-    };
-  }
-
   async isAlive() {
     return this.alive;
   }
 
   async shutdown() {
     this.alive = false;
-  }
-
-  lastStderr() {
-    return null;
   }
 }
 
