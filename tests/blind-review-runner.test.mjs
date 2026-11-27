@@ -715,6 +715,26 @@ test(
   }
 );
 
+test(
+  "Windows plain .cmd codex shim with a double quote in the model records a fallback marker instead of exiting 1",
+  { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
+  async () => {
+    const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+    withFixture(({ dataDir, shimDir, repo }) => {
+      writeOnboarding(dataDir, { ...headlessRouting(), headlessBackend: "codex", headlessModel: 'o"3' });
+      const cmdPath = path.join(shimDir, "codex-plain.cmd");
+      fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
+      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: cmdPath });
+      assert.equal(res.status, 0, res.stderr);
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.useNative, true);
+      assert.equal(out.fallbackToNative, true);
+      assert.match(out.reason, /double quotes/);
+      assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    });
+  }
+);
+
 test("uncommitted working-tree edits are included when --base HEAD is passed", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
