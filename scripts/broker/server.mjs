@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { BrokerError } from "./adapters.mjs";
-import { BROKER_VERSION } from "./config.mjs";
+import { BROKER_VERSION, DEFAULT_CONFIG, resolveConfig } from "./config.mjs";
 import {
   generateToken,
   removeDaemonInfoIfOwner,
@@ -10,6 +12,25 @@ import {
 import { Supervisor } from "./supervisor.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
+const DAEMON_LOG_MAX_BYTES = 256 * 1024;
+const IDLE_CHECK_MIN_MS = 250;
+const IDLE_CHECK_MAX_MS = 30_000;
+
+function appendDaemonLog(dataDir, err) {
+  const file = path.join(dataDir, "daemon.log");
+  const detail = err instanceof Error ? err.stack || err.message : String(err);
+  const line = `${new Date().toISOString()} ${detail}\n`;
+  try {
+    if (fs.statSync(file).size > DAEMON_LOG_MAX_BYTES) {
+      const buf = fs.readFileSync(file);
+      fs.writeFileSync(file, buf.subarray(buf.length >> 1));
+    }
+  } catch {}
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.appendFileSync(file, line);
+  } catch {}
+}
 
 export function metaToolsCatalog() {
   return [
@@ -240,6 +261,8 @@ export async function runDaemon(home, dataDir, port = 0) {
   const token = generateToken();
   const supervisor = new Supervisor(home, dataDir, port);
   let shuttingDown = false;
+  let inFlight = 0;
+  let lastActivity = Date.now();
 
   const server = http.createServer(async (req, res) => {
     const auth = req.headers.authorization;
@@ -250,6 +273,8 @@ export async function runDaemon(home, dataDir, port = 0) {
     }
 
     const url = req.url || "/";
+    inFlight += 1;
+    lastActivity = Date.now();
     try {
       if (req.method === "GET" && url === "/health") {
         sendJson(res, 200, { ok: true, version: BROKER_VERSION, pid: process.pid });
@@ -288,6 +313,9 @@ export async function runDaemon(home, dataDir, port = 0) {
       sendJson(res, 404, { error: "not found" });
     } catch (err) {
       sendJson(res, mapErrorStatus(err), { error: err.message || String(err) });
+    } finally {
+      inFlight -= 1;
+      lastActivity = Date.now();
     }
   });
 
@@ -311,6 +339,49 @@ export async function runDaemon(home, dataDir, port = 0) {
     void supervisor.maintenanceSweep();
   }, 60_000);
   sweepTimer.unref();
+
+  function idleLimitMs() {
+    let secs;
+    try {
+      secs = resolveConfig(home, null, dataDir).defaults.idleTimeoutSecs;
+    } catch {}
+    if (typeof secs !== "number" || !Number.isFinite(secs) || secs <= 0) secs = DEFAULT_CONFIG.idleTimeoutSecs;
+    return secs * 1000;
+  }
+
+  function scheduleIdleCheck() {
+    const limit = idleLimitMs();
+    const delay = Math.min(IDLE_CHECK_MAX_MS, Math.max(IDLE_CHECK_MIN_MS, limit / 4));
+    const timer = setTimeout(() => {
+      if (shuttingDown) return;
+      if (inFlight === 0 && Date.now() - lastActivity >= idleLimitMs()) {
+        void idleShutdown();
+        return;
+      }
+      scheduleIdleCheck();
+    }, delay);
+    timer.unref();
+  }
+
+  async function idleShutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(sweepTimer);
+    removeDaemonInfoIfOwner(dataDir, process.pid);
+    await new Promise((r) => server.close(r));
+    await supervisor.shutdown();
+    process.exit(0);
+  }
+
+  function crash(err) {
+    appendDaemonLog(dataDir, err);
+    removeDaemonInfoIfOwner(dataDir, process.pid);
+    process.exit(1);
+  }
+
+  scheduleIdleCheck();
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
 
   async function shutdown() {
     if (shuttingDown) return;
