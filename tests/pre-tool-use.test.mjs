@@ -134,6 +134,8 @@ const ROWS = [
   ["cmd /c git reset --hard", "deny", RESET_HARD],
   ['cmd.exe /k "git reset --hard"', "deny", RESET_HARD],
   ['git -C "C:\\repo\\" reset --hard', "deny", RESET_HARD],
+  ["echo \\'; git reset --hard; echo \\'", "deny", RESET_HARD],
+  ["echo it\\'s fine", null],
   ["git reset --soft HEAD~1", null],
   ["git reset HEAD file.txt", null],
   ['echo "git reset --hard"', null],
@@ -233,6 +235,21 @@ test("evaluateCommand returns the strongest verdict across segments", () => {
   assert.equal(evaluateCommand("git reset --hard && git clean -fd").decision, "deny");
   assert.equal(evaluateCommand("npm test && git clean -fd").decision, "force_ask");
   assert.equal(evaluateCommand("git push -f origin feat/a ; git push -f origin main").decision, "deny");
+});
+
+test("evaluateCommand asks before analysing deeply nested shell wrappers", () => {
+  let command = "git status";
+  for (let depth = 0; depth < 12; depth += 1) {
+    command = `sh -c "${command.replace(/[\\"]/g, "\\$&")}"`;
+  }
+  const result = evaluateCommand(command);
+  assert.equal(result.decision, "force_ask");
+  assert.match(result.reason, /deeply nested shell wrappers/);
+  let shallow = "git reset --hard";
+  for (let depth = 0; depth < 3; depth += 1) {
+    shallow = `sh -c "${shallow.replace(/[\\"]/g, "\\$&")}"`;
+  }
+  assert.equal(evaluateCommand(shallow).decision, "deny");
 });
 
 function runCommand(commandLine) {
