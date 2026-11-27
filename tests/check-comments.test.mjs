@@ -74,6 +74,9 @@ const CLEAN = {
   "regex with escaped slashes": lines(String.raw`const r = /https?:\/\//;`),
   "regex used as a call argument": lines(String.raw`const x = s.replace(/\/\/.*$/, "");`),
   "regex after a keyword that follows a spread": lines(String.raw`const a = [...typeof /\//];`),
+  "regex after the in keyword that follows a private name": lines(
+    String.raw`class A { #x; m() { return #x in /\//; } }`,
+  ),
   "regex after an arrow": lines(String.raw`const f = (s) => /\//.test(s);`),
   "regex after return": lines(String.raw`function f(s) { return /\//.test(s); }`),
   "regex after typeof": lines(String.raw`const k = typeof /\//;`),
@@ -230,7 +233,15 @@ for (const keyword of REGEX_KEYWORDS) {
   ];
 }
 
-const OPTIONAL_MEMBER = "const q = obj?.return / 2; // c\n";
+for (const keyword of REGEX_KEYWORDS) {
+  const source = `const q = this.#${keyword} / 2; // c\n`;
+  FLAGGED[`comment after dividing the private member #${keyword}`] = [
+    source,
+    [`case.mjs:1:${commentColumn(source, 1)}: line comment`],
+  ];
+}
+
+const OPTIONAL_MEMBER ="const q = obj?.return / 2; // c\n";
 FLAGGED["comment after dividing an optional chaining member"] = [
   OPTIONAL_MEMBER,
   [`case.mjs:1:${commentColumn(OPTIONAL_MEMBER, 1)}: line comment`],

@@ -4,7 +4,7 @@ import path from "node:path";
 const USAGE = "usage: node check-comments.mjs <dir|file>...";
 const EXTENSIONS = new Set([".mjs", ".js", ".cjs"]);
 const REGEX_KEYWORDS = new Set(["return", "typeof", "case", "void", "in", "of", "delete", "throw", "new"]);
-const WORD_CHAR = /[\w$]|[^\u0000-\u007f\s]/;
+const WORD_CHAR = /[\w$#]|[^\u0000-\u007f\s]/;
 
 function findComments(src) {
   const found = [];
