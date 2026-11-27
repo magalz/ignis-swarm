@@ -157,7 +157,11 @@ test("a stdio server that prints its env token to stderr and exits leaks nothing
   const script = path.join(home, "leaky.mjs");
   fs.writeFileSync(
     script,
-    `process.stderr.write("fatal: bad key " + process.env.MY_KEY + "\\n");\nprocess.exit(1);\n`
+    `import { spawn } from "node:child_process";
+spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], { stdio: ["ignore", "inherit", "ignore"], detached: true, windowsHide: true }).unref();
+process.stderr.write("fatal: bad key " + process.env.MY_KEY + "\\n");
+setTimeout(() => process.exit(1), 150);
+`
   );
   writeServers({
     demo: {
@@ -171,6 +175,8 @@ test("a stdio server that prints its env token to stderr and exits leaks nothing
   const err = await failingCall(sup, repo);
   const all = await everything(sup, repo, err);
   assert.ok(!all.includes(TOKEN), all);
+  assert.ok(err.message.includes("stdio child exited"), err.message);
+  assert.ok(err.message.includes("fatal: bad key"), err.message);
 });
 
 test("a stdio server error that echoes its env token leaks nothing", async (t) => {
