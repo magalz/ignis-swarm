@@ -73,6 +73,7 @@ const CLEAN = {
   ),
   "regex with escaped slashes": lines(String.raw`const r = /https?:\/\//;`),
   "regex used as a call argument": lines(String.raw`const x = s.replace(/\/\/.*$/, "");`),
+  "regex after a keyword that follows a spread": lines(String.raw`const a = [...typeof /\//];`),
   "regex after an arrow": lines(String.raw`const f = (s) => /\//.test(s);`),
   "regex after return": lines(String.raw`function f(s) { return /\//.test(s); }`),
   "regex after typeof": lines(String.raw`const k = typeof /\//;`),
@@ -218,6 +219,28 @@ for (const dividend of DIVIDENDS) {
     [`case.mjs:1:${source.indexOf("//") + 1}: line comment`],
   ];
 }
+
+const commentColumn = (source, row) => source.split("\n")[row - 1].indexOf("//") + 1;
+
+for (const keyword of REGEX_KEYWORDS) {
+  const source = `const q = obj.${keyword} / 2; // c\n`;
+  FLAGGED[`comment after dividing the member ${keyword}`] = [
+    source,
+    [`case.mjs:1:${commentColumn(source, 1)}: line comment`],
+  ];
+}
+
+const OPTIONAL_MEMBER = "const q = obj?.return / 2; // c\n";
+FLAGGED["comment after dividing an optional chaining member"] = [
+  OPTIONAL_MEMBER,
+  [`case.mjs:1:${commentColumn(OPTIONAL_MEMBER, 1)}: line comment`],
+];
+
+const SPLIT_MEMBER = "const q = obj.\n  of / 2; // c\n";
+FLAGGED["comment after dividing a member whose dot is on the previous line"] = [
+  SPLIT_MEMBER,
+  [`case.mjs:2:${commentColumn(SPLIT_MEMBER, 2)}: line comment`],
+];
 
 for (const [name, [source, expected]] of Object.entries(FLAGGED)) {
   test(`fails: ${name}`, () => {

@@ -14,6 +14,7 @@ function findComments(src) {
   let line = 1;
   let lineStart = i;
   let regexAllowed = true;
+  let afterDot = false;
 
   const newline = (at) => {
     line += 1;
@@ -133,10 +134,12 @@ function findComments(src) {
     } else if (WORD_CHAR.test(c)) {
       let end = i + 1;
       while (end < n && WORD_CHAR.test(src[end])) end += 1;
-      regexAllowed = REGEX_KEYWORDS.has(src.slice(i, end));
+      regexAllowed = !afterDot && REGEX_KEYWORDS.has(src.slice(i, end));
+      afterDot = false;
       i = end;
     } else {
       regexAllowed = c !== ")" && c !== "]" && !((c === "+" || c === "-") && src[i - 1] === c);
+      afterDot = c === "." && src[i - 1] !== ".";
       i += 1;
     }
   }
