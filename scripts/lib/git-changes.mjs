@@ -132,19 +132,18 @@ export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAUL
       }
     }
 
-    let indexEnv;
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-git-index-"));
+    const indexCopy = path.join(scratch, "index");
+    const located = git(root, ["rev-parse", "--git-path", "index"], { env, timeoutMs });
+    const locateFailure = failure(located, "rev-parse --git-path index");
+    if (locateFailure) {
+      result.error = locateFailure;
+      return result;
+    }
+    const realIndex = path.resolve(root, firstLine(located));
+    if (fs.existsSync(realIndex)) fs.copyFileSync(realIndex, indexCopy);
+    const indexEnv = { GIT_INDEX_FILE: indexCopy };
     if (entries.length > 0) {
-      scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-git-index-"));
-      const indexCopy = path.join(scratch, "index");
-      const located = git(root, ["rev-parse", "--git-path", "index"], { env, timeoutMs });
-      const locateFailure = failure(located, "rev-parse --git-path index");
-      if (locateFailure) {
-        result.error = locateFailure;
-        return result;
-      }
-      const realIndex = path.resolve(root, firstLine(located));
-      if (fs.existsSync(realIndex)) fs.copyFileSync(realIndex, indexCopy);
-      indexEnv = { GIT_INDEX_FILE: indexCopy };
       const added = git(root, ["add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"], {
         env,
         timeoutMs,
