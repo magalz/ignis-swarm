@@ -62,6 +62,66 @@ for (const name of ["read_file", "write_file", "manage_subagents", "define_subag
   });
 }
 
+const JSON_ENCODED_COMMANDS = [
+  ['"git reset --hard"', "git reset --hard"],
+  ['  "git status"  ', "git status"],
+  ['"echo \\"hi\\" && ls"', 'echo "hi" && ls'],
+  ['"C:\\\\Program Files\\\\app.exe --flag"', "C:\\Program Files\\app.exe --flag"],
+];
+
+const PLAIN_COMMANDS = [
+  'git -C "D:/my repo" status',
+  'git commit -m "msg"',
+  '"a" && "b"',
+  '"node" "script.js" --flag',
+  '"C:\\Program Files\\app.exe"',
+  '"unterminated',
+  '"',
+  "plain command",
+];
+
+function commandSeenByRules(commandLine) {
+  const root = mkTemp("ignis-dispatch-echo-");
+  try {
+    fs.cpSync(HOOKS_DIR, path.join(root, "hooks"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "hooks", "command-rules.mjs"),
+      'export function evaluateCommand(commandLine) { return { decision: "deny", reason: commandLine }; }\n',
+    );
+    const { out } = runHook(toolPayload("run_command", { CommandLine: commandLine }), {
+      hookPath: path.join(root, "hooks", "pre-tool-use.mjs"),
+    });
+    return out.reason;
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+test("a TypeName that is a JSON-encoded string is still gated", () => {
+  const { out } = runHook(toolPayload("invoke_subagent", { TypeName: JSON.stringify("blind-edge-hunter") }), {
+    state: HEADLESS_ALWAYS,
+  });
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /headless_always/);
+});
+
+test("a CommandLine that is a JSON-encoded string is still denied", () => {
+  const { out } = runHook(toolPayload("run_command", { CommandLine: JSON.stringify("git reset --hard") }));
+  assert.equal(out.decision, "deny");
+});
+
+test("the command rules see a JSON-encoded CommandLine as its plain value", () => {
+  for (const [encoded, plain] of JSON_ENCODED_COMMANDS) {
+    assert.equal(commandSeenByRules(encoded), plain, encoded);
+  }
+});
+
+test("a CommandLine that is not one whole JSON string literal reaches the command rules unchanged", () => {
+  for (const commandLine of PLAIN_COMMANDS) {
+    assert.equal(commandSeenByRules(commandLine), commandLine, commandLine);
+  }
+});
+
 test("a payload without a tool name gets no opinion", () => {
   const { out } = runHook(JSON.stringify({ toolCall: { args: { CommandLine: "git reset --hard" } } }));
   assert.deepEqual(out, NO_OPINION);

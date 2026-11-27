@@ -9,8 +9,30 @@ function normalizeToolName(name) {
   return typeof name === "string" ? name.toLowerCase().replace(/[_\s-]/g, "") : "";
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function isReadablePayload(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+  return isPlainObject(value) && Object.keys(value).length > 0;
+}
+
+function unwrapJsonLiteral(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) return value;
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "string" ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeArgs(payload) {
+  const args = payload.toolCall?.args;
+  if (!isPlainObject(args)) return;
+  payload.toolCall.args = Object.fromEntries(Object.entries(args).map(([key, value]) => [key, unwrapJsonLiteral(value)]));
 }
 
 async function evaluate(payload) {
@@ -37,6 +59,7 @@ async function main() {
     process.stdout.write(JSON.stringify(noOpinion()));
     return;
   }
+  normalizeArgs(payload);
   const result = await evaluate(payload);
   process.stdout.write(JSON.stringify(result ?? noOpinion()));
 }
