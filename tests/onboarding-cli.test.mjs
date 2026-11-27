@@ -423,7 +423,7 @@ test("hasFreshNativeFallback fails safe on missing or corrupt state", () => {
   }
 });
 
-test("hasFreshNativeFallback matches parent/subdir boundaries, resolves symlinks, and rejects sibling prefixes", () => {
+test("hasFreshNativeFallback matches ancestor-or-equal boundaries directionally, resolves symlinks, and rejects nested-to-parent and sibling prefixes", () => {
   const parentData = mkTemp("ignis-blind-parent-");
   const subData = mkTemp("ignis-blind-sub-");
   const rootData = mkTemp("ignis-blind-root-");
@@ -431,10 +431,11 @@ test("hasFreshNativeFallback matches parent/subdir boundaries, resolves symlinks
   try {
     const repo = path.join(wsRoot, "repo");
     const sub = path.join(repo, "packages", "app");
+    const subChild = path.join(sub, "src");
     const otherSub = path.join(repo, "packages", "other");
     const sibling = path.join(wsRoot, "repo-other");
     const link = path.join(wsRoot, "repo-link");
-    fs.mkdirSync(sub, { recursive: true });
+    fs.mkdirSync(subChild, { recursive: true });
     fs.mkdirSync(otherSub, { recursive: true });
     fs.mkdirSync(sibling, { recursive: true });
     fs.symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
@@ -449,9 +450,18 @@ test("hasFreshNativeFallback matches parent/subdir boundaries, resolves symlinks
     assert.equal(hasFreshNativeFallback(parentData, [sibling], now), false);
     assert.equal(hasFreshNativeFallback(parentData, [path.join(sibling, "packages", "app")], now), false);
 
+    recordBlindReviewState(parentData, sub, { fallbackToNative: false, reason: "sub-cleared", nowMs: now + 1 });
+    assert.equal(hasFreshNativeFallback(parentData, [sub], now + 1), false);
+    assert.equal(hasFreshNativeFallback(parentData, [subChild], now + 1), false);
+    assert.equal(hasFreshNativeFallback(parentData, [repo], now + 1), true);
+    assert.equal(hasFreshNativeFallback(parentData, [otherSub], now + 1), true);
+
     recordBlindReviewState(subData, sub, { fallbackToNative: true, reason: "sub", nowMs: now });
-    assert.equal(hasFreshNativeFallback(subData, [repo], now), true);
-    assert.equal(hasFreshNativeFallback(subData, [link], now), true);
+    assert.equal(hasFreshNativeFallback(subData, [sub], now), true);
+    assert.equal(hasFreshNativeFallback(subData, [subChild], now), true);
+    assert.equal(hasFreshNativeFallback(subData, [path.join(link, "packages", "app")], now), true);
+    assert.equal(hasFreshNativeFallback(subData, [repo], now), false);
+    assert.equal(hasFreshNativeFallback(subData, [link], now), false);
     assert.equal(hasFreshNativeFallback(subData, [otherSub], now), false);
     assert.equal(hasFreshNativeFallback(subData, [sibling], now), false);
 
@@ -467,14 +477,79 @@ test("hasFreshNativeFallback matches parent/subdir boundaries, resolves symlinks
   }
 });
 
-test("recordBlindReviewState cleans up temp file when rename fails", () => {
+test("recordBlindReviewState cleans up temp and lock files when rename fails", () => {
   const dir = mkTemp("ignis-blind-tmp-");
   try {
     fs.mkdirSync(blindReviewStatePath(dir));
     assert.throws(() => recordBlindReviewState(dir, "/work", { fallbackToNative: true }));
-    const leftovers = fs.readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+    const leftovers = fs
+      .readdirSync(dir)
+      .filter((name) => name.endsWith(".tmp") || name.endsWith(".lock"));
     assert.deepEqual(leftovers, []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordBlindReviewState recovers stale lock and serializes concurrent multi-process writes", async () => {
+  const { spawn } = await import("node:child_process");
+  const dir = mkTemp("ignis-blind-conc-");
+  const wsBase = mkTemp("ignis-blind-conc-ws-");
+  try {
+    const lockPath = `${blindReviewStatePath(dir)}.lock`;
+    fs.writeFileSync(lockPath, "999999\n", "utf8");
+    const staleDate = new Date(Date.now() - 15000);
+    fs.utimesSync(lockPath, staleDate, staleDate);
+
+    const staleTarget = path.join(wsBase, "stale-recovered");
+    fs.mkdirSync(staleTarget, { recursive: true });
+    recordBlindReviewState(dir, staleTarget, { fallbackToNative: true, reason: "recovered" });
+    assert.equal(hasFreshNativeFallback(dir, [staleTarget]), true);
+    assert.equal(fs.existsSync(lockPath), false);
+
+    const modUrl = new URL("../scripts/broker/onboarding.mjs", import.meta.url).href;
+    const workerCount = 6;
+    const targets = Array.from({ length: workerCount }, (_, idx) => {
+      const p = path.join(wsBase, `ws-${idx}`);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    });
+
+    await Promise.all(
+      targets.map(
+        (wsDir, idx) =>
+          new Promise((resolve, reject) => {
+            const script = [
+              `import { recordBlindReviewState } from ${JSON.stringify(modUrl)};`,
+              `recordBlindReviewState(${JSON.stringify(dir)}, ${JSON.stringify(wsDir)}, { fallbackToNative: true, reason: "w-${idx}" });`,
+            ].join("\n");
+            const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+              stdio: "pipe",
+              windowsHide: true,
+            });
+            let stderr = "";
+            child.stderr.on("data", (chunk) => {
+              stderr += chunk.toString();
+            });
+            child.on("error", reject);
+            child.on("exit", (code) => {
+              if (code === 0) resolve();
+              else reject(new Error(`worker ${idx} exited ${code}: ${stderr}`));
+            });
+          }),
+      ),
+    );
+
+    assert.equal(hasFreshNativeFallback(dir, [staleTarget]), true);
+    for (const wsDir of targets) {
+      assert.equal(hasFreshNativeFallback(dir, [wsDir]), true, `missing marker for ${wsDir}`);
+    }
+    const leftovers = fs
+      .readdirSync(dir)
+      .filter((name) => name.endsWith(".tmp") || name.endsWith(".lock"));
+    assert.deepEqual(leftovers, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(wsBase, { recursive: true, force: true });
   }
 });

@@ -608,3 +608,46 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
   });
 });
 
+test("monorepo subdir normalizes state to git root while nested git repo does not authorize parent", async () => {
+  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const subDir = path.join(repo, "packages", "app");
+    fs.mkdirSync(subDir, { recursive: true });
+
+    const failing = path.join(shimDir, "fail-sub.mjs");
+    fs.writeFileSync(failing, "process.exit(2);\n", "utf8");
+    const ok = createEchoShim(shimDir, "ok-sub");
+
+    const failRes = runCli(runArgs(subDir), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    assert.equal(failRes.status, 0, failRes.stderr);
+    assert.equal(JSON.parse(failRes.stdout).fallbackToNative, true);
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    assert.equal(hasFreshNativeFallback(dataDir, [subDir]), true);
+
+    const okRes = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
+    assert.equal(okRes.status, 0, okRes.stderr);
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    assert.equal(hasFreshNativeFallback(dataDir, [subDir]), false);
+
+    const nestedRepo = path.join(repo, "nested-repo");
+    fs.mkdirSync(nestedRepo, { recursive: true });
+    spawnSync("git", ["init", "-q"], { cwd: nestedRepo, windowsHide: true });
+    spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: nestedRepo, windowsHide: true });
+    spawnSync("git", ["config", "user.name", "Test"], { cwd: nestedRepo, windowsHide: true });
+    fs.writeFileSync(path.join(nestedRepo, "n.js"), "export const n = 1;\n", "utf8");
+    spawnSync("git", ["add", "."], { cwd: nestedRepo, windowsHide: true });
+    spawnSync("git", ["commit", "-q", "-m", "base"], { cwd: nestedRepo, windowsHide: true });
+    spawnSync("git", ["branch", "base-ref"], { cwd: nestedRepo, windowsHide: true });
+    fs.writeFileSync(path.join(nestedRepo, "n.js"), "export const n = 2;\n", "utf8");
+    spawnSync("git", ["add", "."], { cwd: nestedRepo, windowsHide: true });
+    spawnSync("git", ["commit", "-q", "-m", "change"], { cwd: nestedRepo, windowsHide: true });
+
+    const nestedFail = runCli(runArgs(nestedRepo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    assert.equal(nestedFail.status, 0, nestedFail.stderr);
+    assert.equal(JSON.parse(nestedFail.stdout).fallbackToNative, true);
+    assert.equal(hasFreshNativeFallback(dataDir, [nestedRepo]), true);
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+  });
+});
+

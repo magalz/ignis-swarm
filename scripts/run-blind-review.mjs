@@ -233,9 +233,25 @@ function runSmokeTest(opts) {
   };
 }
 
+function resolveWorkspaceRoot(cwd) {
+  const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  const top = (res.stdout || "").trim();
+  if (!res.error && res.status === 0 && top) {
+    return top;
+  }
+  return cwd;
+}
+
 function persistState(cwd, fallbackToNative, reason) {
   try {
-    recordBlindReviewState(brokerDataDir(brokerHome()), cwd, { fallbackToNative, reason });
+    recordBlindReviewState(brokerDataDir(brokerHome()), resolveWorkspaceRoot(cwd), {
+      fallbackToNative,
+      reason,
+    });
   } catch {
     return;
   }

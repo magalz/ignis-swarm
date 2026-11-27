@@ -491,6 +491,8 @@ test("pre-tool-use gates blind-edge-hunter under headless_always", () => {
     assert.ok(denied.reason.includes(`node "${RUNNER}" --base <base-sha> --backend auto`));
     assert.equal(run("headless_always", { typeName: "blind-edge-hunter" }).decision, "deny");
     assert.equal(run("headless_always", { TypeName: "", typeName: "blind-edge-hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "research", typeName: "blind-edge-hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "blind-edge-hunter", typeName: "research" }).decision, "deny");
     assert.equal(run("headless_always", { TypeName: "Blind-Edge-Hunter" }).decision, "deny");
     assert.equal(run("headless_always", { TypeName: "ignis-swarm:blind-edge-hunter" }).decision, "deny");
     assert.equal(run("headless_always", { TypeName: "ignis-swarm/blind-edge-hunter" }).decision, "deny");
@@ -500,10 +502,18 @@ test("pre-tool-use gates blind-edge-hunter under headless_always", () => {
     );
     assert.equal(seeded.decision, "allow");
 
-    const subSeeded = run("headless_always", { TypeName: "blind-edge-hunter" }, (d) =>
+    const subFromParentSeeded = run(
+      "headless_always",
+      { TypeName: "blind-edge-hunter" },
+      (d) => recordBlindReviewState(d, projDir, { fallbackToNative: true }),
+      { cwd: subDir }
+    );
+    assert.equal(subFromParentSeeded.decision, "allow");
+
+    const parentFromSubDenied = run("headless_always", { TypeName: "blind-edge-hunter" }, (d) =>
       recordBlindReviewState(d, subDir, { fallbackToNative: true })
     );
-    assert.equal(subSeeded.decision, "allow");
+    assert.equal(parentFromSubDenied.decision, "deny");
 
     const siblingDenied = run(
       "headless_always",

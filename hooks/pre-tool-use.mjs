@@ -61,15 +61,16 @@ const ASK_RULES = [
 
 function gateSubagent(payload) {
   const args = payload?.toolCall?.args ?? {};
-  const rawTypeName =
-    (typeof args.TypeName === "string" && args.TypeName.trim()) ||
-    (typeof args.typeName === "string" && args.typeName.trim()) ||
-    "";
-  const norm = rawTypeName.toLowerCase();
-  const isBlindEdgeHunter =
-    norm === "blind-edge-hunter" ||
-    norm.endsWith(":blind-edge-hunter") ||
-    norm.endsWith("/blind-edge-hunter");
+  const typeNames = [args.TypeName, args.typeName]
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const isBlindEdgeHunter = typeNames.some(
+    (norm) =>
+      norm === "blind-edge-hunter" ||
+      norm.endsWith(":blind-edge-hunter") ||
+      norm.endsWith("/blind-edge-hunter"),
+  );
   if (!isBlindEdgeHunter) return { decision: "allow" };
   const dataDir = brokerDataDir(brokerHome());
   let onboarding = defaultOnboardingState();

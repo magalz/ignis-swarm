@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -333,12 +334,51 @@ export function normalizeWorkspaceKey(dir) {
   return process.platform === "win32" ? canonical.toLowerCase() : canonical;
 }
 
-function isSameOrSubpath(a, b) {
-  if (a === b) return true;
-  const prefixA = a.endsWith(path.sep) ? a : `${a}${path.sep}`;
-  if (b.startsWith(prefixA)) return true;
-  const prefixB = b.endsWith(path.sep) ? b : `${b}${path.sep}`;
-  return a.startsWith(prefixB);
+const BLIND_REVIEW_LOCK_TIMEOUT_MS = 2500;
+const BLIND_REVIEW_LOCK_STALE_MS = 5000;
+const BLIND_REVIEW_LOCK_RETRY_MS = 10;
+const LOCK_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
+
+function isSameOrAncestor(ancestor, descendant) {
+  if (ancestor === descendant) return true;
+  const prefix = ancestor.endsWith(path.sep) ? ancestor : `${ancestor}${path.sep}`;
+  return descendant.startsWith(prefix);
+}
+
+function acquireBlindReviewLock(lockPath) {
+  const deadline = Date.now() + BLIND_REVIEW_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+      } finally {
+        fs.closeSync(fd);
+      }
+      return;
+    } catch (err) {
+      if (!err || err.code !== "EEXIST") throw err;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
+          try {
+            fs.unlinkSync(lockPath);
+            continue;
+          } catch (unlinkErr) {
+            if (unlinkErr && unlinkErr.code === "ENOENT") continue;
+          }
+        }
+      } catch (statErr) {
+        if (statErr && statErr.code === "ENOENT") continue;
+      }
+      if (Date.now() >= deadline) {
+        const timeoutErr = new Error(`timed out acquiring lock: ${lockPath}`);
+        timeoutErr.code = "ETIMEDOUT";
+        throw timeoutErr;
+      }
+      Atomics.wait(LOCK_SLEEP_VIEW, 0, 0, BLIND_REVIEW_LOCK_RETRY_MS);
+    }
+  }
 }
 
 function readBlindReviewState(dataDir) {
@@ -359,54 +399,79 @@ export function recordBlindReviewState(
   { fallbackToNative, reason = null, nowMs = Date.now() },
 ) {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const existing = readBlindReviewState(dataDir);
-  const workspaces = {};
-  for (const [key, entry] of Object.entries(existing.workspaces)) {
-    const ts = entry?.timestampMs;
-    if (Number.isFinite(ts) && nowMs - ts <= BLIND_REVIEW_FALLBACK_TTL_MS) {
-      workspaces[key] = entry;
-    }
-  }
-  workspaces[normalizeWorkspaceKey(cwd)] = {
-    fallbackToNative: Boolean(fallbackToNative),
-    timestampMs: nowMs,
-    reason,
-  };
-  const state = { workspaces };
   const target = blindReviewStatePath(dataDir);
-  const tmp = `${target}.${process.pid}.tmp`;
-  const payload = `${JSON.stringify(state, null, 2)}\n`;
+  const lockPath = `${target}.lock`;
+  acquireBlindReviewLock(lockPath);
   try {
-    fs.writeFileSync(tmp, payload, { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tmp, target);
-  } catch (err) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {}
-    if (err && (err.code === "EPERM" || err.code === "EACCES")) {
-      fs.writeFileSync(target, payload, { encoding: "utf8", mode: 0o600 });
-    } else {
-      throw err;
+    const existing = readBlindReviewState(dataDir);
+    const workspaces = {};
+    for (const [key, entry] of Object.entries(existing.workspaces)) {
+      const ts = entry?.timestampMs;
+      if (Number.isFinite(ts) && nowMs - ts <= BLIND_REVIEW_FALLBACK_TTL_MS) {
+        workspaces[key] = entry;
+      }
     }
+    workspaces[normalizeWorkspaceKey(cwd)] = {
+      fallbackToNative: Boolean(fallbackToNative),
+      timestampMs: nowMs,
+      reason,
+    };
+    const state = { workspaces };
+    const tmp = `${target}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+    const payload = `${JSON.stringify(state, null, 2)}\n`;
+    try {
+      fs.writeFileSync(tmp, payload, { encoding: "utf8", mode: 0o600 });
+      fs.renameSync(tmp, target);
+    } catch (err) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {}
+      if (err && (err.code === "EPERM" || err.code === "EACCES")) {
+        fs.writeFileSync(target, payload, { encoding: "utf8", mode: 0o600 });
+      } else {
+        throw err;
+      }
+    }
+    return state;
+  } finally {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {}
   }
-  return state;
 }
 
 export function hasFreshNativeFallback(dataDir, dirs, nowMs = Date.now()) {
   const { workspaces } = readBlindReviewState(dataDir);
-  const freshKeys = [];
+  const freshEntries = [];
   for (const [storedKey, entry] of Object.entries(workspaces)) {
     if (!storedKey || !storedKey.trim()) continue;
-    if (!entry || entry.fallbackToNative !== true) continue;
+    if (!entry || typeof entry.fallbackToNative !== "boolean") continue;
     if (!Number.isFinite(entry.timestampMs)) continue;
     const delta = nowMs - entry.timestampMs;
     if (!(delta >= 0 && delta <= BLIND_REVIEW_FALLBACK_TTL_MS)) continue;
-    freshKeys.push(normalizeWorkspaceKey(storedKey));
+    freshEntries.push({
+      key: normalizeWorkspaceKey(storedKey),
+      fallbackToNative: entry.fallbackToNative,
+      timestampMs: entry.timestampMs,
+    });
   }
-  if (freshKeys.length === 0) return false;
+  if (freshEntries.length === 0) return false;
   return (dirs ?? []).some((dir) => {
     if (typeof dir !== "string" || !dir.trim()) return false;
     const normDir = normalizeWorkspaceKey(dir);
-    return freshKeys.some((storedKey) => isSameOrSubpath(normDir, storedKey));
+    let best = null;
+    for (const entry of freshEntries) {
+      if (!isSameOrAncestor(entry.key, normDir)) continue;
+      if (
+        !best ||
+        entry.key.length > best.key.length ||
+        (entry.key.length === best.key.length &&
+          (entry.timestampMs > best.timestampMs ||
+            (entry.timestampMs === best.timestampMs && !entry.fallbackToNative)))
+      ) {
+        best = entry;
+      }
+    }
+    return best?.fallbackToNative === true;
   });
 }
