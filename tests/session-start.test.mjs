@@ -389,3 +389,24 @@ test("session-start first-run notice names the real broker CLI path and a runnab
     for (const d of [projDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("session-start runs the memtrace check for a skipped onboarding with memtrace enabled", () => {
+  const projDir = makeTempDir("ignis-mt-skip-proj-");
+  const homeDir = makeTempDir("ignis-mt-skip-home-");
+  const dataDir = makeTempDir("ignis-mt-skip-data-");
+  try {
+    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
+    const healthyShim = writeShim(projDir, "memtrace-ok", "memtrace daemon running", 0);
+    writeCompletedOnboarding(dataDir, { completed: false, skipped: true, memtrace: { enabled: true } });
+    const out = runHook(
+      "hooks/session-start.mjs",
+      { cwd: projDir, lastUserInput: "hi" },
+      { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir, IGNIS_MEMTRACE_CMD: healthyShim }
+    );
+    const msg = sessionMessage(out);
+    assert.match(msg, /\[ignis-swarm\]\[Memtrace\] Active/);
+    assert.doesNotMatch(msg, /First-Run Onboarding Required/);
+  } finally {
+    for (const d of [projDir, homeDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
