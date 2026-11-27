@@ -100,7 +100,7 @@ export function isPidAlive(pid) {
   }
 }
 
-async function acquireLock(lockPath, timeoutMs = 6000) {
+export async function acquireLock(lockPath, timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
