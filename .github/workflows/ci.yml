@@ -80,3 +80,17 @@ jobs:
       - name: Validate plugin with agy
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: agy plugin validate .
+
+  ci:
+    name: ci
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test cell to pass
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          echo "test matrix result: $RESULT"
+          test "$RESULT" = "success"
