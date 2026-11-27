@@ -340,3 +340,21 @@ test("collectChanges removes its temporary index directory, also when git fails"
     }
   });
 });
+
+test("collectChanges with no untracked files leaves a stat-dirty real index byte-identical", () => {
+  withRepo({ files: { "a.txt": "one\n" } }, ({ dir, env }) => {
+    const target = path.join(dir, "a.txt");
+    const past = new Date(Date.now() - 3_600_000);
+    fs.utimesSync(target, past, past);
+    const indexBefore = readIndex(dir, env);
+    assert.ok(indexBefore, "the repository has an index");
+
+    const result = collectChanges(dir, { env });
+
+    assert.equal(result.error, null);
+    assert.equal(result.diff, "");
+    assert.deepEqual(result.untracked, []);
+    assert.ok(sameIndex(readIndex(dir, env), indexBefore), "the real index must be byte-identical");
+    assert.ok(!fs.existsSync(path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"], { env }), "index.lock")));
+  });
+});
