@@ -9,7 +9,7 @@ const MAX_STORED_COMMAND_CHARS = 240;
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
 const SECRET_KEYWORD = String.raw`(?:token|secret|password|passwd|pwd|api[-_]?key|access[-_]?key|private[-_]?key)`;
-const VALUE = String.raw`(?:"[^"]*"|'[^']*'|[^\s"';&|]+)`;
+const VALUE = String.raw`(?!\[REDACTED\])(?:"[^"]*"|'[^']*'|[^\s"';&|]+)`;
 
 const REDACTION_RULES = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@'"]+:)[^\s/'"]+@/gi, `$1${REDACTED}@`],
