@@ -9,44 +9,74 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            node: 22
+          - os: ubuntu-latest
+            node: 24
+          - os: windows-latest
+            node: 22
+          - os: windows-latest
+            node: 24
+          - os: macos-latest
+            node: 24
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
-      - name: Run automated tests
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check zero inline comments in hooks and scripts
+        run: node .github/scripts/check-comments.mjs hooks scripts
+      - name: Run tests with coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            mkdir -p coverage
-            node --test --experimental-test-coverage \
-              --test-reporter=spec --test-reporter-destination=stdout \
-              --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-              tests
-          else
-            node --test tests
-          fi
+          mkdir -p coverage
+          node --test --test-timeout=60000 --experimental-test-coverage \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            tests/*.test.mjs
+      - name: Run tests
+        if: matrix.os != 'ubuntu-latest' || matrix.node != 24
+        shell: bash
+        run: node --test --test-timeout=60000 tests/*.test.mjs
       - name: Upload coverage to Codecov
-        if: runner.os == 'Linux'
-        uses: codecov/codecov-action@v5
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage/lcov.info
           flags: unittests
-          name: ignis-swarm-node20
-          fail_ci_if_error: true
+          name: ignis-swarm-node24
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Check zero inline comments in hooks and scripts
-        shell: bash
+      - name: Install Antigravity CLI (pinned build)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        env:
+          AGY_URL: https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.18-6386224290725888/linux-x64/cli_linux_x64.tar.gz
+          AGY_SHA512: ef379ec869719112f696e8c7cfddf776618712e58fc38e53df80801d6528abb4677782c7c8778f9c09c9123fa44c2c32675d228c06f2a8f7a8f4214e75f5bb26
         run: |
-          if grep -rnE '(^|[[:space:]])//' hooks scripts; then
-            echo "Found banned inline comments in hooks/ or scripts/"
-            exit 1
-          fi
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$RUNNER_TEMP/agy.tar.gz" "$AGY_URL"
+          echo "$AGY_SHA512  $RUNNER_TEMP/agy.tar.gz" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/agy-bin"
+          tar -xzf "$RUNNER_TEMP/agy.tar.gz" -C "$RUNNER_TEMP/agy-bin" antigravity
+          mv "$RUNNER_TEMP/agy-bin/antigravity" "$RUNNER_TEMP/agy-bin/agy"
+          echo "$RUNNER_TEMP/agy-bin" >> "$GITHUB_PATH"
+      - name: Validate plugin with agy
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: agy plugin validate .
