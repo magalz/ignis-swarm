@@ -254,3 +254,12 @@ test("post-tool-use rotates a log over 5 MiB into .1.jsonl and starts a new file
     assert.equal(fs.statSync(auditPath(convId)).mode & 0o777, 0o600);
   }
 });
+
+test("post-tool-use redacts long flag-heavy commands quickly", () => {
+  for (const command of ["--pwd".repeat(1700), "--token-".repeat(1100)]) {
+    const started = Date.now();
+    const record = runCommand("flag-heavy", command);
+    assert.ok(Date.now() - started < 1500, `redaction took ${Date.now() - started} ms`);
+    assert.equal(typeof record.command, "string");
+  }
+});

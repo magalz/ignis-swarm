@@ -15,7 +15,7 @@ const REDACTION_RULES = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@'"]+:)[^\s/'"]+@/gi, `$1${REDACTED}@`],
   [/(\bauthorization\s*[:=]\s*(?:(?:bearer|basic|digest|negotiate|token)\s+)?)[^\s"']+/gi, `$1${REDACTED}`],
   [new RegExp(String.raw`(${SECRET_KEYWORD}[\w-]*["']?\s*[:=]\s*)${VALUE}`, "gi"), `$1${REDACTED}`],
-  [new RegExp(String.raw`(--[\w.-]*${SECRET_KEYWORD}[\w.-]*\s+)(?!--)${VALUE}`, "gi"), `$1${REDACTED}`],
+  [new RegExp(String.raw`((?<![\w.-])--[\w.-]*${SECRET_KEYWORD}[\w.-]*\s+)(?!--)${VALUE}`, "gi"), `$1${REDACTED}`],
   [
     /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|A[SK]IA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g,
     REDACTED,
