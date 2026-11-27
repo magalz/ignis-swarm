@@ -14,10 +14,15 @@ function fold(p) {
 }
 
 export function normalizeTrustPath(file) {
-  try {
-    return fold(fs.realpathSync.native(file));
-  } catch {
-    return fold(path.resolve(file));
+  const resolved = path.resolve(file);
+  const missing = [];
+  for (let current = resolved; ; current = path.dirname(current)) {
+    try {
+      return fold(path.join(fs.realpathSync.native(current), ...missing));
+    } catch {
+      if (path.dirname(current) === current) return fold(resolved);
+      missing.unshift(path.basename(current));
+    }
   }
 }
 
