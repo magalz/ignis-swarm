@@ -304,3 +304,26 @@ test("no hook redefines a helper that lives in hooks/lib.mjs", () => {
     assert.doesNotMatch(source, helperDefinition, `${name} redefines a shared helper`);
   }
 });
+
+test("session-start reports decision indexes through findDecisionIndexHint", () => {
+  const root = makeTempDir("ignis-lib-index-");
+  try {
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(path.join(workspace, "docs", "adr"), { recursive: true });
+    fs.writeFileSync(path.join(workspace, "docs", "adr", "INDEX.md"), "# ADR index\n");
+    const res = spawnSync(process.execPath, [path.join(HOOKS_DIR, "session-start.mjs")], {
+      cwd: root,
+      input: JSON.stringify({ cwd: workspace }),
+      encoding: "utf8",
+      env: isolatedEnv(root),
+      timeout: 8000,
+      windowsHide: true,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const message = JSON.parse(res.stdout.trim()).injectSteps[0].systemMessage.systemMessage;
+    assert.match(message, /Decision indexes detected \(docs\/adr\/INDEX\.md\)/);
+    assert.doesNotMatch(message, /bdr/);
+  } finally {
+    removeDir(root);
+  }
+});
