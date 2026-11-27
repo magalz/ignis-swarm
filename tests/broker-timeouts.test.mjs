@@ -14,6 +14,7 @@ function writeMock(dir, name, { slowMs = 2000, crashFirst = false } = {}) {
     methods: path.join(dir, `${name}.methods`),
     spawns: path.join(dir, `${name}.spawns`),
     cancelled: path.join(dir, `${name}.cancelled`),
+    callIds: path.join(dir, `${name}.callids`),
     crashed: path.join(dir, `${name}.crashed`),
   };
   fs.writeFileSync(
@@ -34,6 +35,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (msg.method === "notifications/cancelled") {
     fs.appendFileSync(f.cancelled, JSON.stringify(msg.params) + "\\n");
   } else if (msg.method === "tools/call") {
+    fs.appendFileSync(f.callIds, msg.id + "\\n");
     if (${crashFirst ? "true" : "false"} && !fs.existsSync(f.crashed)) {
       fs.writeFileSync(f.crashed, "1");
       process.exit(1);
@@ -157,7 +159,9 @@ test("the server receives notifications/cancelled for the timed-out request", as
   await sleep(300);
   const got = lines(m.files.cancelled).map((l) => JSON.parse(l));
   assert.equal(got.length, 1);
-  assert.equal(typeof got[0].requestId, "number");
+  const callIds = lines(m.files.callIds).map(Number);
+  assert.equal(callIds.length, 1);
+  assert.equal(got[0].requestId, callIds[0]);
   assert.equal(got[0].reason, "timeout");
   assert.ok(lines(m.files.methods).includes("notifications/cancelled"));
 });

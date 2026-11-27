@@ -135,14 +135,6 @@ export class Supervisor {
     }
   }
 
-  async _evictKey(key) {
-    const entry = this.pool.get(key);
-    if (!entry) return false;
-    this.pool.delete(key);
-    await entry.adapter.shutdown();
-    return true;
-  }
-
   async _evictEntry(entry) {
     if (this.pool.get(entry.key) !== entry) return false;
     this.pool.delete(entry.key);
