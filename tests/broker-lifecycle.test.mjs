@@ -295,3 +295,32 @@ test("stopDaemon lets a cooperative daemon finish its slow cleanup before escala
   assert.equal(isPidAlive(child.pid), false);
   assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), false);
 });
+
+const MUTE_DAEMON = `
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+const [dataDir] = process.argv.slice(2);
+const server = http.createServer(() => {});
+server.listen(0, "127.0.0.1", () => {
+  const info = { pid: process.pid, port: server.address().port, token: "fake-token", version: "0.0.1" };
+  fs.writeFileSync(path.join(dataDir, "daemon.json"), JSON.stringify(info));
+});
+setInterval(() => {}, 1000);
+`;
+
+test("stopDaemon keeps daemon.json while a pid that does not answer health is still alive", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "mute-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "mute daemon.json");
+  assert.equal(await stopDaemon(dataDir), false);
+  assert.equal(isPidAlive(info.pid), true, "the unresponsive daemon is not killed");
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json still points at the live pid");
+});
