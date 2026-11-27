@@ -136,7 +136,7 @@ function trustState(entry) {
   return crypto.createHash("sha256").update(bytes).digest("hex") === entry.sha256 ? "ok" : "changed";
 }
 
-function runTrust(flags, dataDir, asJson) {
+function cmdTrust({ flags, dataDir, asJson }) {
   const say = (value, lines) => console.log(asJson ? JSON.stringify(value, null, 2) : lines.join("\n"));
   if (flags.list) {
     const entries = listTrustedLocalConfigs(dataDir).map((e) => ({ ...e, state: trustState(e) }));
@@ -198,10 +198,6 @@ function parseCallArgs(flags) {
     return raw ? JSON.parse(raw) : {};
   }
   return {};
-}
-
-function cmdTrust({ flags, dataDir, asJson }) {
-  runTrust(flags, dataDir, asJson);
 }
 
 async function cmdDaemon({ home, dataDir, flags }) {
@@ -301,7 +297,7 @@ async function cmdRestart({ home, dataDir, flags, positional, cwd, asJson }) {
   console.log(asJson ? JSON.stringify(res, null, 2) : `evicted ${res.evicted} pooled backend(s).`);
 }
 
-async function cmdImportMcp({ home, flags }) {
+function cmdImportMcp({ home, flags }) {
   const sourcePath = defaultMcpSourcePath(flags.from);
   const only =
     typeof flags.servers === "string"
@@ -331,7 +327,7 @@ async function cmdImportMcp({ home, flags }) {
   console.log(`Your original ${sourcePath} was NOT modified.`);
 }
 
-async function cmdDiscoverMcp({ home, flags, asJson }) {
+function cmdDiscoverMcp({ home, flags, asJson }) {
   const sourcePath = defaultMcpSourcePath(flags.from);
   const items = discoverMcpConfig(sourcePath, home);
   if (asJson) {
@@ -348,7 +344,7 @@ async function cmdDiscoverMcp({ home, flags, asJson }) {
   }
 }
 
-async function cmdRegisterMcp({ home, flags, asJson }) {
+function cmdRegisterMcp({ home, flags, asJson }) {
   const sourcePath = defaultMcpSourcePath(flags.from);
   if (!flags.all && typeof flags.servers !== "string") {
     throw new Error("usage: ignis-broker register-mcp (--all | --servers a,b) [--from <path>]");
@@ -397,7 +393,7 @@ async function cmdRegisterMcp({ home, flags, asJson }) {
   }
 }
 
-async function cmdAddHttpMcp({ home, flags, positional, asJson }) {
+function cmdAddHttpMcp({ home, flags, positional, asJson }) {
   const [name, url] = positional;
   if (!name || !url) {
     throw new Error("usage: ignis-broker add-http-mcp <name> <url> [--auth-env VAR] [--header-name Authorization]");
@@ -412,7 +408,7 @@ async function cmdAddHttpMcp({ home, flags, positional, asJson }) {
   }
 }
 
-async function cmdUnregisterMcp({ home, positional, asJson }) {
+function cmdUnregisterMcp({ home, positional, asJson }) {
   const [name] = positional;
   if (!name) throw new Error("usage: ignis-broker unregister-mcp <name>");
   const removed = removeServer(home, name);
@@ -423,7 +419,7 @@ async function cmdUnregisterMcp({ home, positional, asJson }) {
   }
 }
 
-async function cmdOnboarding({ home, dataDir, flags }) {
+function cmdOnboarding({ home, dataDir, flags }) {
   if (flags.get) {
     console.log(JSON.stringify(loadOnboardingState(dataDir), null, 2));
     return;
