@@ -26,6 +26,8 @@ function stopDaemonFor({ env, dataDir }) {
     try {
       process.kill(info.pid, "SIGKILL");
     } catch {}
+    const deadline = Date.now() + 5000;
+    while (pidAlive(info.pid) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
 }
 
@@ -91,8 +93,9 @@ test("relative IGNIS_BROKER_HOME and DATA still start the daemon from another cw
   const work = mkTemp("ignis-life-rel-");
   const env = { ...iso.env, IGNIS_BROKER_HOME: "bh", IGNIS_BROKER_DATA: "bd" };
   const dataDir = path.join(work, "bd");
+  const absEnv = { ...iso.env, IGNIS_BROKER_HOME: path.join(work, "bh"), IGNIS_BROKER_DATA: dataDir };
   t.after(() => {
-    stopDaemonFor({ env, dataDir: path.join(work, "bd") });
+    stopDaemonFor({ env: absEnv, dataDir });
     iso.cleanup();
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });

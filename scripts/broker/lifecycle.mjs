@@ -179,7 +179,6 @@ export function isDaemonVersionAcceptable(daemonVersion, clientVersion = BROKER_
 export async function ensureDaemon(home, dataDir, entryScript) {
   home = path.resolve(home);
   dataDir = path.resolve(dataDir);
-  entryScript = path.resolve(entryScript);
   const existing = readDaemonInfo(dataDir);
   if (existing) {
     const h = await probeHealth(existing);
