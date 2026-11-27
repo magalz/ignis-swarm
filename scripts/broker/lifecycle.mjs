@@ -90,7 +90,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function isPidAlive(pid) {
+export function isPidAlive(pid) {
   if (!pid || typeof pid !== "number") return false;
   try {
     process.kill(pid, 0);

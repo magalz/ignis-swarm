@@ -3,31 +3,22 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
+import { isPidAlive, readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
 import { truncateContentBlocks } from "../scripts/broker/spill.mjs";
 import { isolatedEnv, mkTemp, runNode } from "./helpers.mjs";
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 const POSIX = process.platform !== "win32";
 
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function stopDaemonFor({ env, dataDir }) {
   const info = readDaemonInfo(dataDir);
   runNode(BIN, ["stop"], { env, timeoutMs: 15_000 });
-  if (info?.pid && pidAlive(info.pid)) {
+  if (isPidAlive(info?.pid)) {
     try {
       process.kill(info.pid, "SIGKILL");
     } catch {}
     const deadline = Date.now() + 5000;
-    while (pidAlive(info.pid) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    while (isPidAlive(info.pid) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
 }
 
@@ -50,7 +41,7 @@ test("a lazily started daemon does not hold the folder it was started from", (t)
   } else if (process.platform === "linux") {
     assert.equal(fs.readlinkSync(`/proc/${info.pid}/cwd`), fs.realpathSync(iso.dirs.brokerData));
   } else {
-    t.diagnostic("daemon cwd assertion skipped: no /proc on this platform");
+    t.skip("daemon cwd assertion needs /proc, which this platform lacks");
   }
 });
 
