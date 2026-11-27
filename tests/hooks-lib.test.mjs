@@ -125,18 +125,18 @@ test("sanitizeConversationId keeps dots, trims, falls back to unknown and neutra
   }
 });
 
-test("evaluateCommand returns deny, ask or null in rule order", () => {
+test("evaluateCommand returns deny, force_ask or null in rule order", () => {
   const deny = evaluateCommand("git reset --hard HEAD~1");
   assert.equal(deny.decision, "deny");
   assert.match(deny.reason, /git reset --hard/);
 
   const ask = evaluateCommand("git push --force-with-lease origin feat/a");
-  assert.equal(ask.decision, "ask");
+  assert.equal(ask.decision, "force_ask");
   assert.match(ask.reason, /force push/);
 
   assert.equal(evaluateCommand("git push --force origin main").decision, "deny");
   assert.equal(evaluateCommand("git commit -m wip --no-verify").decision, "deny");
-  assert.equal(evaluateCommand("git clean -fd").decision, "ask");
+  assert.equal(evaluateCommand("git clean -fd").decision, "force_ask");
 
   assert.equal(evaluateCommand("npm test"), null);
   assert.equal(evaluateCommand(""), null);
@@ -247,7 +247,7 @@ for (const [label, source] of Object.entries(BROKEN_GATES)) {
       const asked = runCopiedPreToolUse(root, {
         toolCall: { name: "run_command", args: { CommandLine: "git clean -fd" } },
       });
-      assert.equal(asked.out.decision, "ask");
+      assert.equal(asked.out.decision, "force_ask");
 
       const allowed = runCopiedPreToolUse(root, {
         toolCall: { name: "run_command", args: { CommandLine: "npm test" } },
