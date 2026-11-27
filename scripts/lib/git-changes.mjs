@@ -142,8 +142,8 @@ export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAUL
     }
     const realIndex = path.resolve(root, firstLine(located));
     if (fs.existsSync(realIndex)) {
-      fs.copyFileSync(realIndex, indexCopy);
       const stat = fs.statSync(realIndex);
+      fs.copyFileSync(realIndex, indexCopy);
       fs.utimesSync(indexCopy, stat.atime, stat.mtime);
     }
     const indexEnv = { GIT_INDEX_FILE: indexCopy };
