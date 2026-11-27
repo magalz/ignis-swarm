@@ -175,10 +175,11 @@ test("antigravity_first returns native without --fallback and invokes claude shi
       "high",
       "--permission-mode",
       "dontAsk",
-      "--allowedTools",
-      "Read",
-      "Grep",
-      "Glob",
+      "--tools",
+      "",
+      "--setting-sources",
+      "",
+      "--disable-slash-commands",
       "--strict-mcp-config",
     ]);
     assert.equal(path.basename(seen.argv[configAt + 1]), "mcp-config.json");
@@ -223,9 +224,9 @@ test("headless_always with codex passes -m when model is set and omits -m when h
 
     const capturedWithModel = captured(withModelJson.output);
     assert.deepEqual(capturedWithModel.argv, [
+      "exec",
       "-m",
       "gpt-6.2-sol",
-      "exec",
       "--sandbox",
       "read-only",
       "-c",
@@ -361,7 +362,14 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
       "utf8"
     );
 
-    for (const shim of [cmdPath, npmStyleCmdPath]) {
+    const batchCallCmdPath = path.join(shimDir, "claude-call.cmd");
+    fs.writeFileSync(
+      batchCallCmdPath,
+      `@ECHO off\r\nCALL "${process.execPath}" "%~dp0claude-cmd-target.mjs" %*\r\n`,
+      "utf8"
+    );
+
+    for (const shim of [cmdPath, npmStyleCmdPath, batchCallCmdPath]) {
       const res = runCli(
         ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
         {
@@ -371,12 +379,15 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
       );
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
-      assert.equal(out.useNative, false);
+      assert.equal(out.useNative, false, `${shim}: ${out.reason}`);
       const seen = captured(out.output);
       assert.equal(seen.argv[0], "-p");
       assert.ok(!seen.argv[1].includes("\n"));
       assert.ok(seen.argv.includes("--strict-mcp-config"));
       assert.ok(seen.argv.includes("--no-session-persistence"));
+      assert.equal(seen.argv[seen.argv.indexOf("--tools") + 1], "", shim);
+      assert.equal(seen.argv[seen.argv.indexOf("--setting-sources") + 1], "", shim);
+      assert.ok(seen.argv.includes("--disable-slash-commands"), shim);
       assert.equal(seen.mcpConfig.exists, true);
       assert.equal(seen.mcpConfig.content, '{"mcpServers":{}}');
     }
@@ -624,10 +635,11 @@ test("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs le
     "high",
     "--permission-mode",
     "dontAsk",
-    "--allowedTools",
-    "Read",
-    "Grep",
-    "Glob",
+    "--tools",
+    "",
+    "--setting-sources",
+    "",
+    "--disable-slash-commands",
     "--strict-mcp-config",
     "--mcp-config",
     "/tmp/ignis/mcp-config.json",
@@ -636,6 +648,49 @@ test("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs le
   const codexArgs = buildCodexArgs(null);
   assert.equal(codexArgs[codexArgs.indexOf("-c") + 1], "approval_policy=never");
   assert.ok(codexArgs.every((arg) => !arg.includes('"')));
+});
+
+test("the claude argv gives the reviewer no tools, no settings sources and no slash commands, and never uses --bare", async () => {
+  const { buildClaudeArgs } = await import("../scripts/run-blind-review.mjs");
+  const args = buildClaudeArgs("review this", "opus", "high", "/tmp/ignis/mcp-config.json");
+  assert.equal(args[args.indexOf("--tools") + 1], "");
+  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
+  assert.ok(args.includes("--disable-slash-commands"));
+  for (const forbidden of ["--allowedTools", "--allowed-tools", "--bare", "--add-dir", "--settings"]) {
+    assert.ok(!args.includes(forbidden), `${forbidden} must not be passed`);
+  }
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(args[args.indexOf("--mcp-config") + 1], "/tmp/ignis/mcp-config.json");
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.ok(args.includes("--no-session-persistence"));
+});
+
+test("the empty --tools and --setting-sources values reach a claude shim as empty argv elements", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-empty-args") });
+    assert.equal(res.status, 0, res.stderr);
+    const { argv } = captured(JSON.parse(res.stdout).output);
+    assert.equal(argv[argv.indexOf("--tools") + 1], "");
+    assert.equal(argv[argv.indexOf("--setting-sources") + 1], "");
+    assert.ok(argv.includes("--disable-slash-commands"));
+    assert.ok(!argv.includes("--allowedTools"));
+  });
+});
+
+test("buildCodexArgs puts -m after exec and omits it without a model", async () => {
+  const { buildCodexArgs } = await import("../scripts/run-blind-review.mjs");
+  assert.deepEqual(buildCodexArgs("gpt-6.2-sol"), [
+    "exec",
+    "-m",
+    "gpt-6.2-sol",
+    "--sandbox",
+    "read-only",
+    "-c",
+    "approval_policy=never",
+    "-",
+  ]);
+  assert.deepEqual(buildCodexArgs(null), ["exec", "--sandbox", "read-only", "-c", "approval_policy=never", "-"]);
 });
 
 test("claude receives an existing MCP config file during the run and its temp directory is gone afterwards", () => {
@@ -911,6 +966,49 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
   });
 });
 
+test("the runner started through a junction or symlink still runs: bad input is exit 1, not a silent exit 0", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    const root = createTempDir("ignis-blind-link-");
+    try {
+      const realScripts = path.join(root, "real-scripts");
+      fs.cpSync(path.resolve(__dirname, "..", "scripts"), realScripts, { recursive: true });
+      const linkedScripts = path.join(root, "linked-scripts");
+      fs.symlinkSync(realScripts, linkedScripts, process.platform === "win32" ? "junction" : "dir");
+      assert.notEqual(fs.realpathSync.native(linkedScripts), path.resolve(linkedScripts));
+      const linkedRunner = path.join(linkedScripts, "run-blind-review.mjs");
+      const runLinked = (args, env) =>
+        spawnSync(process.execPath, [linkedRunner, ...args], {
+          encoding: "utf8",
+          windowsHide: true,
+          env: { ...process.env, ...env },
+        });
+
+      writeOnboarding(dataDir, headlessRouting());
+      const ok = createEchoShim(shimDir, "ok-link");
+      const env = { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok };
+
+      const unknownFlag = runLinked(["--definitely-unknown-flag"], env);
+      assert.equal(unknownFlag.status, 1, unknownFlag.stderr);
+      assert.match(unknownFlag.stderr, /unknown argument: --definitely-unknown-flag/);
+      assert.equal(unknownFlag.stdout, "");
+
+      const injected = runLinked(["--base", "--output=evil.txt", "--cwd", repo, "--backend", "auto", "--json"], env);
+      assert.equal(injected.status, 1, injected.stderr);
+      assert.match(injected.stderr, /--base must not start with '-'/);
+      assert.equal(fs.existsSync(stateDir(dataDir)), false);
+
+      const good = runLinked(runArgs(repo), env);
+      assert.equal(good.status, 0, good.stderr);
+      const out = JSON.parse(good.stdout);
+      assert.equal(out.fallbackToNative, false);
+      assert.equal(out.verdict, "PASS");
+      assertState(dataDir, repo, "reviewed");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("monorepo subdir keys state on the git root while a nested git repo keeps its own record", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
@@ -960,7 +1058,7 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
 
 
 const NO_VERDICT_EMPTY = "headless reviewer returned no verdict (empty output)";
-const NO_VERDICT_NO_STATUS = "headless reviewer returned no verdict (no Status line)";
+const NO_VERDICT_PREFIX = "headless reviewer returned no verdict (no Status line): ";
 
 function runReviewer(fixture, text, extraArgs = []) {
   const { dataDir, shimDir, repo } = fixture;
@@ -991,16 +1089,101 @@ test("a headless run that exits 0 with empty or whitespace-only output records a
 
 test("a headless run whose output has no Status line records a fallback state", () => {
   withFixture((fixture) => {
-    const texts = [
-      "app.js line 1 looks fine to me.\n",
-      "Overall Status: PASS\n",
-      "Status: PASSED\n",
-      "Status: unknown\n",
-      "The reviewer wrote Status: ISSUES in the middle of a sentence.\n",
+    const cases = [
+      ["app.js line 1 looks fine to me.\n", "app.js line 1 looks fine to me."],
+      ["Overall Status: PASS\n", "Overall Status: PASS"],
+      ["Status: unknown\n", "Status: unknown"],
+      ["The reviewer wrote Status: ISSUES in the middle of a sentence.\n", "The reviewer wrote Status: ISSUES in the middle of a sentence."],
     ];
-    for (const text of texts) {
-      assertNoVerdictFallback(fixture, runReviewer(fixture, text), NO_VERDICT_NO_STATUS);
+    for (const [text, detail] of cases) {
+      assertNoVerdictFallback(fixture, runReviewer(fixture, text), `${NO_VERDICT_PREFIX}${detail}`);
     }
+  });
+});
+
+test("Status: PASSED is not a verdict because PASS must be a whole word", () => {
+  withFixture((fixture) => {
+    for (const text of ["Status: PASSED\n", "**Status:** PASSED\n", "Status: ISSUESFOUND\n"]) {
+      assertNoVerdictFallback(fixture, runReviewer(fixture, text), `${NO_VERDICT_PREFIX}${text.trim()}`);
+    }
+  });
+});
+
+test("a verdict never crosses a newline: the word must sit on the Status line", () => {
+  withFixture((fixture) => {
+    for (const text of ["Status:\nPASS\n", "Status:\n\nISSUES\n", "**Status:**\n  PASS\n", "Status\n: PASS\n"]) {
+      const out = JSON.parse(runReviewer(fixture, text).stdout);
+      assert.equal(out.fallbackToNative, true, JSON.stringify(text));
+      assert.ok(!("verdict" in out), JSON.stringify(text));
+    }
+  });
+});
+
+test("the house-style Status line is accepted in every markdown decoration the agent docs use", () => {
+  withFixture((fixture) => {
+    const cases = [
+      ["Status: PASS\n", "PASS"],
+      ["**Status:** PASS\n", "PASS"],
+      ["**Status**: PASS\n", "PASS"],
+      ["**Status: PASS**\n", "PASS"],
+      ["**Status:** `PASS`\n", "PASS"],
+      ["- **Status:** `ISSUES`\n", "ISSUES"],
+      ["_Status: Issues_\n", "ISSUES"],
+      ["`Status: PASS`\n", "PASS"],
+      ["> Status: PASS\n", "PASS"],
+      [">Status: ISSUES\n", "ISSUES"],
+      ["- Status: ISSUES\n", "ISSUES"],
+      ["> **Status:** PASS\n", "PASS"],
+      ["Findings follow.\r\n\r\n**Status:** PASS\r\n", "PASS"],
+      ["**Status:** ISSUES", "ISSUES"],
+    ];
+    for (const [text, verdict] of cases) {
+      const out = JSON.parse(runReviewer(fixture, text).stdout);
+      assert.equal(out.fallbackToNative, false, JSON.stringify(text));
+      assert.equal(out.verdict, verdict, JSON.stringify(text));
+    }
+  });
+});
+
+test("a documentation template line naming both verdicts is not a verdict, and a real verdict after it still wins", () => {
+  withFixture((fixture) => {
+    for (const text of ["Status: PASS | ISSUES\n", "**Status:** PASS | ISSUES\n", "Status: PASS / ISSUES\n", "- Status: ISSUES / PASS\n"]) {
+      const out = JSON.parse(runReviewer(fixture, text).stdout);
+      assert.equal(out.fallbackToNative, true, JSON.stringify(text));
+      assert.ok(!("verdict" in out), JSON.stringify(text));
+    }
+    const out = JSON.parse(runReviewer(fixture, "End with Status: PASS | ISSUES\nStatus: ISSUES\n").stdout);
+    assert.equal(out.verdict, "ISSUES");
+    const trailing = JSON.parse(runReviewer(fixture, "Status: PASS\nTemplate: Status: PASS | ISSUES\n").stdout);
+    assert.equal(trailing.verdict, "PASS");
+  });
+});
+
+test("the last Status line wins across mixed decorations", () => {
+  withFixture((fixture) => {
+    const out = JSON.parse(runReviewer(fixture, "**Status:** PASS\n\nWait, a bug.\n\n> _Status: Issues_\n").stdout);
+    assert.equal(out.verdict, "ISSUES");
+    const back = JSON.parse(runReviewer(fixture, "- Status: ISSUES\nRetracted.\n**Status: PASS**\n").stdout);
+    assert.equal(back.verdict, "PASS");
+  });
+});
+
+test("a no-verdict fallback reason carries the first 200 characters of the output on a single line", () => {
+  withFixture((fixture) => {
+    const multiline = "The reviewer rambled.\r\n\r\n\tIt never\n   gave a verdict.\n";
+    assertNoVerdictFallback(
+      fixture,
+      runReviewer(fixture, multiline),
+      `${NO_VERDICT_PREFIX}The reviewer rambled. It never gave a verdict.`
+    );
+
+    const long = `${"a".repeat(150)}\n${"b".repeat(300)}\n`;
+    const res = runReviewer(fixture, long);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.reason, `${NO_VERDICT_PREFIX}${"a".repeat(150)} ${"b".repeat(49)}`);
+    assert.equal(out.reason.length - NO_VERDICT_PREFIX.length, 200);
+    assert.ok(!/[\r\n]/.test(out.reason));
+    assert.equal(assertState(fixture.dataDir, fixture.repo, "fallback").reason, out.reason);
   });
 });
 
