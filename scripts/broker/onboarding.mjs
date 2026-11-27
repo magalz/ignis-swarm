@@ -299,9 +299,14 @@ export function probeCodexModels(codexHome) {
   };
 }
 
+export function defaultMcpSourcePath(fromFlag) {
+  return typeof fromFlag === "string"
+    ? fromFlag
+    : path.join(os.homedir(), ".gemini", "config", "mcp_config.json");
+}
+
 export function probeEnvironment(home, dataDir, fromMcpPath, codexHome) {
-  const sourcePath =
-    fromMcpPath || path.join(os.homedir(), ".gemini", "config", "mcp_config.json");
+  const sourcePath = defaultMcpSourcePath(fromMcpPath || undefined);
   return {
     onboarding: loadOnboardingState(dataDir),
     discoveredMcps: discoverMcpConfig(sourcePath, home),
