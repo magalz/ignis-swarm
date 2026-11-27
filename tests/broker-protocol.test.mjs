@@ -1,10 +1,21 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { McpStdioAdapter, killProcessTree } from "../scripts/broker/adapters.mjs";
-import { mkTemp } from "./helpers.mjs";
+import { mkTemp as makeTemp } from "./helpers.mjs";
+
+const tempDirs = [];
+function mkTemp(prefix) {
+  const dir = makeTemp(prefix);
+  tempDirs.push(dir);
+  return dir;
+}
+
+after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+});
 
 const brokerHome = mkTemp("ignis-proto-home-");
 process.env.IGNIS_BROKER_HOME = brokerHome;
