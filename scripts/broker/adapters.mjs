@@ -410,7 +410,9 @@ export class McpStdioAdapter {
   }
 
   lastStderr() {
-    return this.stderrRing.length > 0 ? this.stderrRing.join("\n") : null;
+    return this.stderrRing.length > 0
+      ? redactSecrets(this.stderrRing.join("\n"), this.redactConfig)
+      : null;
   }
 }
 

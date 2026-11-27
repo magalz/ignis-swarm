@@ -78,6 +78,9 @@ test("a secret in a global HTTP url query is not in the error or status, host an
   assert.ok(!all.includes(TOKEN), all);
   assert.ok(err.message.includes("127.0.0.1"), err.message);
   assert.ok(err.message.includes(String(port)), err.message);
+  const status = await sup.status({ cwd: repo });
+  assert.ok(JSON.stringify({ s: status, f: sup.recentFallbacks }).includes('"demo"'));
+  assert.ok(sup.recentFallbacks.every((f) => f.server === "demo"));
 });
 
 test("a secret echoed in the response body is not in the error", async (t) => {
@@ -218,7 +221,7 @@ test("the whole status payload contains none of the secrets", async (t) => {
 
 test("a value shorter than 4 characters is left as is and the message is not mangled", async (t) => {
   const { sup, repo, fake500, writeServers, writeEnv } = setup(t);
-  const port = await fake500("service unavailable");
+  const port = await fake500("abc service unavailable");
   writeEnv({ TOKEN: "abc" });
   writeServers({
     demo: { transport: "http", url: `http://127.0.0.1:${port}/mcp?k=\${TOKEN}` },
@@ -226,5 +229,5 @@ test("a value shorter than 4 characters is left as is and the message is not man
   const err = await failingCall(sup, repo);
   assert.ok(!err.message.includes("***"), err.message);
   assert.ok(err.message.includes("HTTP 500"), err.message);
-  assert.ok(err.message.includes("service unavailable"), err.message);
+  assert.ok(err.message.includes("abc service unavailable"), err.message);
 });
