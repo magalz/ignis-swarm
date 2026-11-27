@@ -234,7 +234,7 @@ test("a failure to read HEAD puts the root in errors and denies", (t) => {
   assert.equal(decision.allow, false);
   assert.deepEqual(decision.missing, []);
   assert.equal(decision.errors.length, 1);
-  assert.equal(decision.errors[0].dir, repo);
+  assert.equal(normalizeWorkspaceKey(decision.errors[0].dir), normalizeWorkspaceKey(repo));
   assert.match(decision.errors[0].message, /simulated failure/);
 });
 
