@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readReviewState, reviewGateDecision, reviewStatePath } from "../scripts/broker/review-state.mjs";
-import { runGit } from "./helpers.mjs";
+import { initGitRepo, runGit } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RUNNER_PATH = path.resolve(__dirname, "..", "scripts", "run-blind-review.mjs");
@@ -458,10 +458,10 @@ function headlessRouting() {
   return { strategy: "headless_always", headlessBackend: "claude", headlessModel: null, effort: "high" };
 }
 
-function withFixture(fn) {
+function withFixture(fn, makeRepo = createTempGitRepo) {
   const dataDir = createTempDir("ignis-blind-state-data-");
   const shimDir = createTempDir("ignis-blind-state-shim-");
-  const repo = createTempGitRepo();
+  const repo = makeRepo();
   try {
     return fn({ dataDir, shimDir, repo });
   } finally {
@@ -707,6 +707,7 @@ test("a diff above the size limit records a fallback state and still prints JSON
     assert.equal(out.useNative, true);
     assert.equal(out.fallbackToNative, true);
     assert.match(out.reason, /diff extraction failed/);
+    assert.match(out.reason, /too_large/);
     assert.match(out.reason, /1024/);
     assert.equal(out.base, "base-ref");
     assertState(dataDir, repo, "fallback");
@@ -1076,5 +1077,142 @@ test("the review prompt passed to claude and to codex carries the Status instruc
     );
     assert.equal(codex.verdict, "PASS");
     assert.match(captured(codex.output).stdin, /Status: PASS[\s\S]*Status: ISSUES/);
+  });
+});
+
+const ESC = String.fromCharCode(27);
+
+function reviewerEnv(dataDir, shimDir, extra = {}) {
+  return { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), ...extra };
+}
+
+test("a new untracked file that is the only change reaches the reviewer and records reviewed", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    fs.writeFileSync(path.join(repo, "fresh.js"), "export const fresh = 42;\n", "utf8");
+    const res = runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, false);
+    assert.equal(out.fallbackToNative, false);
+    assert.ok(out.diffBytes > 0, `expected the new file in the diff, got diffBytes=${out.diffBytes}`);
+    const seen = captured(out.output);
+    assert.match(seen.stdin, /diff --git a\/fresh\.js b\/fresh\.js/);
+    assert.match(seen.stdin, /new file mode/);
+    assert.match(seen.stdin, /export const fresh = 42;/);
+    assertState(dataDir, repo, "reviewed");
+    assert.equal(runGit(repo, ["status", "--porcelain"]), "?? fresh.js");
+  });
+});
+
+test("a repository with no commits and a new file is reviewed and records headSha unborn", () => {
+  const makeRepo = () =>
+    initGitRepo(createTempDir("ignis-blind-unborn-"), { commit: false, files: { "created.js": "export const created = 1;\n" } });
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const res = runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, false);
+    assert.equal(out.fallbackToNative, false);
+    assert.equal(out.verdict, "PASS");
+    const seen = captured(out.output);
+    assert.match(seen.stdin, /diff --git a\/created\.js b\/created\.js/);
+    assert.match(seen.stdin, /export const created = 1;/);
+    const record = readReviewState(dataDir, repo);
+    assert.ok(record, "expected a review state for the repository with no commits");
+    assert.equal(record.status, "reviewed");
+    assert.equal(record.headSha, "unborn");
+    assert.equal(gateAllows(dataDir, [repo]), false);
+  }, makeRepo);
+});
+
+test("a HEAD that moves while the reviewer runs does not change the recorded headSha", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const before = headOf(repo);
+    const mover = path.join(shimDir, "move-head.mjs");
+    fs.writeFileSync(
+      mover,
+      `import fs from "node:fs";
+import { spawnSync } from "node:child_process";
+fs.readFileSync(0, "utf8");
+const res = spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "moved during review"], {
+  cwd: ${JSON.stringify(repo)},
+  encoding: "utf8",
+});
+if (res.status !== 0) {
+  process.stderr.write(String(res.stderr));
+  process.exit(9);
+}
+process.stdout.write("Status: PASS\\n");
+`,
+      "utf8"
+    );
+    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: mover });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(JSON.parse(res.stdout).fallbackToNative, false);
+    assert.notEqual(headOf(repo), before, "the shim must have moved HEAD");
+    const record = readReviewState(dataDir, repo);
+    assert.equal(record.status, "reviewed");
+    assert.equal(record.headSha, before);
+  });
+});
+
+test("a --cwd that does not exist or is outside git is an input error: exit 1 and no state", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const outside = createTempDir("ignis-blind-nogit-");
+    try {
+      const cases = [
+        [path.join(shimDir, "no-such-dir"), /--cwd/],
+        [outside, /not inside a git repository/],
+      ];
+      for (const [cwd, message] of cases) {
+        const res = runCli(
+          ["--base", "HEAD", "--cwd", cwd, "--backend", "auto", "--json"],
+          reviewerEnv(dataDir, shimDir, { GIT_CEILING_DIRECTORIES: os.tmpdir() })
+        );
+        assert.equal(res.status, 1, `${cwd}: ${res.stdout}`);
+        assert.match(res.stderr, message);
+        assert.equal(res.stdout, "");
+        assert.equal(fs.existsSync(stateDir(dataDir)), false);
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+    assert.equal(readReviewState(dataDir, repo), null);
+  });
+});
+
+test("git color.ui=always leaves no escape characters in the diff the reviewer receives", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    runGit(repo, ["config", "color.ui", "always"]);
+    const res = runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.fallbackToNative, false, out.reason);
+    const { stdin } = captured(out.output);
+    assert.ok(!stdin.includes(ESC), "the reviewer stdin must carry no ANSI escape characters");
+    assert.match(stdin, /^-export const value = 1;$/m);
+    assert.match(stdin, /^\+export const value = 2;$/m);
+    assertState(dataDir, repo, "reviewed");
+  });
+});
+
+test("diff.noprefix and diff.external in the user git config do not change the diff the reviewer receives", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    runGit(repo, ["config", "diff.noprefix", "true"]);
+    runGit(repo, ["config", "diff.external", "ignis-nonexistent-diff-tool-xyz-9999"]);
+    const res = runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.fallbackToNative, false, out.reason);
+    const { stdin } = captured(out.output);
+    assert.match(stdin, /diff --git a\/app\.js b\/app\.js/);
+    assert.match(stdin, /^\+export const value = 2;$/m);
+    assertState(dataDir, repo, "reviewed");
   });
 });
