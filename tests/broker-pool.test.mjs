@@ -292,6 +292,24 @@ test("Supervisor.shutdown also shuts down retired entries that are still drainin
   await slow;
 });
 
+test("an explicit restart stops a busy entry right away instead of waiting for its call", async (t) => {
+  const { sup, repo, call } = setup(t, { servers: { a: {} } });
+  const w1 = repo();
+  const slow = call("a", w1, "slow").then(
+    (value) => ({ value }),
+    (error) => ({ error })
+  );
+  await waitUntil("a call in flight", () => [...sup.pool.values()].some((e) => e.inFlight > 0));
+  const [busy] = [...sup.pool.values()];
+
+  const res = await sup.restart({ server: "a" });
+
+  assert.deepEqual(res, { evicted: 1 });
+  assert.equal(await busy.adapter.isAlive(), false, "restart left the busy child running");
+  assert.equal(sup.retiredEntries.has(busy), false);
+  await slow;
+});
+
 test("sweepErrors never carry config file content", async (t) => {
   const { sup, home } = setup(t, { servers: { a: {} } });
   const secret = `${"sec"}${"ret"}-${Math.floor(Math.random() * 1e9)}`;
