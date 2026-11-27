@@ -186,13 +186,11 @@ const NO_OPINION_STDOUT = '{"decision":"allow"}';
 test("an unmatched command prints exactly the no-opinion string", () => {
   const stdout = runHook(toolPayload("run_command", { CommandLine: "npm test" })).raw;
   assert.equal(stdout, NO_OPINION_STDOUT);
-  assert.notEqual(stdout, "{}");
 });
 
 test("an unrelated tool prints exactly the no-opinion string", () => {
   const stdout = runHook(toolPayload("read_file", { AbsolutePath: "/tmp/a" })).raw;
   assert.equal(stdout, NO_OPINION_STDOUT);
-  assert.notEqual(stdout, "{}");
 });
 
 test("an unreadable payload prints exactly the no-opinion string", () => {

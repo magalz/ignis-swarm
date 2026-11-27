@@ -31,6 +31,7 @@ Enforced, by `PreToolUse` (matcher `run_command|invoke_subagent`):
 
 Not enforced:
 - The other two strategies. `antigravity_gemini_only` and `antigravity_first` get a `SessionStart` notice and nothing else. `antigravity_first` has no gate: the native reviewer runs first by design (ADR-005).
+- Running Phase 4, or any review, at all. Nothing forces the model to call the runner or a reviewer: the gate reacts only when the model invokes the native `blind-edge-hunter`. A model that skips Phase 4 entirely is not stopped.
 - Any subagent type other than `blind-edge-hunter`. A different agent can review a diff and the hook does not look at it.
 - Whether the external reviewer actually reviewed what the model then reports. The hook sees only the recorded state, not the model's later use of the verdict.
 - Shell commands outside the rule list. The command rules are a best-effort pattern scan, not a sandbox.
@@ -109,7 +110,7 @@ Limits of this evidence: one CLI version (1.5.18), headless mode only. Headless 
 
 ### 6. Runner and `SessionStart` notice
 - `SessionStart` emits a `[ignis-swarm][Phase 4 Review Routing]` notice with the exact `scripts/run-blind-review.mjs` path for interactive sessions under `headless_always` and `antigravity_first`, showing `model=none` when no backend is configured. It is silent for subagents and for `antigravity_gemini_only`. It depends only on the strategy and on an interactive main session, not on the onboarding completion state (a skipped onboarding that kept a saved `reviewRouting` still shows it).
-- The runner's input checks, verdict contract and state-writing rules are in ADR-005. In short: `--backend` accepts `auto`, `native`, `claude` or `codex`; `--base` is required; `--smoke-test`, `backend=native`, and (with `--backend auto`) `antigravity_gemini_only` and `antigravity_first` without `--fallback` write no state; a thrown error writes none either.
+- The runner's input checks, verdict contract and state-writing rules are in ADR-005. In short: `--backend` accepts `auto`, `native`, `claude` or `codex`; `--base` is required when a diff is collected; `--smoke-test`, `backend=native`, and (with `--backend auto`) `antigravity_gemini_only` and `antigravity_first` without `--fallback` write no state; a thrown error writes none either.
 
 ### 7. Two-stage onboarding
 Batch 1 Q4 is a binary gate ("Yes: configure an external cross-family reviewer" or "No: Antigravity native Gemini only"). Batch 2 asks the strategy and CLI questions only when Q4 is Yes. The `reviewRouting.strategy` enum keeps its three values, so existing configs stay valid. A neutral briefing (what it is, what it does, why and trade-offs) precedes the questions, with no `(Recommended)` or `(default)` labels. A skip (`onboarding --skip`) counts as done (ADR-004).
@@ -118,7 +119,7 @@ Batch 1 Q4 is a binary gate ("Yes: configure an external cross-family reviewer" 
 `compaction-watch.mjs`, the skills, rules and README tell the user to type the slash command manually and show only the copyable payload. This refines ADR-004.
 
 ## Consequences
-- **Positive:** under `headless_always` the model cannot skip the external reviewer by ignoring prose. State is per workspace and per commit, so concurrent reviews of different repositories do not contend and a stale review of an older commit never unlocks the native reviewer. Users who decline cross-family review are not asked about strategies. Handoffs work in the UI.
+- **Positive:** under `headless_always` the model cannot use the native `blind-edge-hunter` (matched case-insensitively by `TypeName`/`typeName`, exactly or with a `:` or `/` prefix) without a current runner state for every git root. State is per workspace and per commit, so concurrent reviews of different repositories do not contend and a stale review of an older commit never unlocks the native reviewer. Users who decline cross-family review are not asked about strategies. Handoffs work in the UI.
 - **Negative / Risks:**
   - After a new commit, the native reviewer is blocked until the runner has run again, even if the external backend is down.
   - Within 10 minutes of a recorded fallback at the same `HEAD`, the native reviewer is allowed, for every call.
