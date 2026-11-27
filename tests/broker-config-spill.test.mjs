@@ -209,10 +209,10 @@ test("discoverLocalConfig treats a worktree-style .git file as a repository root
 });
 
 const syntaxErrorForms = {
-  "unexpected token": (secret) => `{"a":"${secret}",\n  "b": x}`,
-  "expected property name": (secret) => `{"a":"${secret}",\n  "b": 1,}`,
+  "unexpected token": (secret) => `{"a":1,\n  "b": x${secret}}`,
+  "expected property name": (secret) => `{"a":1,\n  "b": "${secret}",\n}`,
 };
-const syntaxErrorWhere = { "unexpected token": "line 2, column 8", "expected property name": "line 2, column 10" };
+const syntaxErrorWhere = { "unexpected token": "line 2, column 8", "expected property name": "line 3, column 1" };
 
 for (const [form, build] of Object.entries(syntaxErrorForms)) {
   test(`a global config syntax error (${form}) reports line and column and never quotes the file`, () => {

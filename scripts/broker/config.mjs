@@ -353,7 +353,7 @@ export function importMcpConfig(fromPath, onlyServers = null) {
 
 const PER_WORKSPACE_HINT_RE = /context|serena|lsp|git|fs|filesystem|workspace|repo|sqlite/i;
 
-export function readServersFile(home) {
+function readServersFile(home) {
   const dest = path.join(home, "servers.json");
   if (!fs.existsSync(dest)) {
     return { dest, data: { version: 1, defaults: {}, servers: {} } };

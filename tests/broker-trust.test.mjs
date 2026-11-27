@@ -240,7 +240,7 @@ test("a deleted config trusted through a linked parent folder is revoked through
 test("an invalid local config error carries line and column but never the file content", (t) => {
   const { home, file } = fixture(t);
   const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
-  fs.writeFileSync(file, `{"a":"${secret}",\n  "b": x}`);
+  fs.writeFileSync(file, `{"a":1,\n  "b": x${secret}}`);
   const read = readTrustedLocalConfig(home, file);
   assert.equal(read.error.message.includes(secret), false);
   assert.equal(read.error.message, "invalid JSON at line 2, column 8");
@@ -249,9 +249,9 @@ test("an invalid local config error carries line and column but never the file c
 test("a corrupt trust store names no file content", (t) => {
   const { home, file } = fixture(t);
   const secret = "sec" + "ret-" + Math.floor(Math.random() * 1e9);
-  fs.writeFileSync(trustStorePath(home), `{"a":"${secret}",\n  "b": x}`);
+  fs.writeFileSync(trustStorePath(home), `{"a":1,\n  "b": x${secret}}`);
   assert.throws(
     () => trustLocalConfig(home, file),
-    (err) => /corrupt trust store/.test(err.message) && !err.message.includes(secret)
+    (err) => err.message.endsWith(": invalid JSON at line 2, column 8") && !err.message.includes(secret)
   );
 });
