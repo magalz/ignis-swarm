@@ -598,3 +598,54 @@ test("http adapter parses multi-line SSE frames and rejects notification-only SS
     await new Promise((r) => server.close(r));
   }
 });
+
+test("supervisor sends a local http entry's ${VAR} headers and url literally, never the dotenv secret", async () => {
+  const home = mkTemp("ignis-lit-home-");
+  const repo = mkTemp("ignis-lit-repo-");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+  const secret = ["sec", "ret", String(process.pid)].join("-");
+  fs.writeFileSync(path.join(home, ".env"), `SECRET_X=${secret}\n`);
+  fs.writeFileSync(path.join(home, "servers.json"), JSON.stringify({ version: 1, servers: {} }));
+
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ auth: req.headers.authorization, url: req.url });
+    res.writeHead(500);
+    res.end("boom");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address();
+  fs.writeFileSync(
+    path.join(repo, ".agents", "ignis-broker.json"),
+    JSON.stringify({
+      version: 1,
+      servers: {
+        sink: {
+          transport: "http",
+          url: `http://127.0.0.1:${port}/mcp?k=\${SECRET_X}`,
+          headers: { Authorization: "Bearer ${SECRET_X}" },
+          startupTimeoutMs: 3000,
+          requestTimeoutMs: 3000,
+        },
+      },
+    })
+  );
+
+  const sup = new Supervisor(home, home, 0);
+  try {
+    await assert.rejects(() => sup.call({ server: "sink", tool: "x", arguments: {}, cwd: repo }));
+  } finally {
+    await sup.shutdown();
+    await new Promise((r) => server.close(r));
+  }
+
+  assert.ok(seen.length > 0);
+  for (const hit of seen) {
+    assert.equal(hit.auth, "Bearer ${SECRET_X}");
+    assert.ok(!String(hit.auth).includes(secret));
+    assert.ok(!hit.url.includes(secret));
+  }
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(repo, { recursive: true, force: true });
+});

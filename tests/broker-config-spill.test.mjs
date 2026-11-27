@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  discoverLocalConfig,
   expandEnvVars,
   importMcpConfig,
   redactServerConfig,
@@ -130,4 +131,76 @@ test("truncates large UTF-8 output to spill file and cleans expired spills", () 
   assert.equal(removed, 1);
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("local entries keep ${VAR} literal while global entries expand it", () => {
+  const home = mkTemp("ignis-cfg-lit-home-");
+  const repo = mkTemp("ignis-cfg-lit-repo-");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".env"), "SECRET_X=s3cret\n");
+  const entry = {
+    transport: "http",
+    url: "https://example.com/mcp?k=${SECRET_X}",
+    headers: { Authorization: "Bearer ${SECRET_X}" },
+    env: { TOKEN: "${SECRET_X}" },
+  };
+  fs.writeFileSync(path.join(home, "servers.json"), JSON.stringify({ version: 1, servers: { remote: entry } }));
+  fs.writeFileSync(path.join(repo, ".agents", "ignis-broker.json"), JSON.stringify({ version: 1, servers: { remote: entry } }));
+
+  const chain = resolveConfig(home, repo).candidates.get("remote");
+  assert.equal(chain[0].source, "local");
+  assert.equal(chain[0].config.url, "https://example.com/mcp?k=${SECRET_X}");
+  assert.equal(chain[0].config.headers.Authorization, "Bearer ${SECRET_X}");
+  assert.equal(chain[0].config.env.TOKEN, "${SECRET_X}");
+  assert.equal(chain[1].source, "global");
+  assert.equal(chain[1].config.url, "https://example.com/mcp?k=s3cret");
+  assert.equal(chain[1].config.headers.Authorization, "Bearer s3cret");
+  assert.equal(chain[1].config.env.TOKEN, "s3cret");
+
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+function writeLocal(dir) {
+  fs.mkdirSync(path.join(dir, ".agents"), { recursive: true });
+  const file = path.join(dir, ".agents", "ignis-broker.json");
+  fs.writeFileSync(file, JSON.stringify({ version: 1, servers: {} }));
+  return file;
+}
+
+test("discoverLocalConfig ignores a config when no git repository exists", () => {
+  const tmp = mkTemp("ignis-disc-norepo-");
+  writeLocal(tmp);
+  fs.mkdirSync(path.join(tmp, "sub"));
+  assert.equal(discoverLocalConfig(path.join(tmp, "sub")), null);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("discoverLocalConfig finds a config at the repository root from a nested cwd", () => {
+  const root = mkTemp("ignis-disc-repo-");
+  fs.mkdirSync(path.join(root, ".git"));
+  const file = writeLocal(root);
+  fs.mkdirSync(path.join(root, "a", "b"), { recursive: true });
+  assert.equal(discoverLocalConfig(path.join(root, "a", "b")), file);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("discoverLocalConfig never searches above the repository root", () => {
+  const parent = mkTemp("ignis-disc-above-");
+  writeLocal(parent);
+  const repo = path.join(parent, "repo");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(repo, "src"));
+  assert.equal(discoverLocalConfig(path.join(repo, "src")), null);
+  fs.rmSync(parent, { recursive: true, force: true });
+});
+
+test("discoverLocalConfig treats a worktree-style .git file as a repository root", () => {
+  const root = mkTemp("ignis-disc-wt-");
+  fs.writeFileSync(path.join(root, ".git"), "gitdir: /elsewhere/.git/worktrees/x\n");
+  const file = writeLocal(root);
+  fs.mkdirSync(path.join(root, "pkg"));
+  assert.equal(discoverLocalConfig(path.join(root, "pkg")), file);
+  fs.rmSync(root, { recursive: true, force: true });
 });

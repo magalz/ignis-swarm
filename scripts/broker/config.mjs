@@ -64,25 +64,25 @@ export function expandEnvVars(input, dotenv) {
   });
 }
 
-function expandRecord(rec, dotenv) {
+function expandRecord(rec, dotenv, expand = true) {
   const out = {};
   if (!rec || typeof rec !== "object") return out;
   for (const [k, v] of Object.entries(rec)) {
     if (v === null || v === undefined) continue;
-    out[k] = typeof v === "string" ? expandEnvVars(v, dotenv) : String(v);
+    out[k] = typeof v === "string" && expand ? expandEnvVars(v, dotenv) : String(v);
   }
   return out;
 }
 
-function normalizeServerConfig(raw, dotenv) {
+function normalizeServerConfig(raw, dotenv, expand = true) {
   const transport = raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio");
   return {
     transport,
     command: raw.command ?? null,
     args: Array.isArray(raw.args) ? raw.args.map(String) : [],
-    env: expandRecord(raw.env, dotenv),
-    url: typeof raw.url === "string" ? expandEnvVars(raw.url, dotenv) : null,
-    headers: expandRecord(raw.headers, dotenv),
+    env: expandRecord(raw.env, dotenv, expand),
+    url: typeof raw.url === "string" ? (expand ? expandEnvVars(raw.url, dotenv) : raw.url) : null,
+    headers: expandRecord(raw.headers, dotenv, expand),
     cwd: typeof raw.cwd === "string" ? raw.cwd : null,
     perWorkspace: Boolean(raw.perWorkspace),
     enabled: raw.enabled !== false,
@@ -92,34 +92,41 @@ function normalizeServerConfig(raw, dotenv) {
   };
 }
 
+function sameDir(a, b) {
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 export function discoverLocalConfig(cwd) {
   if (!cwd) return null;
   const home = path.resolve(os.homedir());
-  let current = path.resolve(cwd);
+  let start = path.resolve(cwd);
   try {
-    if (fs.existsSync(current) && fs.statSync(current).isFile()) {
-      current = path.dirname(current);
+    if (fs.existsSync(start) && fs.statSync(start).isFile()) {
+      start = path.dirname(start);
     }
   } catch {
     return null;
   }
 
-  while (true) {
-    const isHome =
-      process.platform === "win32"
-        ? current.toLowerCase() === home.toLowerCase()
-        : current === home;
-    if (isHome) return null;
-    const candidate = path.join(current, ".agents", "ignis-broker.json");
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-      return candidate;
-    }
+  let root = null;
+  for (let current = start; ; ) {
+    if (sameDir(current, home)) return null;
     if (fs.existsSync(path.join(current, ".git"))) {
-      return null;
+      root = current;
+      break;
     }
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
+  }
+
+  for (let current = start; ; ) {
+    const candidate = path.join(current, ".agents", "ignis-broker.json");
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+    if (current === root) return null;
+    current = path.dirname(current);
   }
 }
 
@@ -221,7 +228,7 @@ export function resolveConfig(home, cwd) {
         chain.push({
           name,
           source: "local",
-          config: normalizeServerConfig(rawLocal, dotenv),
+          config: normalizeServerConfig(rawLocal, null, false),
         });
       }
     }
