@@ -12,6 +12,31 @@ function injectDefaultCwd(msg, defaultCwd) {
   }
 }
 
+export async function postToDaemon({ ensure, path, body, timeoutMs = 300_000 }) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const info = await ensure();
+    let resp;
+    try {
+      resp = await fetch(`http://127.0.0.1:${info.port}${path}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${info.token}`,
+          Connection: "close",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      if (attempt === 1) throw err;
+      continue;
+    }
+    if (resp.ok) return resp;
+    const text = await resp.text().catch(() => "");
+    throw new Error(`HTTP ${resp.status}: ${text}`);
+  }
+}
+
 async function forwardWithReconnect(home, dataDir, entryScript, msg) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const info = await ensureDaemon(home, dataDir, entryScript);
