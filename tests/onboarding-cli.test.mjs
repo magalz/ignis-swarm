@@ -399,6 +399,7 @@ test("onboarding --save sets completed true unless skipped, and honours an expli
     assert.equal(skipped.completed, false);
     assert.equal(skipped.completedAt, null);
 
+    onb(iso, ["--reset"]);
     const explicit = JSON.parse(onb(iso, ["--save", JSON.stringify({ completed: false })]).stdout);
     assert.equal(explicit.completed, false);
     assert.equal(explicit.skipped, false);
