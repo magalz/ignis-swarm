@@ -61,7 +61,14 @@ process.stdout.write("OK\\n");
       : `
 import fs from "node:fs";
 const stdin = fs.readFileSync(0, "utf8");
-const payload = { argv: process.argv.slice(2), stdin };
+const argv = process.argv.slice(2);
+const at = argv.indexOf("--mcp-config");
+const configPath = at === -1 ? null : argv[at + 1];
+const mcpConfig =
+  configPath === null
+    ? null
+    : { path: configPath, exists: fs.existsSync(configPath), content: fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : null };
+const payload = { argv, stdin, mcpConfig };
 process.stdout.write(JSON.stringify(payload));
 `;
   fs.writeFileSync(shimPath, code.trimStart(), "utf8");
@@ -144,7 +151,8 @@ test("antigravity_first returns native without --fallback and invokes claude shi
     const captured = JSON.parse(secondJson.output);
     assert.equal(captured.argv[0], "-p");
     assert.ok(captured.argv[1].length > 0);
-    assert.deepEqual(captured.argv.slice(2), [
+    const configAt = captured.argv.indexOf("--mcp-config");
+    assert.deepEqual(captured.argv.slice(2, configAt), [
       "--model",
       "opus",
       "--effort",
@@ -156,10 +164,11 @@ test("antigravity_first returns native without --fallback and invokes claude shi
       "Grep",
       "Glob",
       "--strict-mcp-config",
-      "--mcp-config",
-      '{"mcpServers":{}}',
-      "--no-session-persistence",
     ]);
+    assert.equal(path.basename(captured.argv[configAt + 1]), "mcp-config.json");
+    assert.deepEqual(captured.argv.slice(configAt + 2), ["--no-session-persistence"]);
+    assert.equal(captured.mcpConfig.exists, true);
+    assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
     assert.match(captured.stdin, /export const value = 2;/);
     assert.match(captured.stdin, /diff --git a\/app\.js b\/app\.js/);
   } finally {
@@ -204,7 +213,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
       "--sandbox",
       "read-only",
       "-c",
-      'approval_policy="never"',
+      "approval_policy=never",
       "-",
     ]);
     assert.match(capturedWithModel.stdin, /diff --git a\/app\.js b\/app\.js/);
@@ -236,7 +245,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
       "--sandbox",
       "read-only",
       "-c",
-      'approval_policy="never"',
+      "approval_policy=never",
       "-",
     ]);
     assert.ok(!capturedWithoutModel.argv.includes("-m"));
@@ -352,7 +361,8 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
       assert.ok(!captured.argv[1].includes("\n"));
       assert.ok(captured.argv.includes("--strict-mcp-config"));
       assert.ok(captured.argv.includes("--no-session-persistence"));
-      assert.equal(captured.argv[captured.argv.indexOf("--mcp-config") + 1], '{"mcpServers":{}}');
+      assert.equal(captured.mcpConfig.exists, true);
+      assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
     }
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -488,7 +498,7 @@ test("smoke-test and non-attempt strategies never write state", () => {
   });
 });
 
-test("unwritable state location does not crash review output", () => {
+test("unwritable state location does not crash review output and is reported as stateError", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     fs.mkdirSync(stateFile(dataDir));
@@ -497,9 +507,213 @@ test("unwritable state location does not crash review output", () => {
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
     });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(JSON.parse(res.stdout).fallbackToNative, false);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.fallbackToNative, false);
+    assert.equal(typeof out.stateError, "string");
+    assert.ok(out.stateError.length > 0);
+    assert.doesNotMatch(res.stderr, /could not be recorded/);
   });
 });
+
+test("a failing headless run whose marker cannot be written reports stateError in JSON and on stderr", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    fs.mkdirSync(stateFile(dataDir));
+    const failing = path.join(shimDir, "fail.mjs");
+    fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
+    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, true);
+    assert.equal(out.fallbackToNative, true);
+    assert.equal(typeof out.stateError, "string");
+    assert.ok(out.stateError.length > 0);
+    assert.ok(
+      res.stderr.includes(`fallback marker could not be recorded at ${stateFile(dataDir)}`),
+      `stderr was: ${res.stderr}`
+    );
+  });
+});
+
+test("a recorded state write carries no stateError", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const res = runCli(runArgs(repo), {
+      IGNIS_BROKER_DATA: dataDir,
+      IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(!("stateError" in JSON.parse(res.stdout)));
+  });
+});
+
+test("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs leaves approval_policy unquoted", async () => {
+  const { buildClaudeArgs, buildCodexArgs } = await import("../scripts/run-blind-review.mjs");
+  assert.deepEqual(buildClaudeArgs("review this", "opus", "high", "/tmp/ignis/mcp-config.json"), [
+    "-p",
+    "review this",
+    "--model",
+    "opus",
+    "--effort",
+    "high",
+    "--permission-mode",
+    "dontAsk",
+    "--allowedTools",
+    "Read",
+    "Grep",
+    "Glob",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "/tmp/ignis/mcp-config.json",
+    "--no-session-persistence",
+  ]);
+  const codexArgs = buildCodexArgs(null);
+  assert.equal(codexArgs[codexArgs.indexOf("-c") + 1], "approval_policy=never");
+  assert.ok(codexArgs.every((arg) => !arg.includes('"')));
+});
+
+test("claude receives an existing MCP config file during the run and its temp directory is gone afterwards", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const echo = createEchoShim(shimDir, "echo-config");
+    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: echo });
+    assert.equal(res.status, 0, res.stderr);
+    const captured = JSON.parse(JSON.parse(res.stdout).output);
+    assert.ok(captured.argv.includes("--strict-mcp-config"));
+    assert.ok(path.isAbsolute(captured.mcpConfig.path));
+    assert.equal(captured.mcpConfig.exists, true);
+    assert.equal(captured.mcpConfig.content, '{"mcpServers":{}}');
+    assert.equal(fs.existsSync(path.dirname(captured.mcpConfig.path)), false);
+
+    const recorder = path.join(shimDir, "record-then-fail.mjs");
+    const recorded = path.join(shimDir, "recorded-config-path.txt");
+    fs.writeFileSync(
+      recorder,
+      `import fs from "node:fs";
+const argv = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(recorded)}, argv[argv.indexOf("--mcp-config") + 1]);
+process.exit(4);
+`,
+      "utf8"
+    );
+    const failed = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: recorder });
+    assert.equal(failed.status, 0, failed.stderr);
+    assert.equal(JSON.parse(failed.stdout).fallbackToNative, true);
+    const configPath = fs.readFileSync(recorded, "utf8");
+    assert.equal(fs.existsSync(path.dirname(configPath)), false);
+  });
+});
+
+test("--smoke-test passes claude an existing MCP config file", () => {
+  withFixture(({ shimDir }) => {
+    const shim = path.join(shimDir, "claude-smoke-config.mjs");
+    fs.writeFileSync(
+      shim,
+      `import fs from "node:fs";
+const argv = process.argv.slice(2);
+const configPath = argv[argv.indexOf("--mcp-config") + 1];
+process.stdout.write(fs.existsSync(configPath) ? "OK\\n" : "MISSING\\n");
+`,
+      "utf8"
+    );
+    const res = runCli(["--smoke-test", "--backend", "claude", "--json"], { IGNIS_CLAUDE_CMD: shim });
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.ok, true, JSON.stringify(out));
+  });
+});
+
+test("a diff above the size limit records a fallback marker and still prints JSON", async () => {
+  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
+    spawnSync("git", ["add", "big.txt"], { cwd: repo, windowsHide: true });
+    spawnSync("git", ["commit", "-q", "-m", "big file"], { cwd: repo, windowsHide: true });
+
+    const env = {
+      IGNIS_BROKER_DATA: dataDir,
+      IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
+      IGNIS_REVIEW_MAX_DIFF_BYTES: "1024",
+    };
+    const res = runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], env);
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, true);
+    assert.equal(out.fallbackToNative, true);
+    assert.match(out.reason, /diff extraction failed/);
+    assert.match(out.reason, /1024/);
+    assert.equal(out.base, "base-ref");
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+
+    const nonNumeric = runCli(runArgs(repo), { ...env, IGNIS_REVIEW_MAX_DIFF_BYTES: "not-a-number" });
+    assert.equal(nonNumeric.status, 0, nonNumeric.stderr);
+    assert.equal(JSON.parse(nonNumeric.stdout).useNative, false);
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+  });
+});
+
+test("a diff extraction failure from git itself records a fallback marker", async () => {
+  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
+    Object.assign(env, {
+      IGNIS_BROKER_DATA: dataDir,
+      IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
+      PATH: path.join(shimDir, "no-git-here"),
+    });
+    const res = spawnSync(process.execPath, [RUNNER_PATH, ...runArgs(repo)], {
+      encoding: "utf8",
+      windowsHide: true,
+      env,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout);
+    assert.equal(out.useNative, true);
+    assert.equal(out.fallbackToNative, true);
+    assert.match(out.reason, /diff extraction failed/);
+    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+  });
+});
+
+test(
+  "Windows plain .cmd claude shim runs now that no argument carries a double quote",
+  { skip: process.platform !== "win32" ? "needs cmd.exe batch handling, Windows only" : false },
+  () => {
+    withFixture(({ dataDir, shimDir, repo }) => {
+      writeOnboarding(dataDir, headlessRouting());
+      const cmdPath = path.join(shimDir, "claude-plain.cmd");
+      fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
+      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
+      assert.equal(res.status, 0, res.stderr);
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.useNative, false);
+      assert.equal(out.fallbackToNative, false);
+      assert.equal(out.output.trim(), "review");
+    });
+  }
+);
+
+test(
+  "Windows plain .cmd shim with a double quote in an argument records a fallback marker instead of exiting 1",
+  { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
+  async () => {
+    const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+    withFixture(({ dataDir, shimDir, repo }) => {
+      writeOnboarding(dataDir, { ...headlessRouting(), headlessModel: 'op"us' });
+      const cmdPath = path.join(shimDir, "claude-plain.cmd");
+      fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
+      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
+      assert.equal(res.status, 0, res.stderr);
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.useNative, true);
+      assert.equal(out.fallbackToNative, true);
+      assert.match(out.reason, /double quotes/);
+      assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    });
+  }
+);
 
 test("uncommitted working-tree edits are included when --base HEAD is passed", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
