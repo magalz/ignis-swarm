@@ -91,6 +91,7 @@ export class Supervisor {
     this.startedAt = Date.now();
     this.pool = new Map();
     this.pendingConnects = new Map();
+    this.retiredEntries = new Set();
     this.recentFallbacks = [];
     this.sweepErrors = [];
   }
@@ -144,21 +145,51 @@ export class Supervisor {
     const idle = siblings.filter(([, e]) => e.inFlight === 0).sort((a, b) => a[1].lastUsed - b[1].lastUsed);
     let excess = siblings.length - maxInstances + 1;
     while (excess > 0 && idle.length > 0) {
-      const [key, entry] = idle.shift();
-      this.pool.delete(key);
-      await entry.adapter.shutdown();
+      const [, entry] = idle.shift();
+      await this._evictEntry(entry);
       excess -= 1;
     }
   }
 
-  async _callTracked(entry, tool, args) {
-    entry.inFlight += 1;
+  async _tracked(entry, fn) {
     try {
-      return await entry.adapter.callTool(tool, args);
+      return await fn(entry.adapter);
     } finally {
-      entry.inFlight -= 1;
-      entry.lastUsed = Date.now();
+      await this._release(entry);
     }
+  }
+
+  async _release(entry) {
+    entry.inFlight -= 1;
+    entry.lastUsed = Date.now();
+    if (!entry.retired || entry.inFlight > 0) return;
+    try {
+      await this._drain(entry);
+    } catch (err) {
+      this._recordSweepError(err, [entry.redact], entry);
+    }
+  }
+
+  _retire(entry) {
+    if (this.pool.get(entry.key) === entry) this.pool.delete(entry.key);
+    entry.retired = true;
+    this.retiredEntries.add(entry);
+  }
+
+  _drain(entry, force = false) {
+    if (entry.closed) return Promise.resolve();
+    if (entry.draining) return entry.draining;
+    if (entry.inFlight > 0 && !force) return Promise.resolve();
+    entry.draining = (async () => {
+      try {
+        await entry.adapter.shutdown();
+        entry.closed = true;
+        this.retiredEntries.delete(entry);
+      } finally {
+        entry.draining = null;
+      }
+    })();
+    return entry.draining;
   }
 
   _recordSweepError(err, configs, entry) {
@@ -175,20 +206,35 @@ export class Supervisor {
     const configDigest = JSON.stringify(candidate.config);
     const existing = this.pool.get(keyInfo.key);
     if (existing) {
-      if (existing.configDigest === configDigest && (await existing.adapter.isAlive())) {
+      existing.inFlight += 1;
+      let usable;
+      try {
+        usable = existing.configDigest === configDigest && (await existing.adapter.isAlive());
+      } catch (err) {
+        await this._release(existing);
+        throw err;
+      }
+      if (usable) {
         existing.lastUsed = Date.now();
         return existing;
       }
-      this.pool.delete(keyInfo.key);
-      await existing.adapter.shutdown();
+      this._retire(existing);
+      await this._release(existing);
+      const replacement = this.pool.get(keyInfo.key);
+      if (replacement && replacement !== existing) {
+        return this._getOrConnect(keyInfo, candidate, defaults, cwd);
+      }
     }
 
     const inflight = this.pendingConnects.get(keyInfo.key);
     if (inflight) {
-      return inflight;
+      inflight.leases += 1;
+      if (inflight.entry) inflight.entry.inFlight += 1;
+      return inflight.promise;
     }
 
-    const connectPromise = (async () => {
+    const pending = { entry: null, leases: 1, promise: null };
+    pending.promise = (async () => {
       if (candidate.config.perWorkspace) {
         await this._evictLruWorkspaceIfNeeded(defaults.maxWorkspaceInstances, keyInfo);
       }
@@ -198,21 +244,22 @@ export class Supervisor {
         ...keyInfo,
         adapter,
         lastUsed: Date.now(),
-        inFlight: 0,
+        inFlight: pending.leases,
         redact: candidate.config,
         cachedTools: null,
         perWorkspace: candidate.config.perWorkspace,
         configDigest,
       };
+      pending.entry = entry;
       this.pool.set(keyInfo.key, entry);
       return entry;
     })();
 
-    this.pendingConnects.set(keyInfo.key, connectPromise);
+    this.pendingConnects.set(keyInfo.key, pending);
     try {
-      return await connectPromise;
+      return await pending.promise;
     } finally {
-      if (this.pendingConnects.get(keyInfo.key) === connectPromise) {
+      if (this.pendingConnects.get(keyInfo.key) === pending) {
         this.pendingConnects.delete(keyInfo.key);
       }
     }
@@ -220,8 +267,8 @@ export class Supervisor {
 
   async _evictEntry(entry) {
     if (this.pool.get(entry.key) !== entry) return false;
-    this.pool.delete(entry.key);
-    await entry.adapter.shutdown();
+    this._retire(entry);
+    await this._drain(entry);
     return true;
   }
 
@@ -266,13 +313,13 @@ export class Supervisor {
         let entry = await this._getOrConnect(keyInfo, candidate, defaults, cwd);
         let tools;
         try {
-          tools = await entry.adapter.listTools();
+          tools = await this._tracked(entry, (adapter) => adapter.listTools());
         } catch (err) {
           if (err instanceof BrokerError && err.isRetryable() && defaults.retryOnTransportError) {
             if (err.kind !== "timeout") await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, defaults, cwd);
-            tools = await entry.adapter.listTools();
+            tools = await this._tracked(entry, (adapter) => adapter.listTools());
           } else {
             throw err;
           }
@@ -403,7 +450,7 @@ export class Supervisor {
         let entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
         let res;
         try {
-          res = await this._callTracked(entry, req.tool, req.arguments || {});
+          res = await this._tracked(entry, (adapter) => adapter.callTool(req.tool, req.arguments || {}));
         } catch (err) {
           if (
             err instanceof BrokerError &&
@@ -413,7 +460,7 @@ export class Supervisor {
             await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
-            res = await this._callTracked(entry, req.tool, req.arguments || {});
+            res = await this._tracked(entry, (adapter) => adapter.callTool(req.tool, req.arguments || {}));
           } else {
             throw err;
           }
@@ -529,17 +576,25 @@ export class Supervisor {
   async restart(req = {}) {
     const targetScope = req.cwd ? resolveRepoRoot(req.cwd) : null;
     const toRemove = [];
-    for (const [key, entry] of this.pool.entries()) {
+    for (const entry of this.pool.values()) {
       const serverMatch = !req.server || entry.server === req.server;
       const scopeMatch = !targetScope || entry.scope === targetScope;
       if (serverMatch && scopeMatch) {
-        toRemove.push([key, entry]);
+        toRemove.push(entry);
       }
     }
-    for (const [key, entry] of toRemove) {
-      this.pool.delete(key);
-      await entry.adapter.shutdown();
+    let failure = null;
+    for (const entry of toRemove) {
+      this._retire(entry);
     }
+    for (const entry of toRemove) {
+      try {
+        await this._drain(entry, true);
+      } catch (err) {
+        failure ??= err;
+      }
+    }
+    if (failure) throw failure;
     return { evicted: toRemove.length };
   }
 
@@ -553,7 +608,14 @@ export class Supervisor {
     }
     const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
     const now = Date.now();
-    for (const [key, entry] of [...this.pool.entries()]) {
+    for (const entry of [...this.retiredEntries]) {
+      try {
+        await this._drain(entry);
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
+      }
+    }
+    for (const entry of [...this.pool.values()]) {
       try {
         if (
           entry.perWorkspace &&
@@ -561,8 +623,7 @@ export class Supervisor {
           maxIdleMs > 0 &&
           now - entry.lastUsed >= maxIdleMs
         ) {
-          this.pool.delete(key);
-          await entry.adapter.shutdown();
+          await this._evictEntry(entry);
         }
       } catch (err) {
         this._recordSweepError(err, [entry.redact], entry);
@@ -576,10 +637,14 @@ export class Supervisor {
   }
 
   async shutdown() {
-    const entries = [...this.pool.values()];
-    this.pool.clear();
+    const entries = [...this.pool.values(), ...this.retiredEntries];
+    for (const entry of entries) this._retire(entry);
     for (const entry of entries) {
-      await entry.adapter.shutdown();
+      try {
+        await this._drain(entry, true);
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
+      }
     }
   }
 }
