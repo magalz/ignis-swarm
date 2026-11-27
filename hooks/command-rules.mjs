@@ -578,7 +578,7 @@ function evaluateSegment(segment, depth) {
   const { names } = words[start];
   const operands = words.slice(start + 1).filter((word) => !word.partial);
   if (deletesRoot(names, operands)) return deny(DELETE_ROOT_REASON);
-  if (names.includes("node") && trustsBrokerConfig(operands)) decided(forceAsk(TRUST_REASON));
+  if (names.includes("node") && trustsBrokerConfig(words.slice(start + 1))) decided(forceAsk(TRUST_REASON));
   if (names.includes("git")) return strongest(verdict, evaluateGit(words.slice(start + 1), depth));
   if (names.includes("find") && decidedAll(findScripts(words.slice(start + 1)))) return verdict;
   if (names.some((name) => EXPRESSION_COMMANDS.has(name))) {
