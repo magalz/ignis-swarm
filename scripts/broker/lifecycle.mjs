@@ -102,14 +102,14 @@ export function isPidAlive(pid) {
 
 const HEALTH_PROBE_MS = 400;
 const SHUTDOWN_REQUEST_MS = 1500;
-const SHUTDOWN_WAIT_MS = 2000;
+const SHUTDOWN_WAIT_MS = 3000;
 const TERM_GRACE_MS = 1500;
 const KILL_WAIT_MS = 1500;
 const SPAWN_WAIT_MS = 6000;
-export const LOCK_MAX_HOLD_MS =
+const LOCK_MAX_HOLD_MS =
   HEALTH_PROBE_MS + SHUTDOWN_REQUEST_MS + SHUTDOWN_WAIT_MS + TERM_GRACE_MS + KILL_WAIT_MS + SPAWN_WAIT_MS;
-export const LOCK_STALE_MS = 30_000;
-export const LOCK_WAIT_MS = LOCK_STALE_MS + LOCK_MAX_HOLD_MS;
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = LOCK_STALE_MS + LOCK_MAX_HOLD_MS;
 
 function readLockRaw(lockPath) {
   try {
@@ -119,13 +119,13 @@ function readLockRaw(lockPath) {
   }
 }
 
-function isLockStale(lockPath, raw, staleMs) {
+function isLockStale(lockPath, raw) {
   try {
     const parsed = JSON.parse(raw);
-    return !isPidAlive(parsed.pid) || Date.now() - (parsed.ts || 0) > staleMs;
+    return !isPidAlive(parsed.pid) || Date.now() - (parsed.ts || 0) > LOCK_STALE_MS;
   } catch {
     try {
-      return Date.now() - fs.statSync(lockPath).mtimeMs > staleMs;
+      return Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS;
     } catch {
       return false;
     }
@@ -137,7 +137,7 @@ function evictStaleLock(lockPath, raw) {
   try {
     fs.renameSync(lockPath, moved);
   } catch {
-    return;
+    return false;
   }
   try {
     if (readLockRaw(moved) !== raw) fs.linkSync(moved, lockPath);
@@ -145,9 +145,10 @@ function evictStaleLock(lockPath, raw) {
   try {
     fs.rmSync(moved, { force: true });
   } catch {}
+  return true;
 }
 
-export async function acquireLock(lockPath, timeoutMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS) {
+export async function acquireLock(lockPath, timeoutMs = LOCK_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const content = JSON.stringify({ pid: process.pid, ts: Date.now(), nonce: crypto.randomBytes(8).toString("hex") });
@@ -167,9 +168,8 @@ export async function acquireLock(lockPath, timeoutMs = LOCK_WAIT_MS, staleMs = 
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;
       const raw = readLockRaw(lockPath);
-      if (raw !== null && isLockStale(lockPath, raw, staleMs)) {
-        evictStaleLock(lockPath, raw);
-        continue;
+      if (raw !== null && isLockStale(lockPath, raw)) {
+        if (evictStaleLock(lockPath, raw)) continue;
       }
       await sleep(30);
     }
@@ -198,6 +198,12 @@ async function killAndWait(pid) {
   return waitUntilGone(pid, KILL_WAIT_MS);
 }
 
+async function shutdownAndKill(info) {
+  await requestShutdown(info);
+  if (await waitUntilGone(info.pid, SHUTDOWN_WAIT_MS)) return true;
+  return killAndWait(info.pid);
+}
+
 export async function stopDaemon(dataDir) {
   const info = readDaemonInfo(dataDir);
   if (!info) return false;
@@ -207,13 +213,7 @@ export async function stopDaemon(dataDir) {
     } catch {}
     return false;
   }
-  await requestShutdown(info);
-  const deadline = Date.now() + SHUTDOWN_WAIT_MS;
-  while (Date.now() < deadline) {
-    if (!(await probeHealth(info)) && !isPidAlive(info.pid)) break;
-    await sleep(40);
-  }
-  if (!(await killAndWait(info.pid))) return true;
+  if (!(await shutdownAndKill(info))) return true;
   try {
     fs.rmSync(daemonInfoPath(dataDir), { force: true });
   } catch {}
@@ -259,13 +259,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
         return recheck;
       }
       if (h?.ok) {
-        await requestShutdown(recheck);
-        const waitUntil = Date.now() + SHUTDOWN_WAIT_MS;
-        while (Date.now() < waitUntil) {
-          if (!(await probeHealth(recheck))) break;
-          await sleep(40);
-        }
-        if (!(await killAndWait(recheck.pid))) {
+        if (!(await shutdownAndKill(recheck))) {
           throw new Error("could not stop the outdated ignis-broker daemon");
         }
       }
