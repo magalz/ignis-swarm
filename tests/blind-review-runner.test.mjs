@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readReviewState, reviewGateDecision, reviewStatePath } from "../scripts/broker/review-state.mjs";
+import { runGit } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RUNNER_PATH = path.resolve(__dirname, "..", "scripts", "run-blind-review.mjs");
@@ -414,8 +416,28 @@ test("empty diff short-circuits, corrupt onboarding falls back, and trailing val
 });
 
 
-function stateFile(dataDir) {
-  return path.join(dataDir, "blind-review-state.json");
+function stateDir(dataDir) {
+  return path.join(dataDir, "blind-review");
+}
+
+function blockStateDir(dataDir) {
+  fs.writeFileSync(stateDir(dataDir), "not a directory", "utf8");
+}
+
+function headOf(repo) {
+  return runGit(repo, ["rev-parse", "HEAD"]);
+}
+
+function assertState(dataDir, repo, status) {
+  const record = readReviewState(dataDir, repo);
+  assert.ok(record, `expected a ${status} review state for ${repo}`);
+  assert.equal(record.status, status);
+  assert.equal(record.headSha, headOf(repo));
+  return record;
+}
+
+function gateAllows(dataDir, dirs) {
+  return reviewGateDecision(dataDir, dirs).allow;
 }
 
 function headlessRouting() {
@@ -435,8 +457,7 @@ function withFixture(fn) {
 
 const runArgs = (repo) => ["--base", "base-ref", "--cwd", repo, "--backend", "auto", "--json"];
 
-test("failing headless run records fresh fallback marker and success clears it", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("failing headless run records a fallback state and a successful run records reviewed", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const failing = path.join(shimDir, "fail.mjs");
@@ -446,37 +467,47 @@ test("failing headless run records fresh fallback marker and success clears it",
     const parsed = JSON.parse(res.stdout);
     assert.equal(parsed.useNative, true);
     assert.equal(parsed.fallbackToNative, true);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    const fallback = assertState(dataDir, repo, "fallback");
+    assert.equal(fallback.reason, parsed.reason);
+    assert.equal(gateAllows(dataDir, [repo]), true);
 
     const ok = createEchoShim(shimDir, "ok");
     res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
     assert.equal(JSON.parse(res.stdout).fallbackToNative, false);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    const reviewed = assertState(dataDir, repo, "reviewed");
+    assert.equal(reviewed.reason, null);
+    assert.equal(gateAllows(dataDir, [repo]), false);
   });
 });
 
-test("empty diff clears an existing fallback marker", async () => {
-  const { hasFreshNativeFallback, recordBlindReviewState } = await import("../scripts/broker/onboarding.mjs");
+test("empty diff replaces an existing fallback state with empty", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    recordBlindReviewState(dataDir, repo, { fallbackToNative: true, reason: "x" });
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    const failing = path.join(shimDir, "fail.mjs");
+    fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
+    const failed = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    assert.equal(failed.status, 0, failed.stderr);
+    assertState(dataDir, repo, "fallback");
+    assert.equal(gateAllows(dataDir, [repo]), true);
+
     const res = runCli(
       ["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok") }
     );
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    const emptyState = assertState(dataDir, repo, "empty");
+    assert.equal(emptyState.reason, null);
+    assert.equal(gateAllows(dataDir, [repo]), false);
   });
 });
 
-test("unconfigured headless backend records fallback marker", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("unconfigured headless backend records a fallback state", () => {
   withFixture(({ dataDir, repo }) => {
     writeOnboarding(dataDir, { strategy: "headless_always", headlessBackend: null, headlessModel: null, effort: "high" });
     const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir });
     assert.equal(JSON.parse(res.stdout).fallbackToNative, true);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    assert.match(assertState(dataDir, repo, "fallback").reason, /invalid or unconfigured headless backend/);
+    assert.equal(gateAllows(dataDir, [repo]), true);
   });
 });
 
@@ -486,22 +517,22 @@ test("smoke-test and non-attempt strategies never write state", () => {
     const env = { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "smoke", "smoke") };
     const res = runCli(["--smoke-test", "--backend", "claude", "--cwd", repo], env);
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(fs.existsSync(stateFile(dataDir)), false);
+    assert.equal(fs.existsSync(stateDir(dataDir)), false);
 
     for (const strategy of ["antigravity_gemini_only", "antigravity_first"]) {
       writeOnboarding(dataDir, { strategy, headlessBackend: "claude", headlessModel: null, effort: "high" });
       const stratRes = runCli(runArgs(repo), env);
       assert.equal(stratRes.status, 0, stratRes.stderr);
       assert.equal(JSON.parse(stratRes.stdout).useNative, true);
-      assert.equal(fs.existsSync(stateFile(dataDir)), false);
+      assert.equal(fs.existsSync(stateDir(dataDir)), false);
     }
   });
 });
 
-test("unwritable state location does not crash review output and is reported as stateError", () => {
+test("unwritable state location does not crash review output and is reported as stateError and on stderr", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    fs.mkdirSync(stateFile(dataDir));
+    blockStateDir(dataDir);
     const res = runCli(runArgs(repo), {
       IGNIS_BROKER_DATA: dataDir,
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
@@ -509,16 +540,20 @@ test("unwritable state location does not crash review output and is reported as 
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.fallbackToNative, false);
+    assert.equal(out.useNative, false);
     assert.equal(typeof out.stateError, "string");
     assert.ok(out.stateError.length > 0);
-    assert.doesNotMatch(res.stderr, /could not be recorded/);
+    assert.ok(
+      res.stderr.includes(`review state could not be recorded at ${reviewStatePath(dataDir, repo)}: ${out.stateError}`),
+      `stderr was: ${res.stderr}`
+    );
   });
 });
 
-test("a failing headless run whose marker cannot be written reports stateError in JSON and on stderr", () => {
+test("a failing headless run whose state cannot be written reports stateError in JSON and on stderr", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    fs.mkdirSync(stateFile(dataDir));
+    blockStateDir(dataDir);
     const failing = path.join(shimDir, "fail.mjs");
     fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
     const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
@@ -529,7 +564,24 @@ test("a failing headless run whose marker cannot be written reports stateError i
     assert.equal(typeof out.stateError, "string");
     assert.ok(out.stateError.length > 0);
     assert.ok(
-      res.stderr.includes(`fallback marker could not be recorded at ${stateFile(dataDir)}`),
+      res.stderr.includes(`review state could not be recorded at ${reviewStatePath(dataDir, repo)}`),
+      `stderr was: ${res.stderr}`
+    );
+  });
+});
+
+test("a state that cannot be written is reported on stderr in non-JSON mode after a successful review", () => {
+  withFixture(({ dataDir, shimDir, repo }) => {
+    writeOnboarding(dataDir, headlessRouting());
+    blockStateDir(dataDir);
+    const res = runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], {
+      IGNIS_BROKER_DATA: dataDir,
+      IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(JSON.parse(res.stdout).stdin, /export const value = 2;/);
+    assert.ok(
+      res.stderr.includes(`review state could not be recorded at ${reviewStatePath(dataDir, repo)}`),
       `stderr was: ${res.stderr}`
     );
   });
@@ -623,8 +675,7 @@ process.stdout.write(fs.existsSync(configPath) ? "OK\\n" : "MISSING\\n");
   });
 });
 
-test("a diff above the size limit records a fallback marker and still prints JSON", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("a diff above the size limit records a fallback state and still prints JSON", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
@@ -644,17 +695,18 @@ test("a diff above the size limit records a fallback marker and still prints JSO
     assert.match(out.reason, /diff extraction failed/);
     assert.match(out.reason, /1024/);
     assert.equal(out.base, "base-ref");
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    assertState(dataDir, repo, "fallback");
+    assert.equal(gateAllows(dataDir, [repo]), true);
 
     const nonNumeric = runCli(runArgs(repo), { ...env, IGNIS_REVIEW_MAX_DIFF_BYTES: "not-a-number" });
     assert.equal(nonNumeric.status, 0, nonNumeric.stderr);
     assert.equal(JSON.parse(nonNumeric.stdout).useNative, false);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    assertState(dataDir, repo, "reviewed");
+    assert.equal(gateAllows(dataDir, [repo]), false);
   });
 });
 
-test("a diff extraction failure from git itself records a fallback marker", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("a diff extraction failure from git itself falls back and reports that no state could be recorded", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
@@ -673,7 +725,13 @@ test("a diff extraction failure from git itself records a fallback marker", asyn
     assert.equal(out.useNative, true);
     assert.equal(out.fallbackToNative, true);
     assert.match(out.reason, /diff extraction failed/);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+    assert.equal(typeof out.stateError, "string");
+    assert.ok(out.stateError.length > 0);
+    assert.ok(
+      res.stderr.includes(`review state could not be recorded at ${stateDir(dataDir)}: ${out.stateError}`),
+      `stderr was: ${res.stderr}`
+    );
+    assert.equal(fs.existsSync(stateDir(dataDir)), false);
   });
 });
 
@@ -696,10 +754,9 @@ test(
 );
 
 test(
-  "Windows plain .cmd shim with a double quote in an argument records a fallback marker instead of exiting 1",
+  "Windows plain .cmd shim with a double quote in an argument records a fallback state instead of exiting 1",
   { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
-  async () => {
-    const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+  () => {
     withFixture(({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, { ...headlessRouting(), headlessModel: 'op"us' });
       const cmdPath = path.join(shimDir, "claude-plain.cmd");
@@ -710,16 +767,16 @@ test(
       assert.equal(out.useNative, true);
       assert.equal(out.fallbackToNative, true);
       assert.match(out.reason, /double quotes/);
-      assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+      assertState(dataDir, repo, "fallback");
+      assert.equal(gateAllows(dataDir, [repo]), true);
     });
   }
 );
 
 test(
-  "Windows plain .cmd codex shim with a double quote in the model records a fallback marker instead of exiting 1",
+  "Windows plain .cmd codex shim with a double quote in the model records a fallback state instead of exiting 1",
   { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
-  async () => {
-    const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+  () => {
     withFixture(({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, { ...headlessRouting(), headlessBackend: "codex", headlessModel: 'o"3' });
       const cmdPath = path.join(shimDir, "codex-plain.cmd");
@@ -730,7 +787,8 @@ test(
       assert.equal(out.useNative, true);
       assert.equal(out.fallbackToNative, true);
       assert.match(out.reason, /double quotes/);
-      assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
+      assertState(dataDir, repo, "fallback");
+      assert.equal(gateAllows(dataDir, [repo]), true);
     });
   }
 );
@@ -755,8 +813,7 @@ test("uncommitted working-tree edits are included when --base HEAD is passed", (
   });
 });
 
-test("non-zero exit with stdout-only error preserves stdout in reason and records fallback marker", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("non-zero exit with stdout-only error preserves stdout in reason and records a fallback state", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const stdoutErrShim = path.join(shimDir, "stdout-fail.mjs");
@@ -775,10 +832,8 @@ test("non-zero exit with stdout-only error preserves stdout in reason and record
     assert.equal(out.useNative, true);
     assert.equal(out.fallbackToNative, true);
     assert.match(out.reason, /claude exited with status 1:.*You've hit your weekly limit/);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
-
-    const rawState = fs.readFileSync(stateFile(dataDir), "utf8");
-    assert.match(rawState, /You've hit your weekly limit/);
+    assert.match(assertState(dataDir, repo, "fallback").reason, /You've hit your weekly limit/);
+    assert.equal(gateAllows(dataDir, [repo]), true);
   });
 });
 
@@ -792,13 +847,12 @@ test("invalid --backend throws without writing fallback state", () => {
       );
       assert.notEqual(res.status, 0);
       assert.match(res.stderr, /unsupported backend/i);
-      assert.equal(fs.existsSync(stateFile(dataDir)), false);
+      assert.equal(fs.existsSync(stateDir(dataDir)), false);
     }
   });
 });
 
-test("mismatched explicit --backend override does not persist fallback marker", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("mismatched explicit --backend override does not persist a fallback state", () => {
   withFixture(({ dataDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const res = runCli(
@@ -812,8 +866,8 @@ test("mismatched explicit --backend override does not persist fallback marker", 
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, true);
     assert.equal(out.fallbackToNative, true);
-    assert.equal(fs.existsSync(stateFile(dataDir)), false);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    assert.equal(fs.existsSync(stateDir(dataDir)), false);
+    assert.equal(gateAllows(dataDir, [repo]), false);
   });
 });
 
@@ -830,7 +884,7 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
     assert.notEqual(injRes.status, 0);
     assert.match(injRes.stderr, /--base must not start with '-'/);
     assert.equal(fs.existsSync(evilPath), false);
-    assert.equal(fs.existsSync(stateFile(dataDir)), false);
+    assert.equal(fs.existsSync(stateDir(dataDir)), false);
 
     const badRefRes = runCli(
       ["--base", "nonexistent-ref", "--cwd", repo, "--backend", "auto", "--json"],
@@ -838,12 +892,11 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
     );
     assert.notEqual(badRefRes.status, 0);
     assert.match(badRefRes.stderr, /merge-base/i);
-    assert.equal(fs.existsSync(stateFile(dataDir)), false);
+    assert.equal(fs.existsSync(stateDir(dataDir)), false);
   });
 });
 
-test("monorepo subdir normalizes state to git root while nested git repo does not authorize parent", async () => {
-  const { hasFreshNativeFallback } = await import("../scripts/broker/onboarding.mjs");
+test("monorepo subdir keys state on the git root while a nested git repo keeps its own record", () => {
   withFixture(({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const subDir = path.join(repo, "packages", "app");
@@ -856,13 +909,16 @@ test("monorepo subdir normalizes state to git root while nested git repo does no
     const failRes = runCli(runArgs(subDir), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(failRes.status, 0, failRes.stderr);
     assert.equal(JSON.parse(failRes.stdout).fallbackToNative, true);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), true);
-    assert.equal(hasFreshNativeFallback(dataDir, [subDir]), true);
+    assertState(dataDir, repo, "fallback");
+    assert.equal(readReviewState(dataDir, subDir), null);
+    assert.equal(gateAllows(dataDir, [repo]), true);
+    assert.equal(gateAllows(dataDir, [subDir]), true);
 
     const okRes = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
     assert.equal(okRes.status, 0, okRes.stderr);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
-    assert.equal(hasFreshNativeFallback(dataDir, [subDir]), false);
+    assertState(dataDir, repo, "reviewed");
+    assert.equal(gateAllows(dataDir, [repo]), false);
+    assert.equal(gateAllows(dataDir, [subDir]), false);
 
     const nestedRepo = path.join(repo, "nested-repo");
     fs.mkdirSync(nestedRepo, { recursive: true });
@@ -880,8 +936,10 @@ test("monorepo subdir normalizes state to git root while nested git repo does no
     const nestedFail = runCli(runArgs(nestedRepo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(nestedFail.status, 0, nestedFail.stderr);
     assert.equal(JSON.parse(nestedFail.stdout).fallbackToNative, true);
-    assert.equal(hasFreshNativeFallback(dataDir, [nestedRepo]), true);
-    assert.equal(hasFreshNativeFallback(dataDir, [repo]), false);
+    assertState(dataDir, nestedRepo, "fallback");
+    assert.equal(gateAllows(dataDir, [nestedRepo]), true);
+    assert.equal(gateAllows(dataDir, [repo]), false);
+    assertState(dataDir, repo, "reviewed");
   });
 });
 
