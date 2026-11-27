@@ -186,6 +186,11 @@ const ROWS = [
   ["echo `\ngit reset --hard\n`", "deny", RESET_HARD],
   ["git commit -m 'docs: `npm test`'", null],
   ["echo `date`", null],
+  ['Write-Output "Step 1`n"; git push --force origin main', "deny", FORCE_MAIN],
+  ['Write-Host "a`n"; git reset --hard; Write-Host "b`n"', "deny", RESET_HARD],
+  ['Write-Host "a`t"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host "done`n"', null],
+  ['Write-Host "a`n"; Write-Host "git reset --hard"', null],
   ['cd "C:\\Users\\x"', null],
   ['& "C:\\Program Files\\Git\\cmd\\git.exe" status', null],
 
@@ -410,6 +415,12 @@ test("evaluateCommand asks before analysing deeply nested shell wrappers", () =>
     shallow = `sh -c "${shallow.replace(/[\\"]/g, "\\$&")}"`;
   }
   assert.equal(evaluateCommand(shallow).decision, "deny");
+});
+
+test("evaluateCommand asks before analysing an oversized command line", () => {
+  const result = evaluateCommand("a ".repeat(2_500_000));
+  assert.equal(result.decision, "force_ask");
+  assert.match(result.reason, /oversized command line/);
 });
 
 function runCommand(commandLine) {
