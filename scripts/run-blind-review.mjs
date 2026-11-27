@@ -8,11 +8,13 @@ import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
 import { defaultOnboardingState, detectCli, loadOnboardingState } from "./broker/onboarding.mjs";
 import { recordReviewState, reviewStatePath } from "./broker/review-state.mjs";
-import { gitToplevel, headSha } from "./lib/git-changes.mjs";
+import { collectChanges, gitToplevel, headSha } from "./lib/git-changes.mjs";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_DIFF_BYTES = 20 * 1024 * 1024;
+const MERGE_BASE_TIMEOUT_MS = 10_000;
+const DIFF_TIMEOUT_MS = 30_000;
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SMOKE_PROMPT = "Reply with the exact word: OK";
 const BLIND_REVIEW_PROMPT = [
@@ -191,6 +193,33 @@ function invokeBackend(backend, prompt, model, effort, invokeOptions) {
   }
 }
 
+function isDirectory(dir) {
+  try {
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function openRepo(cwd, env) {
+  if (!isDirectory(cwd)) {
+    throw new Error(`--cwd is not a directory: ${cwd}`);
+  }
+  const top = gitToplevel(cwd, { env });
+  if (top.notGit) {
+    throw new Error(`${cwd} is not inside a git repository`);
+  }
+  if (top.error) {
+    const code = top.error.code === "ENOENT" ? "git_failed" : top.error.code;
+    return { error: { code, message: top.error.message } };
+  }
+  try {
+    return { root: top.root, headSha: headSha(top.root, { env }) };
+  } catch (err) {
+    return { error: { code: "git_failed", message: err.message } };
+  }
+}
+
 function extractGitDiff(base, cwd) {
   const trimmedBase = typeof base === "string" ? base.trim() : "";
   if (!trimmedBase) {
@@ -199,36 +228,46 @@ function extractGitDiff(base, cwd) {
   if (trimmedBase.startsWith("-")) {
     throw new Error("--base must not start with '-'");
   }
-  const mergeBaseRes = spawnSync("git", ["merge-base", trimmedBase, "HEAD"], {
-    cwd,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (mergeBaseRes.error) {
-    return { failure: `git merge-base: ${mergeBaseRes.error.message}` };
+  const env = gitEnv();
+  const repo = openRepo(cwd, env);
+  if (repo.error) {
+    return { failure: `${repo.error.code}: ${repo.error.message}`, snapshot: { error: repo.error.message } };
   }
-  const mergeBase = (mergeBaseRes.stdout || "").trim();
-  if (mergeBaseRes.status !== 0 || !mergeBase) {
-    const detail = (mergeBaseRes.stderr || "").trim() || `exit ${mergeBaseRes.status}`;
-    throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
+  const snapshot = { root: repo.root, headSha: repo.headSha };
+
+  let diffBase = "HEAD";
+  if (snapshot.headSha !== "unborn") {
+    const mergeBaseRes = spawnSync("git", ["merge-base", trimmedBase, snapshot.headSha], {
+      cwd: snapshot.root,
+      env,
+      encoding: "utf8",
+      timeout: MERGE_BASE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    if (mergeBaseRes.error) {
+      const code = mergeBaseRes.error.code === "ETIMEDOUT" ? "timeout" : "git_failed";
+      return { failure: `${code}: git merge-base: ${mergeBaseRes.error.message}`, snapshot };
+    }
+    diffBase = (mergeBaseRes.stdout || "").trim();
+    if (mergeBaseRes.status !== 0 || !diffBase) {
+      const detail = (mergeBaseRes.stderr || "").trim() || `exit ${mergeBaseRes.status}`;
+      throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
+    }
   }
 
   const limit = maxDiffBytes();
-  const res = spawnSync("git", ["diff", mergeBase, "--"], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: limit,
-    windowsHide: true,
+  const changes = collectChanges(snapshot.root, {
+    base: diffBase,
+    maxBytes: limit,
+    env,
+    timeoutMs: DIFF_TIMEOUT_MS,
   });
-  if (res.error) {
+  if (changes.error) {
     const detail =
-      res.error.code === "ENOBUFS" ? `output is larger than ${limit} bytes` : res.error.message;
-    return { failure: `git diff: ${detail}` };
+      changes.error.code === "too_large" ? `diff is larger than ${limit} bytes` : changes.error.message;
+    return { failure: `${changes.error.code}: ${detail}`, snapshot };
   }
-  if (res.status !== 0) {
-    throw new Error(`git diff failed (exit ${res.status}): ${(res.stderr || "").trim()}`);
-  }
-  return { diff: res.stdout || "" };
+  return { diff: changes.diff, snapshot };
 }
 
 function runSmokeTest(opts) {
@@ -283,18 +322,14 @@ function reviewStatus(result) {
   return result.diffBytes === 0 ? "empty" : "reviewed";
 }
 
-function persistState(cwd, result) {
-  const env = gitEnv();
+function persistState(snapshot, result) {
+  if (snapshot.error) return snapshot.error;
   try {
-    const top = gitToplevel(cwd, { env });
-    if (!top.root) {
-      return top.notGit ? `${cwd} is not inside a git repository` : top.error.message;
-    }
     const status = reviewStatus(result);
-    recordReviewState(brokerDataDir(brokerHome()), top.root, {
+    recordReviewState(brokerDataDir(brokerHome()), snapshot.root, {
       status,
       reason: status === "fallback" ? result.reason || null : null,
-      headSha: headSha(top.root, { env }),
+      headSha: snapshot.headSha,
     });
     return null;
   } catch (err) {
@@ -308,9 +343,9 @@ function stateHintPath(cwd) {
   return top.root ? reviewStatePath(dataDir, top.root) : path.dirname(reviewStatePath(dataDir, cwd));
 }
 
-function withState(cwd, result, persist = true) {
+function withState(snapshot, result, persist = true) {
   if (!persist) return result;
-  const stateError = persistState(cwd, result);
+  const stateError = persistState(snapshot, result);
   return stateError === null ? result : { ...result, stateError };
 }
 
@@ -377,7 +412,7 @@ export function runBlindReview(opts) {
   const extracted = extractGitDiff(opts.base, opts.cwd);
   if (extracted.failure) {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -392,7 +427,7 @@ export function runBlindReview(opts) {
 
   if (diffBytes === 0) {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: false,
         fallbackToNative: false,
@@ -409,7 +444,7 @@ export function runBlindReview(opts) {
 
   if (targetBackend !== "claude" && targetBackend !== "codex") {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -433,7 +468,7 @@ export function runBlindReview(opts) {
 
   if (res.error) {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -448,7 +483,7 @@ export function runBlindReview(opts) {
   if (res.status !== 0) {
     const detail = ((res.stderr || "").trim() || (res.stdout || "").trim()).slice(0, 400);
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -465,7 +500,7 @@ export function runBlindReview(opts) {
   if (verdict === null) {
     const detail = output.trim() ? "no Status line" : "empty output";
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -478,7 +513,7 @@ export function runBlindReview(opts) {
   }
 
   return withState(
-    opts.cwd,
+    extracted.snapshot,
     {
       useNative: false,
       fallbackToNative: false,
