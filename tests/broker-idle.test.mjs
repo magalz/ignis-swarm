@@ -96,10 +96,24 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (err += d));
   const killer = setTimeout(() => child.kill("SIGKILL"), 20_000);
-  const code = await new Promise((resolve) => child.once("close", resolve));
+  let removedDuringCall = false;
+  const exited = new Promise((resolve) => child.once("close", resolve));
+  const watcher = (async () => {
+    let done = false;
+    exited.then(() => (done = true));
+    while (!done) {
+      if (!fs.existsSync(daemonInfoPath(iso.dirs.brokerData)) || !isPidAlive(pid)) removedDuringCall = true;
+      await sleep(100);
+    }
+  })();
+  const code = await exited;
+  await watcher;
   clearTimeout(killer);
   assert.equal(code, 0, `call failed: ${err}`);
   assert.match(out, /slow-done/);
+  assert.equal(removedDuringCall, false, "daemon.json was removed or the daemon died during the in-flight call");
+  assert.ok(isPidAlive(pid));
+  assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), true);
 
   const gone = await waitFor(() => !isPidAlive(pid), 6000);
   assert.equal(gone, true, "daemon did not exit on idle after the call finished");
