@@ -16,7 +16,7 @@ export function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-export function ensurePrivateDir(dir) {
+function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform === "win32") return;
   try {
@@ -177,6 +177,9 @@ export function isDaemonVersionAcceptable(daemonVersion, clientVersion = BROKER_
 }
 
 export async function ensureDaemon(home, dataDir, entryScript) {
+  home = path.resolve(home);
+  dataDir = path.resolve(dataDir);
+  entryScript = path.resolve(entryScript);
   const existing = readDaemonInfo(dataDir);
   if (existing) {
     const h = await probeHealth(existing);
