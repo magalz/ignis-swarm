@@ -376,16 +376,9 @@ export async function runDaemon(home, dataDir, port = 0) {
 
   async function crash(err) {
     appendDaemonLog(dataDir, err);
-    let timer;
     try {
-      await Promise.race([
-        supervisor.shutdown(),
-        new Promise((resolve) => {
-          timer = setTimeout(resolve, CRASH_SHUTDOWN_MS);
-        }),
-      ]);
+      await Promise.race([supervisor.shutdown(), new Promise((resolve) => setTimeout(resolve, CRASH_SHUTDOWN_MS))]);
     } catch {}
-    clearTimeout(timer);
     removeDaemonInfoIfOwner(dataDir, process.pid);
     process.exit(1);
   }
