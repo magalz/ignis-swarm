@@ -65,6 +65,8 @@ const CMD_FLAG = /^\/[ck]$/i;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const HEREDOC_OPERATOR = /-?[ \t]*(?:'([A-Za-z_][\w.-]*)'|"([A-Za-z_][\w.-]*)"|([A-Za-z_][\w.-]*))/y;
 const DELIMITER_LINE = /^\t*[A-Za-z_][\w.-]*$/;
+const ESCAPABLE = "\"'\\;()|&<>";
+const ESCAPE_TRIGGER = /\\["';()|&<>]/;
 const RANK = { deny: 2, force_ask: 1 };
 const MAX_DEPTH = 8;
 
@@ -219,7 +221,7 @@ function scan(script, escapes, stringMode) {
         frame.current += ch;
         frame.blanked += " ";
       }
-    } else if (escapes && ch === "\\" && (next === '"' || next === "'" || next === "\\")) {
+    } else if (escapes && ch === "\\" && ESCAPABLE.includes(next) && next !== "") {
       frame.current = (frame.current ?? "") + next;
       frame.blanked += "  ";
       i += 1;
@@ -526,7 +528,7 @@ function evaluateScript(script, depth, stringMode = false) {
   if (/`\r?\n/.test(script)) variants.push(script.replace(/[\\^]\r?\n/g, ""));
   let verdict = null;
   for (const joined of variants) {
-    const modes = /\\["']/.test(joined) ? [true, false] : [false];
+    const modes = ESCAPE_TRIGGER.test(joined) ? [true, false] : [false];
     for (const escapes of modes) {
       for (const segment of scan(joined, escapes, stringMode)) {
         verdict = strongest(verdict, evaluateSegment(segment, depth));
