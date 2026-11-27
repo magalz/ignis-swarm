@@ -371,6 +371,13 @@ const ROWS = [
   ["git commit -m x ^\n--no-verify", "deny", NO_VERIFY],
   ["git commit -m x `\n--no-verify", "deny", NO_VERIFY],
   ["git reset ^\n--hard", "deny", RESET_HARD],
+  ["find . -type d -exec git -C {} reset --hard \\;", "deny", RESET_HARD],
+  ["find . -name .git -execdir git -C {} push -f origin main \\;", "deny", FORCE_MAIN],
+  ["xargs -I{} git -C {} reset --hard", "deny", RESET_HARD],
+  ["git -C {} reset --hard", "deny", RESET_HARD],
+  ['sh -c "echo \\`git reset --hard\\`"', "deny", RESET_HARD],
+  ['bash -c "x=\\$(git reset --hard)"', "deny", RESET_HARD],
+  ['bash -c "echo \\$(git push -f origin main)"', "deny", FORCE_MAIN],
 
   ["npm test", null],
   ["", null],
