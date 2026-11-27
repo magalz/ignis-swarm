@@ -69,6 +69,9 @@ const DELIMITER_LINE = /^\t*[A-Za-z_][\w.-]*$/;
 const ESCAPABLE = "\"'\\;()";
 const ESCAPE_TRIGGER = /\\["';()]/;
 const RANK = { deny: 2, force_ask: 1 };
+const TICK_SUBSTITUTE = "substitute";
+const TICK_LITERAL = "literal";
+const TICK_ESCAPE = "escape";
 const MAX_DEPTH = 8;
 const MAX_WORK = 3_000_000;
 let work = 0;
@@ -206,8 +209,12 @@ function scan(script, escapes, stringMode, ticks) {
         frame.current += ch;
         frame.blanked += " ";
       }
-    } else if (ticks && ch === "`") {
+    } else if (ticks === TICK_SUBSTITUTE && ch === "`") {
       open("tick");
+    } else if (ticks === TICK_ESCAPE && ch === "`") {
+      frame.current = (frame.current ?? "") + ch + next;
+      frame.blanked += next === "" ? " " : "  ";
+      i += next === "" ? 0 : 1;
     } else if (ch === "$" && next === "(") {
       open("dollar");
       frame.arith = script[i + 2] === "(";
@@ -532,7 +539,7 @@ function evaluateScript(script, depth, stringMode = false) {
   let verdict = null;
   for (const joined of variants) {
     const modes = ESCAPE_TRIGGER.test(joined) ? [true, false] : [false];
-    const tickModes = joined.includes("`") ? [true, false] : [true];
+    const tickModes = joined.includes("`") ? [TICK_SUBSTITUTE, TICK_LITERAL, TICK_ESCAPE] : [TICK_SUBSTITUTE];
     for (const escapes of modes) {
       for (const ticks of tickModes) {
         work += joined.length;
