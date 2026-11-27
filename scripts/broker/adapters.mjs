@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -163,23 +163,54 @@ export class BrokerError extends Error {
   }
 }
 
-export function killProcessTree(pid) {
-  if (!pid) return;
+const KILL_GRACE_MS = 1500;
+const KILL_TIMEOUT_MS = 4000;
+
+function signalTree(pid, signal) {
   try {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-        timeout: 4000,
-      });
-    } else {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        process.kill(pid, "SIGTERM");
-      }
-    }
+    process.kill(-pid, signal);
+    return true;
   } catch {}
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function killProcessTree(pid) {
+  if (!pid) return Promise.resolve();
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      try {
+        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+          timeout: KILL_TIMEOUT_MS,
+        });
+        killer.on("error", () => resolve());
+        killer.on("exit", () => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+  if (!signalTree(pid, "SIGTERM")) return Promise.resolve();
+  return new Promise((resolve) => {
+    const deadline = Date.now() + KILL_GRACE_MS;
+    const poll = setInterval(() => {
+      if (!signalTree(pid, 0)) {
+        clearInterval(poll);
+        resolve();
+      } else if (Date.now() >= deadline) {
+        clearInterval(poll);
+        signalTree(pid, "SIGKILL");
+        resolve();
+      }
+    }, 50);
+    poll.unref();
+  });
 }
 
 const MIN_SECRET_LENGTH = 4;
@@ -264,6 +295,10 @@ export class McpStdioAdapter {
       this._failAll(this._err("startup", `spawn error for \`${this.command}\`: ${err.message}`));
     });
 
+    this.proc.stdin?.on("error", (err) => {
+      this._failAll(this._err("transport", `stdin error: ${err.message}`));
+    });
+
     this.proc.on("exit", (code, signal) => {
       const tail = this.stderrRing.slice(-5).join(" | ");
       const msg = tail
@@ -289,6 +324,17 @@ export class McpStdioAdapter {
         try {
           msg = JSON.parse(trimmed);
         } catch {
+          return;
+        }
+        if (!msg || typeof msg !== "object") return;
+        if (typeof msg.method === "string") {
+          if (msg.id !== undefined && msg.id !== null) {
+            this._write(
+              msg.method === "ping"
+                ? { jsonrpc: "2.0", id: msg.id, result: {} }
+                : { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }
+            );
+          }
           return;
         }
         if (typeof msg.id === "number" && this.pending.has(msg.id)) {
@@ -335,11 +381,21 @@ export class McpStdioAdapter {
     this.pending.clear();
   }
 
-  _notify(method, params) {
-    if (!this.proc?.stdin || !this.alive) return;
+  _write(message, callback) {
+    const stdin = this.proc?.stdin;
+    if (!stdin || !this.alive || stdin.destroyed || !stdin.writable) {
+      callback?.(new Error("stdin is not writable"));
+      return;
+    }
     try {
-      this.proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
-    } catch {}
+      stdin.write(`${JSON.stringify(message)}\n`, callback);
+    } catch (err) {
+      callback?.(err);
+    }
+  }
+
+  _notify(method, params) {
+    this._write({ jsonrpc: "2.0", method, params });
   }
 
   _request(method, params, timeoutMs) {
@@ -359,8 +415,7 @@ export class McpStdioAdapter {
       }, timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
-      const payload = `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
-      this.proc.stdin.write(payload, (err) => {
+      this._write({ jsonrpc: "2.0", id, method, params }, (err) => {
         if (err && this.pending.delete(id)) {
           clearTimeout(timer);
           this.alive = false;
@@ -405,8 +460,8 @@ export class McpStdioAdapter {
     try {
       this.proc?.stdin?.end();
     } catch {}
-    if (pid) killProcessTree(pid);
     this.proc = null;
+    if (pid) await killProcessTree(pid);
   }
 
   lastStderr() {
@@ -674,7 +729,7 @@ export async function tryCliFallback(kind, tool, args, cwd, timeoutMs = 30_000) 
     const timer =
       typeof timeoutMs === "number" && timeoutMs > 0
         ? setTimeout(() => {
-            killProcessTree(proc.pid);
+            void killProcessTree(proc.pid);
             finish(reject, new BrokerError("timeout", `CLI fallback timeout after ${timeoutMs}ms`));
           }, timeoutMs)
         : null;
