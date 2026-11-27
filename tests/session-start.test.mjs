@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
+import { isolatedEnv, writeOnboardingState } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
@@ -408,5 +410,130 @@ test("session-start runs the memtrace check for a skipped onboarding with memtra
     assert.doesNotMatch(msg, /First-Run Onboarding Required/);
   } finally {
     for (const d of [projDir, homeDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+function writeNodeShim(dir, baseName, { sleepMs, stdoutText, marker }) {
+  const impl = path.join(dir, `${baseName}.impl.mjs`);
+  fs.writeFileSync(
+    impl,
+    [
+      'import fs from "node:fs";',
+      `fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));`,
+      `await new Promise((resolve) => setTimeout(resolve, ${sleepMs}));`,
+      `process.stdout.write(${JSON.stringify(`${stdoutText}\n`)});`,
+      "",
+    ].join("\n")
+  );
+  if (process.platform === "win32") {
+    const shim = path.join(dir, `${baseName}.cmd`);
+    fs.writeFileSync(shim, `@echo off\r\nnode "%~dp0${baseName}.impl.mjs" %*\r\n`);
+    assert.equal(
+      resolvePlatformCommand(shim, ["status"]).command,
+      process.execPath,
+      "the shim must unwrap to node so that killing the child kills the sleeper"
+    );
+    return shim;
+  }
+  const shim = path.join(dir, `${baseName}.sh`);
+  fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${impl}" "$@"\n`);
+  fs.chmodSync(shim, 0o755);
+  return shim;
+}
+
+function slowChecksScenario(sleepMs) {
+  const iso = isolatedEnv();
+  const projDir = path.join(iso.dirs.root, "proj");
+  const toolsDir = path.join(iso.dirs.root, "tools");
+  fs.mkdirSync(path.join(projDir, "docs", "adr"), { recursive: true });
+  fs.mkdirSync(toolsDir, { recursive: true });
+  fs.writeFileSync(path.join(projDir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n");
+  writeOnboardingState(iso.dirs.brokerData, { memtrace: { enabled: true }, ...routing("headless_always") });
+  const markers = {
+    memtrace: path.join(toolsDir, "memtrace.started"),
+    broker: path.join(toolsDir, "broker.started"),
+  };
+  const memtraceShim = writeNodeShim(toolsDir, "shim-memtrace", {
+    sleepMs,
+    stdoutText: "memtrace daemon running",
+    marker: markers.memtrace,
+  });
+  const brokerShim = writeNodeShim(toolsDir, "shim-broker", {
+    sleepMs,
+    stdoutText: JSON.stringify({ localConfigError: "invalid local config", recentFallbacks: [] }),
+    marker: markers.broker,
+  });
+  const env = { ...iso.env, IGNIS_MEMTRACE_CMD: memtraceShim, IGNIS_BROKER_CMD: brokerShim };
+  return { iso, projDir, markers, env };
+}
+
+function runHookTimed(inputObj, env) {
+  const started = performance.now();
+  const res = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, "hooks", "session-start.mjs")], {
+    cwd: PLUGIN_ROOT,
+    input: JSON.stringify(inputObj),
+    encoding: "utf8",
+    env,
+    timeout: 9000,
+    windowsHide: true,
+  });
+  const elapsedMs = performance.now() - started;
+  assert.ifError(res.error);
+  assert.equal(res.status, 0, res.stderr);
+  return { out: JSON.parse(res.stdout.trim()), elapsedMs };
+}
+
+test("session-start finishes inside its budget and keeps the ready notices when both checks are slow", () => {
+  const sc = slowChecksScenario(4000);
+  try {
+    const { out, elapsedMs } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
+    assert.ok(elapsedMs < 4500, `hook took ${Math.round(elapsedMs)} ms, the budget is 4500 ms`);
+    const msg = sessionMessage(out);
+    assert.match(msg, /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always/);
+    assert.match(msg, /docs\/adr\/INDEX\.md/);
+    assert.ok(fs.existsSync(sc.markers.memtrace), "the memtrace check ran");
+    assert.ok(fs.existsSync(sc.markers.broker), "the broker check ran");
+  } finally {
+    sc.iso.cleanup();
+  }
+});
+
+test("session-start starts no memtrace or broker process for subagents and workers", () => {
+  const sc = slowChecksScenario(4000);
+  try {
+    const transcript = path.join(sc.iso.dirs.root, "transcript.jsonl");
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "MODEL_RESPONSE", text: "working" })}\n`);
+    const payloads = [
+      { cwd: sc.projDir, transcriptPath: transcript },
+      { cwd: sc.projDir, lastUserInput: "audit", isSubagent: true },
+      { cwd: sc.projDir, lastUserInput: "audit", parentConversationId: "parent-1" },
+    ];
+    for (const payload of payloads) {
+      const { out, elapsedMs } = runHookTimed(payload, sc.env);
+      assert.ok(elapsedMs < 2500, `subagent hook took ${Math.round(elapsedMs)} ms for ${JSON.stringify(Object.keys(payload))}`);
+      const msg = sessionMessage(out);
+      assert.match(msg, /docs\/adr\/INDEX\.md/);
+      assert.doesNotMatch(msg, /Phase 4 Review Routing|Memtrace|ignis-broker/);
+      assert.ok(!fs.existsSync(sc.markers.memtrace), "no memtrace process for a subagent");
+      assert.ok(!fs.existsSync(sc.markers.broker), "no broker process for a subagent");
+    }
+  } finally {
+    sc.iso.cleanup();
+  }
+});
+
+test("session-start reports both checks, in order, when they answer at once", () => {
+  const sc = slowChecksScenario(0);
+  try {
+    const { out, elapsedMs } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
+    assert.ok(elapsedMs < 3000, `hook took ${Math.round(elapsedMs)} ms with instant checks`);
+    const msg = sessionMessage(out);
+    const memtrace = msg.indexOf("[ignis-swarm][Memtrace] Active (memtrace daemon running).");
+    const routingAt = msg.indexOf("[ignis-swarm][Phase 4 Review Routing]");
+    const hint = msg.indexOf("Decision indexes detected (docs/adr/INDEX.md)");
+    const broker = msg.indexOf("[ignis-broker Alert] Local config error detected (invalid local config).");
+    assert.ok(memtrace >= 0 && routingAt > memtrace && hint > routingAt && broker > hint, msg);
+  } finally {
+    sc.iso.cleanup();
   }
 });
