@@ -53,7 +53,6 @@ const PREFIX_WORDS = new Map([
   ["until", null],
   ["do", null],
   ["!", null],
-  ["{", null],
 ]);
 const PREFIX_POSITIONALS = new Map([["timeout", 1]]);
 const SH_FAMILY = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
@@ -66,8 +65,8 @@ const CMD_FLAG = /^\/[ck]$/i;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const HEREDOC_OPERATOR = /-?[ \t]*(?:'([A-Za-z_][\w.-]*)'|"([A-Za-z_][\w.-]*)"|([A-Za-z_][\w.-]*))/y;
 const DELIMITER_LINE = /^\t*[A-Za-z_][\w.-]*$/;
-const ESCAPABLE = "\"'\\;()";
-const ESCAPE_TRIGGER = /\\["';()]/;
+const ESCAPABLE = "\"'\\;()`";
+const BRACE_NEIGHBOUR = /[\s;|&()<>]/;
 const RANK = { deny: 2, force_ask: 1 };
 const TICK_SUBSTITUTE = "substitute";
 const TICK_LITERAL = "literal";
@@ -220,7 +219,7 @@ function scan(script, escapes, stringMode, ticks) {
       frame.arith = script[i + 2] === "(";
       i += 1;
     } else if (frame.quote === '"') {
-      if (escapes && ch === "\\" && (next === '"' || next === "\\")) {
+      if (escapes && ch === "\\" && (next === '"' || next === "\\" || next === "`" || next === "$")) {
         frame.current += next;
         frame.blanked += "  ";
         i += 1;
@@ -260,6 +259,8 @@ function scan(script, escapes, stringMode, ticks) {
         frame.parens = Math.max(0, frame.parens - 1);
         endSegment(true);
       }
+    } else if ((ch === "{" || ch === "}") && frame.current === null && (next === "" || BRACE_NEIGHBOUR.test(next))) {
+      endSegment(true);
     } else if (ch === "&" && next === "&") {
       endSegment(false);
       i += 1;
@@ -456,7 +457,15 @@ function evaluatePush({ longs, clusters, positionals }) {
   return forceAsk(plainForce || leaseForce ? FORCE_PUSH_REASON : MIRROR_REASON);
 }
 
-function evaluateGit(args) {
+function foreachScript(args) {
+  let at = args.findIndex(({ cmp }) => !cmp.startsWith("-"));
+  if (at === -1 || args[at].cmp !== "foreach") return null;
+  at += 1;
+  while (at < args.length && !args[at].quoted && args[at].cmp.startsWith("-")) at += 1;
+  return joinWords(args.slice(at));
+}
+
+function evaluateGit(args, depth) {
   let hooksPathOverridden = false;
   let i = 0;
   for (; i < args.length && args[i].cmp.startsWith("-"); i += 1) {
@@ -473,6 +482,10 @@ function evaluateGit(args) {
   }
   const subcommand = args[i]?.cmp.toLowerCase();
   if (subcommand === undefined) return null;
+  if (subcommand === "submodule") {
+    const script = foreachScript(args.slice(i + 1));
+    return script === null ? null : evaluateScript(script, depth + 1);
+  }
   const { longs, clusters, positionals } = parseOptions(args.slice(i + 1), VALUE_LETTERS.get(subcommand) ?? NO_VALUE_LETTERS);
   if (HOOKED_SUBCOMMANDS.has(subcommand)) {
     if (hooksPathOverridden) return deny(HOOKS_PATH_REASON);
@@ -507,7 +520,7 @@ function evaluateSegment(segment, depth) {
   const start = commandStart(words);
   if (start >= words.length) return verdict;
   const { names } = words[start];
-  if (names.includes("git")) return strongest(verdict, evaluateGit(words.slice(start + 1)));
+  if (names.includes("git")) return strongest(verdict, evaluateGit(words.slice(start + 1), depth));
   if (names.includes("find") && decidedAll(findScripts(words.slice(start + 1)))) return verdict;
   if (names.some((name) => EXPRESSION_COMMANDS.has(name))) {
     const args = words.slice(start + 1).filter((word) => word.quoted || !word.cmp.startsWith("-"));
@@ -534,21 +547,18 @@ function evaluateSegment(segment, depth) {
 
 function evaluateScript(script, depth, stringMode = false) {
   if (depth > MAX_DEPTH) return forceAsk(NESTING_REASON);
-  const variants = [script.replace(/[\\^`]\r?\n/g, "")];
-  if (/`\r?\n/.test(script)) variants.push(script.replace(/[\\^]\r?\n/g, ""));
+  const dialects = [
+    [script.replace(/\\\r?\n/g, ""), true, TICK_SUBSTITUTE],
+    [script.replace(/`\r?\n/g, ""), false, TICK_ESCAPE],
+    [script.replace(/\^\r?\n/g, ""), false, TICK_LITERAL],
+  ];
   let verdict = null;
-  for (const joined of variants) {
-    const modes = ESCAPE_TRIGGER.test(joined) ? [true, false] : [false];
-    const tickModes = joined.includes("`") ? [TICK_SUBSTITUTE, TICK_LITERAL, TICK_ESCAPE] : [TICK_SUBSTITUTE];
-    for (const escapes of modes) {
-      for (const ticks of tickModes) {
-        work += joined.length;
-        if (work > MAX_WORK) return strongest(verdict, forceAsk(WORK_REASON));
-        for (const segment of scan(joined, escapes, stringMode, ticks)) {
-          verdict = strongest(verdict, evaluateSegment(segment, depth));
-          if (verdict?.decision === "deny") return verdict;
-        }
-      }
+  for (const [joined, escapes, ticks] of dialects) {
+    work += joined.length;
+    if (work > MAX_WORK) return strongest(verdict, forceAsk(WORK_REASON));
+    for (const segment of scan(joined, escapes, stringMode, ticks)) {
+      verdict = strongest(verdict, evaluateSegment(segment, depth));
+      if (verdict?.decision === "deny") return verdict;
     }
   }
   return verdict;
