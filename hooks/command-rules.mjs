@@ -110,7 +110,6 @@ function newFrame(kind, string) {
     hereString: false,
     afterPipe: false,
     words: [],
-    blanked: "",
     docs: [],
     strings: [],
     pipe: { segs: [] },
@@ -172,12 +171,11 @@ function scan(script, escapes, stringMode, ticks) {
   };
   const endSegment = (keepPipe) => {
     endWord();
-    const { words, blanked, docs, strings, pipe } = frame;
+    const { words, docs, strings, pipe } = frame;
     if (!frame.string && (words.length > 0 || strings.length > 0 || docs.length > 0)) {
-      segments.push({ words, blanked, docs, strings, pipe });
+      segments.push({ words, docs, strings, pipe });
     }
     frame.words = [];
-    frame.blanked = "";
     frame.docs = [];
     frame.strings = [];
     frame.afterPipe = false;
@@ -186,7 +184,6 @@ function scan(script, escapes, stringMode, ticks) {
   const open = (kind) => {
     frame.current ??= "";
     frame.opened = true;
-    frame.blanked += " ";
     stack.push(frame);
     frame = newFrame(kind, false);
   };
@@ -216,16 +213,13 @@ function scan(script, escapes, stringMode, ticks) {
     } else if (frame.quote === "'") {
       if (ch === "'") {
         frame.quote = null;
-        frame.blanked += ch;
       } else {
         frame.current += ch;
-        frame.blanked += " ";
       }
     } else if (ticks === TICK_SUBSTITUTE && ch === "`") {
       open("tick");
     } else if (ticks === TICK_ESCAPE && ch === "`") {
       frame.current = (frame.current ?? "") + ch + next;
-      frame.blanked += next === "" ? " " : "  ";
       i += next === "" ? 0 : 1;
     } else if (ch === "$" && next === "(") {
       open("dollar");
@@ -234,24 +228,19 @@ function scan(script, escapes, stringMode, ticks) {
     } else if (frame.quote === '"') {
       if (escapes && ch === "\\" && (next === '"' || next === "\\" || next === "`" || next === "$")) {
         frame.current += next;
-        frame.blanked += "  ";
         i += 1;
       } else if (ch === '"' && !frame.string) {
         frame.quote = null;
-        frame.blanked += ch;
       } else {
         frame.current += ch;
-        frame.blanked += " ";
       }
     } else if (escapes && ch === "\\" && ESCAPABLE.includes(next) && next !== "") {
       frame.current = (frame.current ?? "") + next;
-      frame.blanked += "  ";
       i += 1;
     } else if (ch === "'" || ch === '"') {
       frame.quote = ch;
       frame.quoted = true;
       frame.current ??= "";
-      frame.blanked += ch;
     } else if (ch === "\n") {
       endSegment(frame.afterPipe && frame.words.length === 0);
       if (frame.pending.length > 0) i = skipHeredocs(i + 1) - 1;
@@ -280,20 +269,17 @@ function scan(script, escapes, stringMode, ticks) {
       i += 1;
     } else if (ch === "&" && next === ">") {
       endWord();
-      frame.blanked += ch;
     } else if (ch === "&" && script[i - 1] !== ">" && script[i - 1] !== "<") {
       endSegment(false);
     } else if (ch === "<" && next === "<" && !frame.arith) {
       endWord();
       if (script[i + 2] === "<") {
         frame.hereString = true;
-        frame.blanked += "   ";
         i += 2;
       } else {
         HEREDOC_OPERATOR.lastIndex = i + 2;
         const match = HEREDOC_OPERATOR.exec(script);
         if (match === null) {
-          frame.blanked += "  ";
           i += 1;
         } else {
           const doc = {
@@ -304,16 +290,13 @@ function scan(script, escapes, stringMode, ticks) {
           };
           frame.docs.push(doc);
           frame.pending.push(doc);
-          frame.blanked += " ";
           i = HEREDOC_OPERATOR.lastIndex - 1;
         }
       }
     } else if (/\s/.test(ch) || ch === ">" || ch === "<") {
       endWord();
-      frame.blanked += ch;
     } else {
       frame.current = (frame.current ?? "") + ch;
-      frame.blanked += ch;
     }
   }
   while (stack.length > 0) close();
