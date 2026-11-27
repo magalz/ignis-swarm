@@ -19,9 +19,9 @@ function pidAlive(pid) {
   }
 }
 
-function stopDaemonFor(iso) {
-  const info = readDaemonInfo(iso.dirs.brokerData);
-  runNode(BIN, ["stop"], { env: iso.env, timeoutMs: 15_000 });
+function stopDaemonFor({ env, dataDir }) {
+  const info = readDaemonInfo(dataDir);
+  runNode(BIN, ["stop"], { env, timeoutMs: 15_000 });
   if (info?.pid && pidAlive(info.pid)) {
     try {
       process.kill(info.pid, "SIGKILL");
@@ -33,7 +33,7 @@ test("a lazily started daemon does not hold the folder it was started from", (t)
   const iso = isolatedEnv();
   const start = mkTemp("ignis-life-cwd-");
   t.after(() => {
-    stopDaemonFor(iso);
+    stopDaemonFor({ env: iso.env, dataDir: iso.dirs.brokerData });
     iso.cleanup();
     fs.rmSync(start, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
@@ -55,7 +55,7 @@ test("a lazily started daemon does not hold the folder it was started from", (t)
 test("the data dir is created private and an existing open one is tightened", { skip: !POSIX && "POSIX modes only" }, (t) => {
   const iso = isolatedEnv();
   t.after(() => {
-    stopDaemonFor(iso);
+    stopDaemonFor({ env: iso.env, dataDir: iso.dirs.brokerData });
     iso.cleanup();
   });
   fs.chmodSync(iso.dirs.brokerData, 0o755);
@@ -69,13 +69,7 @@ test("a fresh data dir created by the broker is 0700", { skip: !POSIX && "POSIX 
   const fresh = path.join(iso.dirs.root, "fresh-data");
   const env = { ...iso.env, IGNIS_BROKER_DATA: fresh };
   t.after(() => {
-    runNode(BIN, ["stop"], { env, timeoutMs: 15_000 });
-    const info = readDaemonInfo(fresh);
-    if (info?.pid && pidAlive(info.pid)) {
-      try {
-        process.kill(info.pid, "SIGKILL");
-      } catch {}
-    }
+    stopDaemonFor({ env, dataDir: fresh });
     iso.cleanup();
   });
   const res = runNode(BIN, ["list"], { env, timeoutMs: 30_000 });
@@ -90,4 +84,21 @@ test("the spill dir is created 0700", { skip: !POSIX && "POSIX modes only" }, (t
   const out = truncateContentBlocks([{ type: "text", text: "x\n".repeat(50) }], 20, 5, spillDir, false);
   assert.ok(out.spillPath, "spill file was written");
   assert.equal(fs.statSync(spillDir).mode & 0o777, 0o700);
+});
+
+test("relative IGNIS_BROKER_HOME and DATA still start the daemon from another cwd", (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-life-rel-");
+  const env = { ...iso.env, IGNIS_BROKER_HOME: "bh", IGNIS_BROKER_DATA: "bd" };
+  const dataDir = path.join(work, "bd");
+  t.after(() => {
+    stopDaemonFor({ env, dataDir: path.join(work, "bd") });
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const res = runNode(BIN, ["list"], { env, cwd: work, timeoutMs: 30_000 });
+  assert.equal(res.timedOut, false);
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(readDaemonInfo(dataDir)?.pid, "daemon.json is in <cwd>/bd");
+  assert.equal(fs.existsSync(path.join(dataDir, "bd")), false);
 });
