@@ -445,6 +445,10 @@ test("hasFreshNativeFallback matches ancestor-or-equal boundaries directionally,
     recordBlindReviewState(parentData, repo, { fallbackToNative: true, reason: "parent", nowMs: now });
     assert.equal(hasFreshNativeFallback(parentData, [repo], now), true);
     assert.equal(hasFreshNativeFallback(parentData, [sub], now), true);
+    assert.equal(hasFreshNativeFallback(parentData, [repo, sub], now), true);
+    assert.equal(hasFreshNativeFallback(parentData, [repo, sibling], now), false);
+    assert.equal(hasFreshNativeFallback(parentData, [], now), false);
+    assert.equal(hasFreshNativeFallback(parentData, ["", "   "], now), false);
     assert.equal(hasFreshNativeFallback(parentData, [link], now), true);
     assert.equal(hasFreshNativeFallback(parentData, [path.join(link, "packages", "app")], now), true);
     assert.equal(hasFreshNativeFallback(parentData, [sibling], now), false);
@@ -453,6 +457,7 @@ test("hasFreshNativeFallback matches ancestor-or-equal boundaries directionally,
     recordBlindReviewState(parentData, sub, { fallbackToNative: false, reason: "sub-cleared", nowMs: now + 1 });
     assert.equal(hasFreshNativeFallback(parentData, [sub], now + 1), false);
     assert.equal(hasFreshNativeFallback(parentData, [subChild], now + 1), false);
+    assert.equal(hasFreshNativeFallback(parentData, [repo, sub], now + 1), false);
     assert.equal(hasFreshNativeFallback(parentData, [repo], now + 1), true);
     assert.equal(hasFreshNativeFallback(parentData, [otherSub], now + 1), true);
 
@@ -507,6 +512,9 @@ test("recordBlindReviewState recovers stale lock and serializes concurrent multi
     assert.equal(hasFreshNativeFallback(dir, [staleTarget]), true);
     assert.equal(fs.existsSync(lockPath), false);
 
+    fs.writeFileSync(lockPath, "888888:stale\n", "utf8");
+    fs.utimesSync(lockPath, staleDate, staleDate);
+
     const modUrl = new URL("../scripts/broker/onboarding.mjs", import.meta.url).href;
     const workerCount = 6;
     const targets = Array.from({ length: workerCount }, (_, idx) => {
@@ -546,7 +554,13 @@ test("recordBlindReviewState recovers stale lock and serializes concurrent multi
     }
     const leftovers = fs
       .readdirSync(dir)
-      .filter((name) => name.endsWith(".tmp") || name.endsWith(".lock"));
+      .filter(
+        (name) =>
+          name.endsWith(".tmp") ||
+          name.endsWith(".lock") ||
+          name.endsWith(".reclaim") ||
+          name.endsWith(".stale"),
+      );
     assert.deepEqual(leftovers, []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

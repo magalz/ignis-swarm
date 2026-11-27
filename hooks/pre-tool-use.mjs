@@ -81,12 +81,15 @@ function gateSubagent(payload) {
   }
   const routing = onboarding?.reviewRouting ?? {};
   if (routing.strategy !== "headless_always") return { decision: "allow" };
-  const dirs = [payload.cwd, ...(Array.isArray(payload.workspacePaths) ? payload.workspacePaths : [])];
+  const dirs = [payload.cwd, ...(Array.isArray(payload.workspacePaths) ? payload.workspacePaths : [])]
+    .filter((dir) => typeof dir === "string" && dir.trim());
   let fresh = false;
-  try {
-    fresh = hasFreshNativeFallback(dataDir, dirs);
-  } catch {
-    fresh = false;
+  if (dirs.length > 0) {
+    try {
+      fresh = hasFreshNativeFallback(dataDir, dirs);
+    } catch {
+      fresh = false;
+    }
   }
   if (fresh) return { decision: "allow" };
   const backend = routing.headlessBackend || "unconfigured";

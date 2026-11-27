@@ -345,28 +345,95 @@ function isSameOrAncestor(ancestor, descendant) {
   return descendant.startsWith(prefix);
 }
 
+function tryEvictStaleLock(lockPath) {
+  const reclaimPath = `${lockPath}.reclaim`;
+  let reclaimAcquired = false;
+  try {
+    const rfd = fs.openSync(reclaimPath, "wx", 0o600);
+    try {
+      fs.writeFileSync(rfd, `${process.pid}\n`, "utf8");
+    } finally {
+      fs.closeSync(rfd);
+    }
+    reclaimAcquired = true;
+  } catch (err) {
+    if (err && err.code === "EEXIST") {
+      try {
+        const rStat = fs.statSync(reclaimPath);
+        if (Date.now() - rStat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
+          const rQuarantine = `${reclaimPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.stale`;
+          fs.renameSync(reclaimPath, rQuarantine);
+          try {
+            fs.unlinkSync(rQuarantine);
+          } catch {}
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  try {
+    let stat;
+    try {
+      stat = fs.statSync(lockPath);
+    } catch (err) {
+      return Boolean(err && err.code === "ENOENT");
+    }
+    if (Date.now() - stat.mtimeMs <= BLIND_REVIEW_LOCK_STALE_MS) {
+      return false;
+    }
+    const quarantine = `${lockPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.stale`;
+    try {
+      fs.renameSync(lockPath, quarantine);
+    } catch {
+      return false;
+    }
+    try {
+      const qStat = fs.statSync(quarantine);
+      if (Date.now() - qStat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
+        fs.unlinkSync(quarantine);
+        return true;
+      }
+      try {
+        fs.linkSync(quarantine, lockPath);
+      } catch {}
+      try {
+        fs.unlinkSync(quarantine);
+      } catch {}
+      return false;
+    } catch {
+      try {
+        fs.unlinkSync(quarantine);
+      } catch {}
+      return false;
+    }
+  } finally {
+    if (reclaimAcquired) {
+      try {
+        fs.unlinkSync(reclaimPath);
+      } catch {}
+    }
+  }
+}
+
 function acquireBlindReviewLock(lockPath) {
   const deadline = Date.now() + BLIND_REVIEW_LOCK_TIMEOUT_MS;
+  const token = `${process.pid}:${crypto.randomBytes(8).toString("hex")}\n`;
   while (true) {
     try {
       const fd = fs.openSync(lockPath, "wx", 0o600);
       try {
-        fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+        fs.writeFileSync(fd, token, "utf8");
       } finally {
         fs.closeSync(fd);
       }
-      return;
+      return token;
     } catch (err) {
       if (!err || err.code !== "EEXIST") throw err;
       try {
         const stat = fs.statSync(lockPath);
-        if (Date.now() - stat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
-          try {
-            fs.unlinkSync(lockPath);
-            continue;
-          } catch (unlinkErr) {
-            if (unlinkErr && unlinkErr.code === "ENOENT") continue;
-          }
+        if (Date.now() - stat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS && tryEvictStaleLock(lockPath)) {
+          continue;
         }
       } catch (statErr) {
         if (statErr && statErr.code === "ENOENT") continue;
@@ -379,6 +446,14 @@ function acquireBlindReviewLock(lockPath) {
       Atomics.wait(LOCK_SLEEP_VIEW, 0, 0, BLIND_REVIEW_LOCK_RETRY_MS);
     }
   }
+}
+
+function releaseBlindReviewLock(lockPath, token) {
+  try {
+    if (fs.readFileSync(lockPath, "utf8") === token) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {}
 }
 
 function readBlindReviewState(dataDir) {
@@ -401,7 +476,7 @@ export function recordBlindReviewState(
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const target = blindReviewStatePath(dataDir);
   const lockPath = `${target}.lock`;
-  acquireBlindReviewLock(lockPath);
+  const lockToken = acquireBlindReviewLock(lockPath);
   try {
     const existing = readBlindReviewState(dataDir);
     const workspaces = {};
@@ -434,13 +509,13 @@ export function recordBlindReviewState(
     }
     return state;
   } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch {}
+    releaseBlindReviewLock(lockPath, lockToken);
   }
 }
 
 export function hasFreshNativeFallback(dataDir, dirs, nowMs = Date.now()) {
+  const validDirs = (dirs ?? []).filter((dir) => typeof dir === "string" && dir.trim());
+  if (validDirs.length === 0) return false;
   const { workspaces } = readBlindReviewState(dataDir);
   const freshEntries = [];
   for (const [storedKey, entry] of Object.entries(workspaces)) {
@@ -456,8 +531,7 @@ export function hasFreshNativeFallback(dataDir, dirs, nowMs = Date.now()) {
     });
   }
   if (freshEntries.length === 0) return false;
-  return (dirs ?? []).some((dir) => {
-    if (typeof dir !== "string" || !dir.trim()) return false;
+  return validDirs.every((dir) => {
     const normDir = normalizeWorkspaceKey(dir);
     let best = null;
     for (const entry of freshEntries) {

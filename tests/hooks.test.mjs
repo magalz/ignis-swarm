@@ -475,14 +475,16 @@ test("pre-tool-use gates blind-edge-hunter under headless_always", () => {
   try {
     fs.mkdirSync(subDir, { recursive: true });
     fs.mkdirSync(siblingDir, { recursive: true });
-    const run = (strategy, args, seed, { cwd = projDir, routingOverride = null } = {}) => {
+    const run = (strategy, args, seed, { cwd = projDir, workspacePaths = null, routingOverride = null } = {}) => {
       const dataDir = makeTempDir("ignis-gate-data-");
       tempDirs.push(dataDir);
       writeCompletedOnboarding(dataDir, routingOverride ? { reviewRouting: routingOverride } : routing(strategy));
       if (seed) seed(dataDir);
+      const payload = { cwd, toolCall: { name: "invoke_subagent", args } };
+      if (workspacePaths !== null) payload.workspacePaths = workspacePaths;
       return runHook(
         "hooks/pre-tool-use.mjs",
-        { cwd, toolCall: { name: "invoke_subagent", args } },
+        payload,
         { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
       );
     };
@@ -522,6 +524,33 @@ test("pre-tool-use gates blind-edge-hunter under headless_always", () => {
       { cwd: siblingDir }
     );
     assert.equal(siblingDenied.decision, "deny");
+
+    const mixedWorkspaceDenied = run(
+      "headless_always",
+      { TypeName: "blind-edge-hunter" },
+      (d) => recordBlindReviewState(d, projDir, { fallbackToNative: true }),
+      { cwd: projDir, workspacePaths: [projDir, siblingDir] }
+    );
+    assert.equal(mixedWorkspaceDenied.decision, "deny");
+
+    const bothWorkspacesAllowed = run(
+      "headless_always",
+      { TypeName: "blind-edge-hunter" },
+      (d) => {
+        recordBlindReviewState(d, projDir, { fallbackToNative: true });
+        recordBlindReviewState(d, siblingDir, { fallbackToNative: true });
+      },
+      { cwd: projDir, workspacePaths: [projDir, siblingDir] }
+    );
+    assert.equal(bothWorkspacesAllowed.decision, "allow");
+
+    const emptyWorkspaceDenied = run(
+      "headless_always",
+      { TypeName: "blind-edge-hunter" },
+      (d) => recordBlindReviewState(d, projDir, { fallbackToNative: true }),
+      { cwd: "", workspacePaths: [""] }
+    );
+    assert.equal(emptyWorkspaceDenied.decision, "deny");
 
     const unconfDenied = run("headless_always", { TypeName: "blind-edge-hunter" }, null, {
       routingOverride: {
