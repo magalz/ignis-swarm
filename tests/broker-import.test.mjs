@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isolatedEnv, runNode } from "./helpers.mjs";
-import { resolveConfig, mergeServersConfig, importMcpConfig } from "../scripts/broker/config.mjs";
+import { isolatedEnv, mkTemp, runNode } from "./helpers.mjs";
+import { resolveConfig, mergeServersConfig, importMcpConfig, writeDotenvSecrets } from "../scripts/broker/config.mjs";
 
 const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 
@@ -247,4 +247,91 @@ test("add-http-mcp stores a reference, not a literal", (t) => {
   assert.equal(res.status, 0, res.stderr);
   assert.deepEqual(readServers().servers.web.headers, { Authorization: "Bearer ${WEB_TOKEN}" });
   assert.equal(fs.existsSync(envPath), false);
+});
+
+for (const cmd of ["register-mcp", "import-mcp"]) {
+  const argsFor = (source) =>
+    cmd === "register-mcp" ? ["register-mcp", "--all", "--from", source] : ["import-mcp", "--from", source];
+
+  test(`${cmd} with an invalid servers.json fails and writes nothing`, (t) => {
+    const { iso, source, serversPath, envPath, broker, writeSource } = secretSetup(t);
+    fs.mkdirSync(iso.dirs.brokerHome, { recursive: true });
+    const existing = rnd("existing");
+    const broken = `{"servers": {"keep": {"headers": {"X": "${existing}"}}},\n  oops}`;
+    fs.writeFileSync(serversPath, broken);
+    const literal = rnd("new");
+    writeSource({ s: { ...stdioEntry, env: { K: literal } } });
+    const res = broker(argsFor(source));
+    assert.notEqual(res.status, 0);
+    assert.equal(fs.existsSync(envPath), false, ".env was written before servers.json was validated");
+    assert.equal(fs.readFileSync(serversPath, "utf8"), broken);
+    const out = res.stdout + res.stderr;
+    assert.equal(out.includes(existing) || out.includes(literal), false, "output leaked a secret");
+    assert.match(out, /invalid JSON at line 2, column 3/);
+  });
+
+  test(`${cmd} fails when a different server already uses the same IGNIS_ variable`, (t) => {
+    const { iso, source, serversPath, envPath, broker, writeSource } = secretSetup(t);
+    fs.mkdirSync(iso.dirs.brokerHome, { recursive: true });
+    writeSource({ "a-b": { ...stdioEntry, env: { K: rnd("first") } } });
+    assert.equal(broker(argsFor(source)).status, 0);
+    const serversBefore = fs.readFileSync(serversPath, "utf8");
+    const envBefore = fs.readFileSync(envPath, "utf8");
+    const other = rnd("second");
+    writeSource({ "a.b": { ...stdioEntry, env: { K: other } } });
+    const res = broker(argsFor(source));
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /IGNIS_A_B_K/);
+    assert.match(res.stderr, /a-b/);
+    assert.match(res.stderr, /a\.b/);
+    assert.equal(res.stdout.includes(other) || res.stderr.includes(other), false);
+    assert.equal(fs.readFileSync(serversPath, "utf8"), serversBefore);
+    assert.equal(fs.readFileSync(envPath, "utf8"), envBefore);
+  });
+}
+
+test("a collision is found in headers and url references too", (t) => {
+  const { iso, source, serversPath, envPath, broker, writeSource } = secretSetup(t);
+  fs.mkdirSync(iso.dirs.brokerHome, { recursive: true });
+  const existing = JSON.stringify({
+    servers: {
+      viaHeader: { transport: "http", url: "https://example.com/h", headers: { A: "Bearer ${IGNIS_S_K}" } },
+      viaUrl: { transport: "http", url: "https://example.com/u?t=${IGNIS_S_K2}" },
+    },
+  });
+  fs.writeFileSync(serversPath, existing);
+  for (const key of ["K", "K2"]) {
+    writeSource({ s: { ...stdioEntry, env: { [key]: rnd(key) } } });
+    const res = broker(["register-mcp", "--all", "--from", source]);
+    assert.notEqual(res.status, 0, key);
+    assert.match(res.stderr, new RegExp(key === "K" ? "viaHeader" : "viaUrl"));
+  }
+  assert.equal(fs.readFileSync(serversPath, "utf8"), existing);
+  assert.equal(fs.existsSync(envPath), false);
+});
+
+test("re-registering the same server replaces its own entry and .env value", (t) => {
+  const { source, broker, writeSource, resolved, readServers } = secretSetup(t);
+  const second = rnd("two");
+  writeSource({ s: { ...stdioEntry, env: { K: rnd("one") } } });
+  assert.equal(broker(["register-mcp", "--all", "--from", source]).status, 0);
+  writeSource({ s: { ...stdioEntry, env: { K: second } } });
+  const res = broker(["register-mcp", "--all", "--from", source]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(Object.keys(readServers().servers), ["s"]);
+  assert.equal(resolved("s").env.K, second);
+});
+
+test("writeDotenvSecrets never reuses a leftover temp file or its mode", { skip: process.platform === "win32" }, (t) => {
+  const home = mkTemp("ignis-dotenv-");
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const leftover = path.join(home, `.env.${process.pid}.tmp`);
+  fs.writeFileSync(leftover, "STALE=1\n");
+  fs.chmodSync(leftover, 0o666);
+  const value = rnd("v");
+  writeDotenvSecrets(home, new Map([["IGNIS_S_K", value]]));
+  const envPath = path.join(home, ".env");
+  assert.equal(fs.statSync(envPath).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(envPath, "utf8"), `IGNIS_S_K="${value}"\n`);
+  assert.deepEqual(fs.readdirSync(home).filter((f) => f.endsWith(".tmp") && f !== path.basename(leftover)), []);
 });
