@@ -168,7 +168,37 @@ test("a stdio server that prints its env token to stderr and exits leaks nothing
   const err = await failingCall(sup, repo);
   const all = await everything(sup, repo, err);
   assert.ok(!all.includes(TOKEN), all);
-  assert.ok(err.message.includes("fatal: bad key"), err.message);
+});
+
+test("a stdio server error that echoes its env token leaks nothing", async (t) => {
+  const { home, sup, repo, writeServers, writeEnv } = setup(t);
+  const TOKEN = mkSecret("j");
+  writeEnv({ TOKEN });
+  const script = path.join(home, "echo-err.mjs");
+  fs.writeFileSync(
+    script,
+    `import readline from "node:readline";
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id !== undefined) {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -1, message: "rejected key " + process.env.MY_KEY } }) + "\\n");
+  }
+});
+`
+  );
+  writeServers({
+    demo: {
+      transport: "stdio",
+      command: process.execPath,
+      args: [script],
+      env: { MY_KEY: "${TOKEN}" },
+      startupTimeoutMs: 5000,
+    },
+  });
+  const err = await failingCall(sup, repo);
+  const all = await everything(sup, repo, err);
+  assert.ok(!all.includes(TOKEN), all);
+  assert.ok(err.message.includes("rejected key"), err.message);
 });
 
 test("the whole status payload contains none of the secrets", async (t) => {

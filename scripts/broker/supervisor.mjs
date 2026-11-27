@@ -1,5 +1,5 @@
 import path from "node:path";
-import { BrokerError, McpHttpAdapter, McpStdioAdapter, tryCliFallback } from "./adapters.mjs";
+import { BrokerError, McpHttpAdapter, McpStdioAdapter, redactSecrets, tryCliFallback } from "./adapters.mjs";
 import { BROKER_VERSION, resolveConfig, resolveRepoRoot } from "./config.mjs";
 import { cleanupExpiredSpills, truncateContentBlocks } from "./spill.mjs";
 
@@ -22,6 +22,14 @@ function poolKeyString(candidate, cwd) {
     source: candidate.source,
     scope,
   };
+}
+
+function sanitizeError(err, configs) {
+  const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+  let message = bErr.message;
+  for (const cfg of configs) message = redactSecrets(message, cfg);
+  if (message === bErr.message) return bErr;
+  return new BrokerError(bErr.kind, message);
 }
 
 function compactSummary(desc) {
@@ -62,6 +70,7 @@ export class Supervisor {
         cwd: effectiveCwd,
         startupTimeoutMs,
         requestTimeoutMs,
+        redact: cfg,
       });
     }
 
@@ -74,6 +83,7 @@ export class Supervisor {
         headers: cfg.headers,
         startupTimeoutMs,
         requestTimeoutMs,
+        redact: cfg,
       });
     }
 
@@ -219,7 +229,7 @@ export class Supervisor {
           },
         };
       } catch (err) {
-        const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+        const bErr = sanitizeError(err, [candidate.config]);
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
           this._recordFallback({
@@ -394,7 +404,7 @@ export class Supervisor {
           },
         };
       } catch (err) {
-        const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+        const bErr = sanitizeError(err, [candidate.config]);
         if (bErr.kind === "timeout") throw bErr;
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
@@ -420,13 +430,18 @@ export class Supervisor {
     if (lastError && lastError.isFailoverEligible() && cliFallback) {
       const timeoutMs = chain[0].config.requestTimeoutMs ?? resolved.defaults.requestTimeoutMs;
       const effectiveCwd = req.cwd ? resolveRepoRoot(req.cwd) : undefined;
-      const cliRes = await tryCliFallback(
-        cliFallback,
-        req.tool,
-        req.arguments || {},
-        effectiveCwd,
-        timeoutMs
-      );
+      let cliRes;
+      try {
+        cliRes = await tryCliFallback(
+          cliFallback,
+          req.tool,
+          req.arguments || {},
+          effectiveCwd,
+          timeoutMs
+        );
+      } catch (err) {
+        throw sanitizeError(err, chain.map((c) => c.config));
+      }
       if (cliRes) {
         this._recordFallback({
           ts: String(Math.floor(Date.now() / 1000)),

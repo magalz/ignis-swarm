@@ -56,34 +56,42 @@ export function loadDotenv(home) {
   return map;
 }
 
-export function expandEnvVars(input, dotenv) {
+export function expandEnvVars(input, dotenv, record = null) {
   if (typeof input !== "string") return "";
   return input.replace(/\$\{([^}]+)\}/g, (_, name) => {
-    if (dotenv && dotenv.has(name)) return dotenv.get(name);
-    if (process.env[name] !== undefined) return process.env[name];
-    return "";
+    let value = "";
+    if (dotenv && dotenv.has(name)) value = dotenv.get(name);
+    else if (process.env[name] !== undefined) value = process.env[name];
+    if (record && value) record.push(value);
+    return value;
   });
 }
 
-function expandRecord(rec, dotenv, expand = true) {
+function expandRecord(rec, dotenv, expand = true, record = null) {
   const out = {};
   if (!rec || typeof rec !== "object") return out;
   for (const [k, v] of Object.entries(rec)) {
     if (v === null || v === undefined) continue;
-    out[k] = typeof v === "string" && expand ? expandEnvVars(v, dotenv) : String(v);
+    out[k] = typeof v === "string" && expand ? expandEnvVars(v, dotenv, record) : String(v);
   }
   return out;
 }
 
 function normalizeServerConfig(raw, dotenv, expand = true) {
   const transport = raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio");
-  return {
+  const secretValues = [];
+  const cfg = {
     transport,
     command: raw.command ?? null,
     args: Array.isArray(raw.args) ? raw.args.map(String) : [],
-    env: expandRecord(raw.env, dotenv, expand),
-    url: typeof raw.url === "string" ? (expand ? expandEnvVars(raw.url, dotenv) : raw.url) : null,
-    headers: expandRecord(raw.headers, dotenv, expand),
+    env: expandRecord(raw.env, dotenv, expand, secretValues),
+    url:
+      typeof raw.url === "string"
+        ? expand
+          ? expandEnvVars(raw.url, dotenv, secretValues)
+          : raw.url
+        : null,
+    headers: expandRecord(raw.headers, dotenv, expand, secretValues),
     cwd: typeof raw.cwd === "string" ? raw.cwd : null,
     perWorkspace: Boolean(raw.perWorkspace),
     enabled: raw.enabled !== false,
@@ -91,6 +99,8 @@ function normalizeServerConfig(raw, dotenv, expand = true) {
     requestTimeoutMs: typeof raw.requestTimeoutMs === "number" ? raw.requestTimeoutMs : null,
     startupTimeoutMs: typeof raw.startupTimeoutMs === "number" ? raw.startupTimeoutMs : null,
   };
+  Object.defineProperty(cfg, "secretValues", { value: secretValues, enumerable: false });
+  return cfg;
 }
 
 function sameDir(a, b) {
@@ -265,6 +275,15 @@ export function resolveConfig(home, cwd, dataDir = brokerDataDir(home)) {
   };
 }
 
+export function safeUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return "<invalid url>";
+  }
+}
+
 export function redactServerConfig(cfg) {
   const redactMap = (obj) => {
     const out = {};
@@ -275,6 +294,7 @@ export function redactServerConfig(cfg) {
   };
   return {
     ...cfg,
+    url: cfg.url ? safeUrl(cfg.url) : cfg.url,
     env: redactMap(cfg.env),
     headers: redactMap(cfg.headers),
   };
