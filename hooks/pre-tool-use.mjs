@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import { evaluateCommand } from "./command-rules.mjs";
+import { readStdin } from "./lib.mjs";
 
 function noOpinion() {
   return { decision: "allow" };
@@ -9,13 +9,8 @@ function normalizeToolName(name) {
   return typeof name === "string" ? name.toLowerCase().replace(/[_\s-]/g, "") : "";
 }
 
-function readPayload() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(0, "utf8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
+function isReadablePayload(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
 }
 
 async function evaluate(payload) {
@@ -36,8 +31,8 @@ async function evaluate(payload) {
 }
 
 async function main() {
-  const payload = readPayload();
-  if (payload === null) {
+  const payload = readStdin();
+  if (!isReadablePayload(payload)) {
     process.stderr.write("ignis-swarm pre-tool-use: unreadable hook payload\n");
     process.stdout.write(JSON.stringify(noOpinion()));
     return;
