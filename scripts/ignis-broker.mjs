@@ -14,6 +14,7 @@ import {
   discoverMcpConfig,
   importMcpConfig,
   mergeServersConfig,
+  redactServerConfig,
   removeServer,
   resolveRepoRoot,
 } from "./broker/config.mjs";
@@ -341,18 +342,16 @@ async function main() {
         ? flags.servers.split(",").map((s) => s.trim()).filter(Boolean)
         : null;
     const imported = importMcpConfig(sourcePath, only);
-    const rendered = JSON.stringify(imported, null, 2);
+    const entries = Object.entries(imported.servers);
 
     if (flags["dry-run"]) {
-      console.log(rendered);
+      const redacted = Object.fromEntries(entries.map(([name, cfg]) => [name, redactServerConfig(cfg)]));
+      console.log(JSON.stringify({ ...imported, servers: redacted }, null, 2));
       return;
     }
 
-    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    const dest = path.join(home, "servers.json");
-    fs.writeFileSync(dest, rendered, { encoding: "utf8", mode: 0o600 });
-    const entries = Object.entries(imported.servers);
-    console.log(`Imported ${entries.length} server(s) into ${dest}:`);
+    const merged = mergeServersConfig(home, imported.servers);
+    console.log(`Imported ${entries.length} server(s) into ${merged.dest}:`);
     for (const [name, cfg] of entries) {
       const tags = [];
       if (cfg.perWorkspace) tags.push("perWorkspace");
