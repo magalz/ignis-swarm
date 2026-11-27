@@ -209,7 +209,6 @@ export function killProcessTree(pid) {
         resolve();
       }
     }, 50);
-    poll.unref();
   });
 }
 
