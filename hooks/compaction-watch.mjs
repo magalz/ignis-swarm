@@ -2,24 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { brokerDataDir, brokerHome } from "../scripts/broker/config.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
+import { isSubagentPayload, readStdin, sanitizeConversationId } from "./lib.mjs";
 
 const DEFAULT_THRESHOLD_KB = 550;
 const COOLDOWN_BYTES = 150 * 1024;
 const COMPACT_MARKER_RE = /"(?:compact_boundary|compaction_boundary|isCompactSummary)"/;
-
-function readStdin() {
-  try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function sanitizeConvId(id) {
-  const raw = typeof id === "string" && id.trim() ? id.trim() : "default";
-  return raw.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
 
 function measureActiveBytes(transcriptPath, thresholdBytes) {
   if (!transcriptPath || typeof transcriptPath !== "string") {
@@ -93,11 +80,7 @@ function writeState(statePath, activeBytes, lastMarkerEnd) {
 
 function main() {
   const payload = readStdin();
-  if (
-    payload.isSubagent === true ||
-    payload.subagent === true ||
-    Boolean(payload.parentConversationId)
-  ) {
+  if (isSubagentPayload(payload)) {
     process.stdout.write(JSON.stringify({}));
     return;
   }
@@ -127,7 +110,7 @@ function main() {
     return;
   }
 
-  const convId = sanitizeConvId(payload.conversationId);
+  const convId = sanitizeConversationId(payload.conversationId);
   const statePath = path.join(dataDir, `compact-watch-${convId}.json`);
   const state = readState(statePath);
 

@@ -1,23 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-
-function readStdin() {
-  try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function resolveWorkspace(payload) {
-  if (payload.cwd && fs.existsSync(payload.cwd)) return payload.cwd;
-  if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-    return payload.workspacePaths[0];
-  }
-  return "";
-}
+import { readStdin, resolveWorkspace } from "./lib.mjs";
 
 function checkDecisionIndexes(cwd) {
   const issues = [];
