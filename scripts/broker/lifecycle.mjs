@@ -208,9 +208,11 @@ export async function stopDaemon(dataDir) {
   const info = readDaemonInfo(dataDir);
   if (!info) return false;
   if (!(await probeHealth(info))) {
-    try {
-      fs.rmSync(daemonInfoPath(dataDir), { force: true });
-    } catch {}
+    if (!isPidAlive(info.pid)) {
+      try {
+        fs.rmSync(daemonInfoPath(dataDir), { force: true });
+      } catch {}
+    }
     return false;
   }
   if (!(await shutdownAndKill(info))) return true;
