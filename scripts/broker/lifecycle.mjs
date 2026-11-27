@@ -16,8 +16,16 @@ export function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+export function ensurePrivateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  try {
+    if (fs.statSync(dir).mode & 0o077) fs.chmodSync(dir, 0o700);
+  } catch {}
+}
+
 export function writeDaemonInfoAtomic(dataDir, info) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDir(dataDir);
   const target = daemonInfoPath(dataDir);
   const tmp = path.join(dataDir, `daemon.${process.pid}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -142,7 +150,7 @@ export async function stopDaemon(dataDir) {
   await requestShutdown(info);
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline) {
-    if (!(await probeHealth(info))) break;
+    if (!(await probeHealth(info)) && !isPidAlive(info.pid)) break;
     await sleep(40);
   }
   try {
@@ -177,7 +185,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
     }
   }
 
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDir(dataDir);
   const release = await acquireLock(daemonLockPath(dataDir));
 
   try {
@@ -201,6 +209,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
     }
 
     const child = spawn(process.execPath, [entryScript, "daemon"], {
+      cwd: dataDir,
       detached: true,
       stdio: "ignore",
       windowsHide: true,
