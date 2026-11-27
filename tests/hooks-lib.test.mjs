@@ -145,16 +145,31 @@ test("evaluateCommand returns deny, force_ask or null in rule order", () => {
 });
 
 test("evaluateSubagent returns null for subagents that are not blind-edge-hunter", () => {
-  assert.equal(
-    evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { TypeName: "code-reviewer" } } }),
-    null,
-  );
-  assert.equal(
-    evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { typeName: "research" } } }),
-    null,
-  );
-  assert.equal(evaluateSubagent({ toolCall: { name: "invoke_subagent", args: {} } }), null);
-  assert.equal(evaluateSubagent({}), null);
+  const root = makeTempDir("ignis-lib-gate-other-");
+  const saved = {};
+  const env = isolatedEnv(root);
+  for (const key of ["IGNIS_BROKER_HOME", "IGNIS_BROKER_DATA"]) {
+    saved[key] = process.env[key];
+    process.env[key] = env[key];
+  }
+  try {
+    assert.equal(
+      evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { TypeName: "code-reviewer" } } }),
+      null,
+    );
+    assert.equal(
+      evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { typeName: "research" } } }),
+      null,
+    );
+    assert.equal(evaluateSubagent({ toolCall: { name: "invoke_subagent", args: {} } }), null);
+    assert.equal(evaluateSubagent({}), null);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    removeDir(root);
+  }
 });
 
 test("evaluateSubagent returns null for blind-edge-hunter when routing is not headless_always", () => {
