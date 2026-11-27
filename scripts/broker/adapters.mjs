@@ -220,6 +220,7 @@ function secretCandidates(config) {
     if (typeof v === "string" && v.length >= MIN_SECRET_LENGTH) found.push(v);
   };
   for (const v of config?.secretValues || []) add(v);
+  for (const v of Object.values(config?.env || {})) add(v);
   for (const v of Object.values(config?.headers || {})) {
     add(v);
     const m = /^\s*\S+\s+(\S.*)$/.exec(String(v));
@@ -354,7 +355,7 @@ export class McpStdioAdapter extends McpAdapterBase {
           return;
         }
         if (!msg || typeof msg !== "object") return;
-        if (typeof msg.method === "string") {
+        if ("method" in msg) {
           if (msg.id !== undefined && msg.id !== null) {
             this._write(
               msg.method === "ping"
