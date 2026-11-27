@@ -310,13 +310,19 @@ function runSmokeTest(opts) {
   };
 }
 
-function parseVerdict(output) {
+export function parseVerdict(output) {
   let verdict = null;
   for (const line of output.split(/\r?\n/)) {
     const match = VERDICT_LINE.exec(line);
     if (match && !VERDICT_TEMPLATE_TAIL.test(match[2])) verdict = match[1].toUpperCase();
   }
   return verdict;
+}
+
+export function noVerdictReason(output) {
+  const snippet = output.replace(/\s+/g, " ").trim().slice(0, NO_VERDICT_DETAIL_CHARS);
+  const detail = snippet ? `no Status line): ${snippet}` : "empty output)";
+  return `headless reviewer returned no verdict (${detail}`;
 }
 
 function gitEnv() {
@@ -506,14 +512,12 @@ export function runBlindReview(opts) {
   const output = res.stdout || "";
   const verdict = parseVerdict(output);
   if (verdict === null) {
-    const snippet = output.replace(/\s+/g, " ").trim().slice(0, NO_VERDICT_DETAIL_CHARS);
-    const detail = snippet ? `no Status line): ${snippet}` : "empty output)";
     return withState(
       extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
-        reason: `headless reviewer returned no verdict (${detail}`,
+        reason: noVerdictReason(output),
         base: opts.base,
         diffBytes,
       },

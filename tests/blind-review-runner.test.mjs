@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readReviewState, reviewGateDecision, reviewStatePath } from "../scripts/broker/review-state.mjs";
 import { initGitRepo, runGit } from "./helpers.mjs";
@@ -92,17 +92,22 @@ function createOutputShim(dir, name, text) {
 }
 
 function runCli(args, envOverrides = {}) {
-  return spawnSync(process.execPath, [RUNNER_PATH, ...args], {
-    encoding: "utf8",
-    windowsHide: true,
-    env: {
-      ...process.env,
-      ...envOverrides,
-    },
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [RUNNER_PATH, ...args], {
+      windowsHide: true,
+      env: { ...process.env, ...envOverrides },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (d) => (stdout += d));
+    child.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 }
 
-test("antigravity_gemini_only returns useNative=true and fallbackBackend=null", () => {
+describe("blind-review runner", { concurrency: 8 }, () => {
+it("antigravity_gemini_only returns useNative=true and fallbackBackend=null", async () => {
   const dataDir = createTempDir("ignis-blind-data-");
   try {
     writeOnboarding(dataDir, {
@@ -112,7 +117,7 @@ test("antigravity_gemini_only returns useNative=true and fallbackBackend=null", 
       effort: "high",
     });
 
-    const res = runCli(["--base", "base-ref", "--backend", "auto", "--json"], {
+    const res = await runCli(["--base", "base-ref", "--backend", "auto", "--json"], {
       IGNIS_BROKER_DATA: dataDir,
     });
     assert.equal(res.status, 0, res.stderr);
@@ -126,7 +131,7 @@ test("antigravity_gemini_only returns useNative=true and fallbackBackend=null", 
   }
 });
 
-test("antigravity_first returns native without --fallback and invokes claude shim with --fallback", () => {
+it("antigravity_first returns native without --fallback and invokes claude shim with --fallback", async () => {
   const dataDir = createTempDir("ignis-blind-data-");
   const shimDir = createTempDir("ignis-blind-shim-");
   const repoDir = createTempGitRepo();
@@ -138,7 +143,7 @@ test("antigravity_first returns native without --fallback and invokes claude shi
       effort: "high",
     });
 
-    const first = runCli(
+    const first = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir }
     );
@@ -150,7 +155,7 @@ test("antigravity_first returns native without --fallback and invokes claude shi
     assert.equal(firstJson.reason, "strategy=antigravity_first");
 
     const claudeShim = createEchoShim(shimDir, "claude-shim");
-    const second = runCli(
+    const second = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--fallback", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -195,7 +200,7 @@ test("antigravity_first returns native without --fallback and invokes claude shi
   }
 });
 
-test("headless_always with codex passes -m when model is set and omits -m when headlessModel is null", () => {
+it("headless_always with codex passes -m when model is set and omits -m when headlessModel is null", async () => {
   const dataDir = createTempDir("ignis-blind-data-");
   const shimDir = createTempDir("ignis-blind-shim-");
   const repoDir = createTempGitRepo();
@@ -209,7 +214,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
       effort: "high",
     });
 
-    const withModel = runCli(
+    const withModel = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -243,7 +248,7 @@ test("headless_always with codex passes -m when model is set and omits -m when h
       effort: "high",
     });
 
-    const withoutModel = runCli(
+    const withoutModel = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -273,13 +278,13 @@ test("headless_always with codex passes -m when model is set and omits -m when h
   }
 });
 
-test("--smoke-test succeeds for both claude and codex shims", () => {
+it("--smoke-test succeeds for both claude and codex shims", async () => {
   const shimDir = createTempDir("ignis-blind-smoke-");
   try {
     const claudeShim = createEchoShim(shimDir, "claude-smoke", "smoke");
     const codexShim = createEchoShim(shimDir, "codex-smoke", "smoke");
 
-    const claudeRes = runCli(["--smoke-test", "--backend", "claude", "--json"], {
+    const claudeRes = await runCli(["--smoke-test", "--backend", "claude", "--json"], {
       IGNIS_CLAUDE_CMD: claudeShim,
     });
     assert.equal(claudeRes.status, 0, claudeRes.stderr);
@@ -289,7 +294,7 @@ test("--smoke-test succeeds for both claude and codex shims", () => {
     assert.equal(claudeOut.model, "opus");
     assert.equal(claudeOut.output, "OK");
 
-    const codexRes = runCli(
+    const codexRes = await runCli(
       ["--smoke-test", "--backend", "codex", "--model", "gpt-6.2-sol", "--json"],
       { IGNIS_CODEX_CMD: codexShim }
     );
@@ -304,7 +309,7 @@ test("--smoke-test succeeds for both claude and codex shims", () => {
   }
 });
 
-test("missing binary returns useNative=true and fallbackToNative=true with exit 0", () => {
+it("missing binary returns useNative=true and fallbackToNative=true with exit 0", async () => {
   const dataDir = createTempDir("ignis-blind-data-");
   const repoDir = createTempGitRepo();
   try {
@@ -315,7 +320,7 @@ test("missing binary returns useNative=true and fallbackToNative=true with exit 
       effort: "high",
     });
 
-    const res = runCli(
+    const res = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -335,7 +340,7 @@ test("missing binary returns useNative=true and fallbackToNative=true with exit 
   }
 });
 
-test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trailing flags intact", { skip: process.platform !== "win32" }, () => {
+it("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trailing flags intact", { skip: process.platform !== "win32" }, async () => {
   const dataDir = createTempDir("ignis-blind-cmd-data-");
   const shimDir = createTempDir("ignis-blind-cmd-shim-");
   const repoDir = createTempGitRepo();
@@ -370,7 +375,7 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
     );
 
     for (const shim of [cmdPath, npmStyleCmdPath, batchCallCmdPath]) {
-      const res = runCli(
+      const res = await runCli(
         ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
         {
           IGNIS_BROKER_DATA: dataDir,
@@ -398,7 +403,7 @@ test("Windows .cmd claude shim receives -p prompt, --strict-mcp-config, and trai
   }
 });
 
-test("empty diff short-circuits, corrupt onboarding falls back, and trailing value flag throws", () => {
+it("empty diff short-circuits, corrupt onboarding falls back, and trailing value flag throws", async () => {
   const dataDir = createTempDir("ignis-blind-edge-data-");
   const repoDir = createTempGitRepo();
   try {
@@ -409,7 +414,7 @@ test("empty diff short-circuits, corrupt onboarding falls back, and trailing val
       effort: "high",
     });
 
-    const emptyRes = runCli(
+    const emptyRes = await runCli(
       ["--base", "HEAD", "--cwd", repoDir, "--backend", "auto", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -422,7 +427,7 @@ test("empty diff short-circuits, corrupt onboarding falls back, and trailing val
     assert.equal(emptyOut.diffBytes, 0);
 
     fs.writeFileSync(path.join(dataDir, "onboarding.json"), "{corrupt-json", "utf8");
-    const corruptRes = runCli(
+    const corruptRes = await runCli(
       ["--base", "base-ref", "--cwd", repoDir, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir }
     );
@@ -431,7 +436,7 @@ test("empty diff short-circuits, corrupt onboarding falls back, and trailing val
     assert.equal(corruptOut.useNative, true);
     assert.equal(corruptOut.reason, "strategy=antigravity_gemini_only");
 
-    const trailingFlag = runCli(["--base"]);
+    const trailingFlag = await runCli(["--base"]);
     assert.notEqual(trailingFlag.status, 0);
     assert.match(trailingFlag.stderr, /missing value for --base/);
   } finally {
@@ -469,12 +474,12 @@ function headlessRouting() {
   return { strategy: "headless_always", headlessBackend: "claude", headlessModel: null, effort: "high" };
 }
 
-function withFixture(fn, makeRepo = createTempGitRepo) {
+async function withFixture(fn, makeRepo = createTempGitRepo) {
   const dataDir = createTempDir("ignis-blind-state-data-");
   const shimDir = createTempDir("ignis-blind-state-shim-");
   const repo = makeRepo();
   try {
-    return fn({ dataDir, shimDir, repo });
+    return await fn({ dataDir, shimDir, repo });
   } finally {
     for (const d of [dataDir, shimDir, repo]) fs.rmSync(d, { recursive: true, force: true });
   }
@@ -482,12 +487,12 @@ function withFixture(fn, makeRepo = createTempGitRepo) {
 
 const runArgs = (repo) => ["--base", "base-ref", "--cwd", repo, "--backend", "auto", "--json"];
 
-test("failing headless run records a fallback state and a successful run records reviewed", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("failing headless run records a fallback state and a successful run records reviewed", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const failing = path.join(shimDir, "fail.mjs");
     fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
-    let res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    let res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(res.status, 0, res.stderr);
     const parsed = JSON.parse(res.stdout);
     assert.equal(parsed.useNative, true);
@@ -497,7 +502,7 @@ test("failing headless run records a fallback state and a successful run records
     assert.equal(gateAllows(dataDir, [repo]), true);
 
     const ok = createEchoShim(shimDir, "ok");
-    res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
+    res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
     assert.equal(JSON.parse(res.stdout).fallbackToNative, false);
     const reviewed = assertState(dataDir, repo, "reviewed");
     assert.equal(reviewed.reason, null);
@@ -505,17 +510,17 @@ test("failing headless run records a fallback state and a successful run records
   });
 });
 
-test("empty diff replaces an existing fallback state with empty", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("empty diff replaces an existing fallback state with empty", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const failing = path.join(shimDir, "fail.mjs");
     fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
-    const failed = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    const failed = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(failed.status, 0, failed.stderr);
     assertState(dataDir, repo, "fallback");
     assert.equal(gateAllows(dataDir, [repo]), true);
 
-    const res = runCli(
+    const res = await runCli(
       ["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok") }
     );
@@ -526,27 +531,27 @@ test("empty diff replaces an existing fallback state with empty", () => {
   });
 });
 
-test("unconfigured headless backend records a fallback state", () => {
-  withFixture(({ dataDir, repo }) => {
+it("unconfigured headless backend records a fallback state", async () => {
+  await withFixture(async ({ dataDir, repo }) => {
     writeOnboarding(dataDir, { strategy: "headless_always", headlessBackend: null, headlessModel: null, effort: "high" });
-    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir });
+    const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir });
     assert.equal(JSON.parse(res.stdout).fallbackToNative, true);
     assert.match(assertState(dataDir, repo, "fallback").reason, /invalid or unconfigured headless backend/);
     assert.equal(gateAllows(dataDir, [repo]), true);
   });
 });
 
-test("smoke-test and non-attempt strategies never write state", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("smoke-test and non-attempt strategies never write state", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const env = { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "smoke", "smoke") };
-    const res = runCli(["--smoke-test", "--backend", "claude", "--cwd", repo], env);
+    const res = await runCli(["--smoke-test", "--backend", "claude", "--cwd", repo], env);
     assert.equal(res.status, 0, res.stderr);
     assert.equal(fs.existsSync(stateDir(dataDir)), false);
 
     for (const strategy of ["antigravity_gemini_only", "antigravity_first"]) {
       writeOnboarding(dataDir, { strategy, headlessBackend: "claude", headlessModel: null, effort: "high" });
-      const stratRes = runCli(runArgs(repo), env);
+      const stratRes = await runCli(runArgs(repo), env);
       assert.equal(stratRes.status, 0, stratRes.stderr);
       assert.equal(JSON.parse(stratRes.stdout).useNative, true);
       assert.equal(fs.existsSync(stateDir(dataDir)), false);
@@ -554,11 +559,11 @@ test("smoke-test and non-attempt strategies never write state", () => {
   });
 });
 
-test("unwritable state location does not crash review output and is reported as stateError and on stderr", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("unwritable state location does not crash review output and is reported as stateError and on stderr", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     blockStateDir(dataDir);
-    const res = runCli(runArgs(repo), {
+    const res = await runCli(runArgs(repo), {
       IGNIS_BROKER_DATA: dataDir,
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
     });
@@ -575,13 +580,13 @@ test("unwritable state location does not crash review output and is reported as 
   });
 });
 
-test("a failing headless run whose state cannot be written reports stateError in JSON and on stderr", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a failing headless run whose state cannot be written reports stateError in JSON and on stderr", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     blockStateDir(dataDir);
     const failing = path.join(shimDir, "fail.mjs");
     fs.writeFileSync(failing, "process.exit(3);\n", "utf8");
-    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, true);
@@ -595,11 +600,11 @@ test("a failing headless run whose state cannot be written reports stateError in
   });
 });
 
-test("a state that cannot be written is reported on stderr in non-JSON mode after a successful review", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a state that cannot be written is reported on stderr in non-JSON mode after a successful review", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     blockStateDir(dataDir);
-    const res = runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], {
+    const res = await runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], {
       IGNIS_BROKER_DATA: dataDir,
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
     });
@@ -612,19 +617,7 @@ test("a state that cannot be written is reported on stderr in non-JSON mode afte
   });
 });
 
-test("a recorded state write carries no stateError", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
-    writeOnboarding(dataDir, headlessRouting());
-    const res = runCli(runArgs(repo), {
-      IGNIS_BROKER_DATA: dataDir,
-      IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.ok(!("stateError" in JSON.parse(res.stdout)));
-  });
-});
-
-test("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs leaves approval_policy unquoted", async () => {
+it("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs leaves approval_policy unquoted", async () => {
   const { buildClaudeArgs, buildCodexArgs } = await import("../scripts/run-blind-review.mjs");
   assert.deepEqual(buildClaudeArgs("review this", "opus", "high", "/tmp/ignis/mcp-config.json"), [
     "-p",
@@ -650,7 +643,7 @@ test("buildClaudeArgs passes the MCP config as a file path and buildCodexArgs le
   assert.ok(codexArgs.every((arg) => !arg.includes('"')));
 });
 
-test("the claude argv gives the reviewer no tools, no settings sources and no slash commands, and never uses --bare", async () => {
+it("the claude argv gives the reviewer no tools, no settings sources and no slash commands, and never uses --bare", async () => {
   const { buildClaudeArgs } = await import("../scripts/run-blind-review.mjs");
   const args = buildClaudeArgs("review this", "opus", "high", "/tmp/ignis/mcp-config.json");
   assert.equal(args[args.indexOf("--tools") + 1], "");
@@ -665,10 +658,10 @@ test("the claude argv gives the reviewer no tools, no settings sources and no sl
   assert.ok(args.includes("--no-session-persistence"));
 });
 
-test("the empty --tools and --setting-sources values reach a claude shim as empty argv elements", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("the empty --tools and --setting-sources values reach a claude shim as empty argv elements", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-empty-args") });
+    const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-empty-args") });
     assert.equal(res.status, 0, res.stderr);
     const { argv } = captured(JSON.parse(res.stdout).output);
     assert.equal(argv[argv.indexOf("--tools") + 1], "");
@@ -678,7 +671,7 @@ test("the empty --tools and --setting-sources values reach a claude shim as empt
   });
 });
 
-test("buildCodexArgs puts -m after exec and omits it without a model", async () => {
+it("buildCodexArgs puts -m after exec and omits it without a model", async () => {
   const { buildCodexArgs } = await import("../scripts/run-blind-review.mjs");
   assert.deepEqual(buildCodexArgs("gpt-6.2-sol"), [
     "exec",
@@ -693,11 +686,11 @@ test("buildCodexArgs puts -m after exec and omits it without a model", async () 
   assert.deepEqual(buildCodexArgs(null), ["exec", "--sandbox", "read-only", "-c", "approval_policy=never", "-"]);
 });
 
-test("claude receives an existing MCP config file during the run and its temp directory is gone afterwards", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("claude receives an existing MCP config file during the run and its temp directory is gone afterwards", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const echo = createEchoShim(shimDir, "echo-config");
-    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: echo });
+    const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: echo });
     assert.equal(res.status, 0, res.stderr);
     const seen = captured(JSON.parse(res.stdout).output);
     assert.ok(seen.argv.includes("--strict-mcp-config"));
@@ -717,7 +710,7 @@ process.exit(4);
 `,
       "utf8"
     );
-    const failed = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: recorder });
+    const failed = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: recorder });
     assert.equal(failed.status, 0, failed.stderr);
     assert.equal(JSON.parse(failed.stdout).fallbackToNative, true);
     const configPath = fs.readFileSync(recorded, "utf8");
@@ -725,8 +718,8 @@ process.exit(4);
   });
 });
 
-test("--smoke-test passes claude an existing MCP config file", () => {
-  withFixture(({ shimDir }) => {
+it("--smoke-test passes claude an existing MCP config file", async () => {
+  await withFixture(async ({ shimDir }) => {
     const shim = path.join(shimDir, "claude-smoke-config.mjs");
     fs.writeFileSync(
       shim,
@@ -737,15 +730,15 @@ process.stdout.write(fs.existsSync(configPath) ? "OK\\n" : "MISSING\\n");
 `,
       "utf8"
     );
-    const res = runCli(["--smoke-test", "--backend", "claude", "--json"], { IGNIS_CLAUDE_CMD: shim });
+    const res = await runCli(["--smoke-test", "--backend", "claude", "--json"], { IGNIS_CLAUDE_CMD: shim });
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.ok, true, JSON.stringify(out));
   });
 });
 
-test("a diff above the size limit records a fallback state and still prints JSON", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a diff above the size limit records a fallback state and still prints JSON", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
     spawnSync("git", ["add", "big.txt"], { cwd: repo, windowsHide: true });
@@ -756,7 +749,7 @@ test("a diff above the size limit records a fallback state and still prints JSON
       IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"),
       IGNIS_REVIEW_MAX_DIFF_BYTES: "1024",
     };
-    const res = runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], env);
+    const res = await runCli(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], env);
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, true);
@@ -768,7 +761,7 @@ test("a diff above the size limit records a fallback state and still prints JSON
     assertState(dataDir, repo, "fallback");
     assert.equal(gateAllows(dataDir, [repo]), true);
 
-    const nonNumeric = runCli(runArgs(repo), { ...env, IGNIS_REVIEW_MAX_DIFF_BYTES: "not-a-number" });
+    const nonNumeric = await runCli(runArgs(repo), { ...env, IGNIS_REVIEW_MAX_DIFF_BYTES: "not-a-number" });
     assert.equal(nonNumeric.status, 0, nonNumeric.stderr);
     assert.equal(JSON.parse(nonNumeric.stdout).useNative, false);
     assertState(dataDir, repo, "reviewed");
@@ -776,8 +769,8 @@ test("a diff above the size limit records a fallback state and still prints JSON
   });
 });
 
-test("a diff extraction failure from git itself falls back and reports that no state could be recorded", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a diff extraction failure from git itself falls back and reports that no state could be recorded", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
     Object.assign(env, {
@@ -805,15 +798,15 @@ test("a diff extraction failure from git itself falls back and reports that no s
   });
 });
 
-test(
+it(
   "Windows plain .cmd claude shim runs now that no argument carries a double quote",
   { skip: process.platform !== "win32" ? "needs cmd.exe batch handling, Windows only" : false },
-  () => {
-    withFixture(({ dataDir, shimDir, repo }) => {
+  async () => {
+    await withFixture(async ({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, headlessRouting());
       const cmdPath = path.join(shimDir, "claude-plain.cmd");
       fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\necho Status: PASS\r\n", "utf8");
-      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
+      const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
       assert.equal(out.useNative, false);
@@ -824,15 +817,15 @@ test(
   }
 );
 
-test(
+it(
   "Windows plain .cmd shim with a double quote in an argument records a fallback state instead of exiting 1",
   { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
-  () => {
-    withFixture(({ dataDir, shimDir, repo }) => {
+  async () => {
+    await withFixture(async ({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, { ...headlessRouting(), headlessModel: 'op"us' });
       const cmdPath = path.join(shimDir, "claude-plain.cmd");
       fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
-      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
+      const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: cmdPath });
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
       assert.equal(out.useNative, true);
@@ -844,15 +837,15 @@ test(
   }
 );
 
-test(
+it(
   "Windows plain .cmd codex shim with a double quote in the model records a fallback state instead of exiting 1",
   { skip: process.platform !== "win32" ? "resolvePlatformCommand only rejects batch arguments on Windows" : false },
-  () => {
-    withFixture(({ dataDir, shimDir, repo }) => {
+  async () => {
+    await withFixture(async ({ dataDir, shimDir, repo }) => {
       writeOnboarding(dataDir, { ...headlessRouting(), headlessBackend: "codex", headlessModel: 'o"3' });
       const cmdPath = path.join(shimDir, "codex-plain.cmd");
       fs.writeFileSync(cmdPath, "@echo off\r\necho review\r\n", "utf8");
-      const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: cmdPath });
+      const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: cmdPath });
       assert.equal(res.status, 0, res.stderr);
       const out = JSON.parse(res.stdout);
       assert.equal(out.useNative, true);
@@ -864,13 +857,13 @@ test(
   }
 );
 
-test("uncommitted working-tree edits are included when --base HEAD is passed", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("uncommitted working-tree edits are included when --base HEAD is passed", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     fs.writeFileSync(path.join(repo, "app.js"), "export const value = 3;\n", "utf8");
 
     const ok = createEchoShim(shimDir, "ok");
-    const res = runCli(
+    const res = await runCli(
       ["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok }
     );
@@ -883,8 +876,8 @@ test("uncommitted working-tree edits are included when --base HEAD is passed", (
   });
 });
 
-test("non-zero exit with stdout-only error preserves stdout in reason and records a fallback state", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("non-zero exit with stdout-only error preserves stdout in reason and records a fallback state", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const stdoutErrShim = path.join(shimDir, "stdout-fail.mjs");
     fs.writeFileSync(
@@ -893,7 +886,7 @@ test("non-zero exit with stdout-only error preserves stdout in reason and record
       "utf8"
     );
 
-    const res = runCli(runArgs(repo), {
+    const res = await runCli(runArgs(repo), {
       IGNIS_BROKER_DATA: dataDir,
       IGNIS_CLAUDE_CMD: stdoutErrShim,
     });
@@ -907,11 +900,11 @@ test("non-zero exit with stdout-only error preserves stdout in reason and record
   });
 });
 
-test("invalid --backend throws without writing fallback state", () => {
-  withFixture(({ dataDir, repo }) => {
+it("invalid --backend throws without writing fallback state", async () => {
+  await withFixture(async ({ dataDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     for (const badBackend of ["bogus", ""]) {
-      const res = runCli(
+      const res = await runCli(
         ["--base", "base-ref", "--cwd", repo, "--backend", badBackend, "--json"],
         { IGNIS_BROKER_DATA: dataDir }
       );
@@ -922,10 +915,10 @@ test("invalid --backend throws without writing fallback state", () => {
   });
 });
 
-test("mismatched explicit --backend override does not persist a fallback state", () => {
-  withFixture(({ dataDir, repo }) => {
+it("mismatched explicit --backend override does not persist a fallback state", async () => {
+  await withFixture(async ({ dataDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    const res = runCli(
+    const res = await runCli(
       ["--base", "base-ref", "--cwd", repo, "--backend", "codex", "--json"],
       {
         IGNIS_BROKER_DATA: dataDir,
@@ -941,13 +934,13 @@ test("mismatched explicit --backend override does not persist a fallback state",
   });
 });
 
-test("--base rejects flag injection and invalid git refs loudly without writing files or state", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("--base rejects flag injection and invalid git refs loudly without writing files or state", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const ok = createEchoShim(shimDir, "ok");
 
     const evilPath = path.join(repo, "evil.txt");
-    const injRes = runCli(
+    const injRes = await runCli(
       ["--base", "--output=evil.txt", "--cwd", repo, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok }
     );
@@ -956,7 +949,7 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
     assert.equal(fs.existsSync(evilPath), false);
     assert.equal(fs.existsSync(stateDir(dataDir)), false);
 
-    const badRefRes = runCli(
+    const badRefRes = await runCli(
       ["--base", "nonexistent-ref", "--cwd", repo, "--backend", "auto", "--json"],
       { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok }
     );
@@ -966,8 +959,8 @@ test("--base rejects flag injection and invalid git refs loudly without writing 
   });
 });
 
-test("the runner started through a junction or symlink still runs: bad input is exit 1, not a silent exit 0", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("the runner started through a junction or symlink still runs: bad input is exit 1, not a silent exit 0", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     const root = createTempDir("ignis-blind-link-");
     try {
       const realScripts = path.join(root, "real-scripts");
@@ -1009,8 +1002,8 @@ test("the runner started through a junction or symlink still runs: bad input is 
   });
 });
 
-test("monorepo subdir keys state on the git root while a nested git repo keeps its own record", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("monorepo subdir keys state on the git root while a nested git repo keeps its own record", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const subDir = path.join(repo, "packages", "app");
     fs.mkdirSync(subDir, { recursive: true });
@@ -1019,7 +1012,7 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
     fs.writeFileSync(failing, "process.exit(2);\n", "utf8");
     const ok = createEchoShim(shimDir, "ok-sub");
 
-    const failRes = runCli(runArgs(subDir), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    const failRes = await runCli(runArgs(subDir), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(failRes.status, 0, failRes.stderr);
     assert.equal(JSON.parse(failRes.stdout).fallbackToNative, true);
     assertState(dataDir, repo, "fallback");
@@ -1027,7 +1020,7 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
     assert.equal(gateAllows(dataDir, [repo]), true);
     assert.equal(gateAllows(dataDir, [subDir]), true);
 
-    const okRes = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
+    const okRes = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: ok });
     assert.equal(okRes.status, 0, okRes.stderr);
     assertState(dataDir, repo, "reviewed");
     assert.equal(gateAllows(dataDir, [repo]), false);
@@ -1046,7 +1039,7 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
     spawnSync("git", ["add", "."], { cwd: nestedRepo, windowsHide: true });
     spawnSync("git", ["commit", "-q", "-m", "change"], { cwd: nestedRepo, windowsHide: true });
 
-    const nestedFail = runCli(runArgs(nestedRepo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
+    const nestedFail = await runCli(runArgs(nestedRepo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: failing });
     assert.equal(nestedFail.status, 0, nestedFail.stderr);
     assert.equal(JSON.parse(nestedFail.stdout).fallbackToNative, true);
     assertState(dataDir, nestedRepo, "fallback");
@@ -1060,11 +1053,11 @@ test("monorepo subdir keys state on the git root while a nested git repo keeps i
 const NO_VERDICT_EMPTY = "headless reviewer returned no verdict (empty output)";
 const NO_VERDICT_PREFIX = "headless reviewer returned no verdict (no Status line): ";
 
-function runReviewer(fixture, text, extraArgs = []) {
+async function runReviewer(fixture, text, extraArgs = []) {
   const { dataDir, shimDir, repo } = fixture;
   writeOnboarding(dataDir, headlessRouting());
   const shim = createOutputShim(shimDir, `out-${fs.readdirSync(shimDir).length}`, text);
-  const res = runCli([...runArgs(repo), ...extraArgs], { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: shim });
+  const res = await runCli([...runArgs(repo), ...extraArgs], { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: shim });
   assert.equal(res.status, 0, res.stderr);
   return res;
 }
@@ -1079,127 +1072,33 @@ function assertNoVerdictFallback(fixture, res, reason) {
   assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), true);
 }
 
-test("a headless run that exits 0 with empty or whitespace-only output records a fallback state", () => {
-  withFixture((fixture) => {
-    for (const text of ["", "  \n\t\n"]) {
-      assertNoVerdictFallback(fixture, runReviewer(fixture, text), NO_VERDICT_EMPTY);
-    }
+it("a headless run that exits 0 with empty output records a fallback state", async () => {
+  await withFixture(async (fixture) => {
+    assertNoVerdictFallback(fixture, await runReviewer(fixture, ""), NO_VERDICT_EMPTY);
   });
 });
 
-test("a headless run whose output has no Status line records a fallback state", () => {
-  withFixture((fixture) => {
-    const cases = [
-      ["app.js line 1 looks fine to me.\n", "app.js line 1 looks fine to me."],
-      ["Overall Status: PASS\n", "Overall Status: PASS"],
-      ["Status: unknown\n", "Status: unknown"],
-      ["The reviewer wrote Status: ISSUES in the middle of a sentence.\n", "The reviewer wrote Status: ISSUES in the middle of a sentence."],
-    ];
-    for (const [text, detail] of cases) {
-      assertNoVerdictFallback(fixture, runReviewer(fixture, text), `${NO_VERDICT_PREFIX}${detail}`);
-    }
+it("a headless run whose output has no Status line records a fallback state carrying the detail", async () => {
+  await withFixture(async (fixture) => {
+    const text = "The reviewer wrote Status: ISSUES in the middle of a sentence.\n";
+    assertNoVerdictFallback(fixture, await runReviewer(fixture, text), `${NO_VERDICT_PREFIX}${text.trim()}`);
   });
 });
 
-test("Status: PASSED is not a verdict because PASS must be a whole word", () => {
-  withFixture((fixture) => {
-    for (const text of ["Status: PASSED\n", "**Status:** PASSED\n", "Status: ISSUESFOUND\n"]) {
-      assertNoVerdictFallback(fixture, runReviewer(fixture, text), `${NO_VERDICT_PREFIX}${text.trim()}`);
-    }
-  });
-});
-
-test("a verdict never crosses a newline: the word must sit on the Status line", () => {
-  withFixture((fixture) => {
-    for (const text of ["Status:\nPASS\n", "Status:\n\nISSUES\n", "**Status:**\n  PASS\n", "Status\n: PASS\n"]) {
-      const out = JSON.parse(runReviewer(fixture, text).stdout);
-      assert.equal(out.fallbackToNative, true, JSON.stringify(text));
-      assert.ok(!("verdict" in out), JSON.stringify(text));
-    }
-  });
-});
-
-test("the house-style Status line is accepted in every markdown decoration the agent docs use", () => {
-  withFixture((fixture) => {
-    const cases = [
-      ["Status: PASS\n", "PASS"],
-      ["**Status:** PASS\n", "PASS"],
-      ["**Status**: PASS\n", "PASS"],
-      ["**Status: PASS**\n", "PASS"],
-      ["**Status:** `PASS`\n", "PASS"],
-      ["- **Status:** `ISSUES`\n", "ISSUES"],
-      ["_Status: Issues_\n", "ISSUES"],
-      ["`Status: PASS`\n", "PASS"],
-      ["> Status: PASS\n", "PASS"],
-      [">Status: ISSUES\n", "ISSUES"],
-      ["- Status: ISSUES\n", "ISSUES"],
-      ["> **Status:** PASS\n", "PASS"],
-      ["Findings follow.\r\n\r\n**Status:** PASS\r\n", "PASS"],
-      ["**Status:** ISSUES", "ISSUES"],
-    ];
-    for (const [text, verdict] of cases) {
-      const out = JSON.parse(runReviewer(fixture, text).stdout);
-      assert.equal(out.fallbackToNative, false, JSON.stringify(text));
-      assert.equal(out.verdict, verdict, JSON.stringify(text));
-    }
-  });
-});
-
-test("a documentation template line naming both verdicts is not a verdict, and a real verdict after it still wins", () => {
-  withFixture((fixture) => {
-    for (const text of ["Status: PASS | ISSUES\n", "**Status:** PASS | ISSUES\n", "Status: PASS / ISSUES\n", "- Status: ISSUES / PASS\n"]) {
-      const out = JSON.parse(runReviewer(fixture, text).stdout);
-      assert.equal(out.fallbackToNative, true, JSON.stringify(text));
-      assert.ok(!("verdict" in out), JSON.stringify(text));
-    }
-    const out = JSON.parse(runReviewer(fixture, "End with Status: PASS | ISSUES\nStatus: ISSUES\n").stdout);
-    assert.equal(out.verdict, "ISSUES");
-    const trailing = JSON.parse(runReviewer(fixture, "Status: PASS\nTemplate: Status: PASS | ISSUES\n").stdout);
-    assert.equal(trailing.verdict, "PASS");
-  });
-});
-
-test("the last Status line wins across mixed decorations", () => {
-  withFixture((fixture) => {
-    const out = JSON.parse(runReviewer(fixture, "**Status:** PASS\n\nWait, a bug.\n\n> _Status: Issues_\n").stdout);
-    assert.equal(out.verdict, "ISSUES");
-    const back = JSON.parse(runReviewer(fixture, "- Status: ISSUES\nRetracted.\n**Status: PASS**\n").stdout);
-    assert.equal(back.verdict, "PASS");
-  });
-});
-
-test("a no-verdict fallback reason carries the first 200 characters of the output on a single line", () => {
-  withFixture((fixture) => {
-    const multiline = "The reviewer rambled.\r\n\r\n\tIt never\n   gave a verdict.\n";
-    assertNoVerdictFallback(
-      fixture,
-      runReviewer(fixture, multiline),
-      `${NO_VERDICT_PREFIX}The reviewer rambled. It never gave a verdict.`
-    );
-
-    const long = `${"a".repeat(150)}\n${"b".repeat(300)}\n`;
-    const res = runReviewer(fixture, long);
-    const out = JSON.parse(res.stdout);
-    assert.equal(out.reason, `${NO_VERDICT_PREFIX}${"a".repeat(150)} ${"b".repeat(49)}`);
-    assert.equal(out.reason.length - NO_VERDICT_PREFIX.length, 200);
-    assert.ok(!/[\r\n]/.test(out.reason));
-    assert.equal(assertState(fixture.dataDir, fixture.repo, "fallback").reason, out.reason);
-  });
-});
-
-test("Status: PASS is a success with verdict PASS, the reviewed state and the reviewer output printed", () => {
-  withFixture((fixture) => {
+it("Status: PASS is a success with verdict PASS, the reviewed state and the reviewer output printed", async () => {
+  await withFixture(async (fixture) => {
     const text = "No HIGH or MEDIUM issues found.\nStatus: PASS\n";
-    const res = runReviewer(fixture, text);
+    const res = await runReviewer(fixture, text);
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, false);
     assert.equal(out.fallbackToNative, false);
     assert.equal(out.verdict, "PASS");
+    assert.ok(!("stateError" in out));
     assert.equal(out.output, text);
     assert.equal(assertState(fixture.dataDir, fixture.repo, "reviewed").reason, null);
     assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), false);
 
-    const plain = runCli(
+    const plain = await runCli(
       ["--base", "base-ref", "--cwd", fixture.repo, "--backend", "auto"],
       {
         IGNIS_BROKER_DATA: fixture.dataDir,
@@ -1211,39 +1110,22 @@ test("Status: PASS is a success with verdict PASS, the reviewed state and the re
   });
 });
 
-test("the verdict is case-insensitive, accepts markdown decoration and is normalised to upper case", () => {
-  withFixture((fixture) => {
-    const cases = [
-      ["Found a race condition in app.js.\n\n**Status: issues**\n", "ISSUES"],
-      ["  `Status: pass`\n", "PASS"],
-      ["*Status : Issues*", "ISSUES"],
-      ["STATUS: PASS", "PASS"],
-    ];
-    for (const [text, verdict] of cases) {
-      const out = JSON.parse(runReviewer(fixture, text).stdout);
-      assert.equal(out.useNative, false, text);
-      assert.equal(out.fallbackToNative, false, text);
-      assert.equal(out.verdict, verdict, text);
-    }
+it("Status: ISSUES is reported as such with the reviewed state and keeps the gate closed", async () => {
+  await withFixture(async (fixture) => {
+    const out = JSON.parse((await runReviewer(fixture, "Found a race condition in app.js.\n\n**Status: issues**\n")).stdout);
+    assert.equal(out.useNative, false);
+    assert.equal(out.fallbackToNative, false);
+    assert.equal(out.verdict, "ISSUES");
     assertState(fixture.dataDir, fixture.repo, "reviewed");
     assert.equal(gateAllows(fixture.dataDir, [fixture.repo]), false);
   });
 });
 
-test("when the output holds two Status lines the last one wins", () => {
-  withFixture((fixture) => {
-    const issuesLast = JSON.parse(runReviewer(fixture, "Status: PASS\nOn reflection, one bug.\nStatus: ISSUES\n").stdout);
-    assert.equal(issuesLast.verdict, "ISSUES");
-    const passLast = JSON.parse(runReviewer(fixture, "Status: ISSUES\nRetracted.\nStatus: PASS\n").stdout);
-    assert.equal(passLast.verdict, "PASS");
-  });
-});
-
-test("the review prompt passed to claude and to codex carries the Status instruction", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("the review prompt passed to claude and to codex carries the Status instruction", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const claude = JSON.parse(
-      runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-echo") }).stdout
+      (await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "claude-echo") })).stdout
     );
     assert.equal(claude.verdict, "PASS");
     const prompt = captured(claude.output).argv[1];
@@ -1256,7 +1138,7 @@ test("the review prompt passed to claude and to codex carries the Status instruc
 
     writeOnboarding(dataDir, { ...headlessRouting(), headlessBackend: "codex" });
     const codex = JSON.parse(
-      runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: createEchoShim(shimDir, "codex-echo") }).stdout
+      (await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CODEX_CMD: createEchoShim(shimDir, "codex-echo") })).stdout
     );
     assert.equal(codex.verdict, "PASS");
     assert.match(captured(codex.output).stdin, /Status: PASS[\s\S]*Status: ISSUES/);
@@ -1269,11 +1151,11 @@ function reviewerEnv(dataDir, shimDir, extra = {}) {
   return { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), ...extra };
 }
 
-test("a new untracked file that is the only change reaches the reviewer and records reviewed", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a new untracked file that is the only change reaches the reviewer and records reviewed", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     fs.writeFileSync(path.join(repo, "fresh.js"), "export const fresh = 42;\n", "utf8");
-    const res = runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
+    const res = await runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, false);
@@ -1288,12 +1170,12 @@ test("a new untracked file that is the only change reaches the reviewer and reco
   });
 });
 
-test("a repository with no commits and a new file is reviewed and records headSha unborn", () => {
+it("a repository with no commits and a new file is reviewed and records headSha unborn", async () => {
   const makeRepo = () =>
     initGitRepo(createTempDir("ignis-blind-unborn-"), { commit: false, files: { "created.js": "export const created = 1;\n" } });
-  withFixture(({ dataDir, shimDir, repo }) => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
-    const res = runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
+    const res = await runCli(["--base", "HEAD", "--cwd", repo, "--backend", "auto", "--json"], reviewerEnv(dataDir, shimDir));
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.useNative, false);
@@ -1310,8 +1192,8 @@ test("a repository with no commits and a new file is reviewed and records headSh
   }, makeRepo);
 });
 
-test("a HEAD that moves while the reviewer runs does not change the recorded headSha", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a HEAD that moves while the reviewer runs does not change the recorded headSha", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const before = headOf(repo);
     const mover = path.join(shimDir, "move-head.mjs");
@@ -1332,7 +1214,7 @@ process.stdout.write("Status: PASS\\n");
 `,
       "utf8"
     );
-    const res = runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: mover });
+    const res = await runCli(runArgs(repo), { IGNIS_BROKER_DATA: dataDir, IGNIS_CLAUDE_CMD: mover });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(JSON.parse(res.stdout).fallbackToNative, false);
     assert.notEqual(headOf(repo), before, "the shim must have moved HEAD");
@@ -1342,8 +1224,8 @@ process.stdout.write("Status: PASS\\n");
   });
 });
 
-test("a --cwd that does not exist or is outside git is an input error: exit 1 and no state", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("a --cwd that does not exist or is outside git is an input error: exit 1 and no state", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     const outside = createTempDir("ignis-blind-nogit-");
     try {
@@ -1352,7 +1234,7 @@ test("a --cwd that does not exist or is outside git is an input error: exit 1 an
         [outside, /not inside a git repository/],
       ];
       for (const [cwd, message] of cases) {
-        const res = runCli(
+        const res = await runCli(
           ["--base", "HEAD", "--cwd", cwd, "--backend", "auto", "--json"],
           reviewerEnv(dataDir, shimDir, { GIT_CEILING_DIRECTORIES: os.tmpdir() })
         );
@@ -1368,11 +1250,11 @@ test("a --cwd that does not exist or is outside git is an input error: exit 1 an
   });
 });
 
-test("git color.ui=always leaves no escape characters in the diff the reviewer receives", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("git color.ui=always leaves no escape characters in the diff the reviewer receives", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     runGit(repo, ["config", "color.ui", "always"]);
-    const res = runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
+    const res = await runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.fallbackToNative, false, out.reason);
@@ -1384,12 +1266,12 @@ test("git color.ui=always leaves no escape characters in the diff the reviewer r
   });
 });
 
-test("diff.noprefix and diff.external in the user git config do not change the diff the reviewer receives", () => {
-  withFixture(({ dataDir, shimDir, repo }) => {
+it("diff.noprefix and diff.external in the user git config do not change the diff the reviewer receives", async () => {
+  await withFixture(async ({ dataDir, shimDir, repo }) => {
     writeOnboarding(dataDir, headlessRouting());
     runGit(repo, ["config", "diff.noprefix", "true"]);
     runGit(repo, ["config", "diff.external", "ignis-nonexistent-diff-tool-xyz-9999"]);
-    const res = runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
+    const res = await runCli(runArgs(repo), reviewerEnv(dataDir, shimDir));
     assert.equal(res.status, 0, res.stderr);
     const out = JSON.parse(res.stdout);
     assert.equal(out.fallbackToNative, false, out.reason);
@@ -1398,4 +1280,5 @@ test("diff.noprefix and diff.external in the user git config do not change the d
     assert.match(stdin, /^\+export const value = 2;$/m);
     assertState(dataDir, repo, "reviewed");
   });
+});
 });
