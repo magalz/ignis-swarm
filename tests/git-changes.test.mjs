@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { collectChanges, gitToplevel, headSha } from "../scripts/lib/git-changes.mjs";
 import { initGitRepo, isolatedEnv, mkTemp, runGit } from "./helpers.mjs";
 
@@ -356,5 +357,34 @@ test("collectChanges with no untracked files leaves a stat-dirty real index byte
     assert.deepEqual(result.untracked, []);
     assert.ok(sameIndex(readIndex(dir, env), indexBefore), "the real index must be byte-identical");
     assert.ok(!fs.existsSync(path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"], { env }), "index.lock")));
+  });
+});
+
+// Windows CopyFile keeps the source mtime, Linux and macOS copies get a fresh one. The stand-in copy
+// gives every platform the fresh mtime, so the racy-clean loss is reproduced deterministically.
+test("collectChanges keeps git's racy-clean protection: a same-size edit in a racily clean index is in the diff", () => {
+  withRepo({ files: { "a.txt": "value = 1\n" } }, ({ dir, env }) => {
+    runGit(dir, ["config", "core.trustctime", "false"], { env });
+    const file = path.join(dir, "a.txt");
+    const T = new Date("2024-01-02T03:04:05.000Z");
+    fs.utimesSync(file, T, T);
+    runGit(dir, ["update-index", "--refresh"], { env });
+    fs.writeFileSync(file, "value = 2\n");
+    fs.utimesSync(file, T, T);
+    const realIndex = path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"], { env }), "index");
+    fs.utimesSync(realIndex, T, T);
+    const quiet = spawnSync("git", ["diff", "--quiet"], { cwd: dir, env, windowsHide: true });
+    assert.equal(quiet.status, 1, "git itself must see the edit through its racy check");
+    fs.utimesSync(realIndex, T, T);
+    const nativeCopy = fs.copyFileSync;
+    fs.copyFileSync = (src, dest) => fs.writeFileSync(dest, fs.readFileSync(src));
+    let result;
+    try {
+      result = collectChanges(dir, { base: "HEAD", env });
+    } finally {
+      fs.copyFileSync = nativeCopy;
+    }
+    assert.equal(result.error, null);
+    assert.ok(result.diff.includes("value = 2"), `expected the edit in the diff, got: ${JSON.stringify(result.diff)}`);
   });
 });
