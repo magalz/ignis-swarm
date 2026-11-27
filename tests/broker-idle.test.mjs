@@ -128,25 +128,8 @@ test("an uncaught async error is logged, daemon.json is removed and the exit cod
     iso.cleanup();
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  const harness = path.join(work, "crash-harness.mjs");
-  fs.writeFileSync(
-    harness,
-    `
-import { runDaemon } from ${JSON.stringify(SERVER_URL)};
-await runDaemon(process.argv[2], process.argv[3], 0);
-setTimeout(() => {
-  throw new Error("crash-test-boom");
-}, 300);
-`
-  );
-  const child = spawn(process.execPath, [harness, iso.dirs.brokerHome, iso.dirs.brokerData], {
-    env: iso.env,
-    windowsHide: true,
-    stdio: "ignore",
-  });
-  const killer = setTimeout(() => child.kill("SIGKILL"), 8000);
-  const code = await new Promise((resolve) => child.once("close", resolve));
-  clearTimeout(killer);
+  const { closed } = startHarness(iso, work, `setTimeout(() => { throw new Error("crash-test-boom"); }, 300);`);
+  const code = await closed;
   assert.equal(code, 1);
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
   const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
