@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
 import {
+  blindReviewStatePath,
   defaultOnboardingState,
   detectCli,
   loadOnboardingState,
@@ -13,6 +16,8 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
+const DEFAULT_MAX_DIFF_BYTES = 20 * 1024 * 1024;
+const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SMOKE_PROMPT = "Reply with the exact word: OK";
 const BLIND_REVIEW_PROMPT = [
   "You are an independent blind code reviewer.",
@@ -75,7 +80,7 @@ export function parseArgs(argv) {
   return opts;
 }
 
-export function buildClaudeArgs(prompt, model, effort) {
+export function buildClaudeArgs(prompt, model, effort, mcpConfigPath) {
   return [
     "-p",
     prompt,
@@ -91,7 +96,7 @@ export function buildClaudeArgs(prompt, model, effort) {
     "Glob",
     "--strict-mcp-config",
     "--mcp-config",
-    '{"mcpServers":{}}',
+    mcpConfigPath,
     "--no-session-persistence",
   ];
 }
@@ -103,9 +108,14 @@ export function buildCodexArgs(model) {
     "--sandbox",
     "read-only",
     "-c",
-    'approval_policy="never"',
+    "approval_policy=never",
     "-",
   ];
+}
+
+function maxDiffBytes() {
+  const configured = Number(process.env.IGNIS_REVIEW_MAX_DIFF_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_DIFF_BYTES;
 }
 
 function resolveCommand(backend) {
@@ -144,7 +154,12 @@ function invokeCli(cmd, args, { cwd, input, timeoutMs }) {
     resolvedCmd = detected.path || cmd;
   }
 
-  const resolved = resolvePlatformCommand(resolvedCmd, args, process.env);
+  let resolved;
+  try {
+    resolved = resolvePlatformCommand(resolvedCmd, args, process.env);
+  } catch (err) {
+    return { error: err, status: null, stdout: "", stderr: "" };
+  }
   return spawnSync(resolved.command, resolved.args, {
     cwd,
     input,
@@ -153,6 +168,28 @@ function invokeCli(cmd, args, { cwd, input, timeoutMs }) {
     windowsHide: true,
     ...resolved.options,
   });
+}
+
+function invokeBackend(backend, prompt, model, effort, invokeOptions) {
+  const cmd = resolveCommand(backend);
+  if (backend === "codex") {
+    return invokeCli(cmd, buildCodexArgs(model), invokeOptions);
+  }
+  let configDir = null;
+  try {
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-"));
+    const configPath = path.join(configDir, "mcp-config.json");
+    fs.writeFileSync(configPath, EMPTY_MCP_CONFIG, "utf8");
+    return invokeCli(cmd, buildClaudeArgs(prompt, model, effort, configPath), invokeOptions);
+  } catch (err) {
+    return { error: err, status: null, stdout: "", stderr: "" };
+  } finally {
+    if (configDir) {
+      try {
+        fs.rmSync(configDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
 }
 
 function extractGitDiff(base, cwd) {
@@ -169,7 +206,7 @@ function extractGitDiff(base, cwd) {
     windowsHide: true,
   });
   if (mergeBaseRes.error) {
-    throw new Error(`git merge-base failed: ${mergeBaseRes.error.message}`);
+    return { failure: `git merge-base: ${mergeBaseRes.error.message}` };
   }
   const mergeBase = (mergeBaseRes.stdout || "").trim();
   if (mergeBaseRes.status !== 0 || !mergeBase) {
@@ -177,34 +214,32 @@ function extractGitDiff(base, cwd) {
     throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
   }
 
+  const limit = maxDiffBytes();
   const res = spawnSync("git", ["diff", mergeBase, "--"], {
     cwd,
     encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
+    maxBuffer: limit,
     windowsHide: true,
   });
   if (res.error) {
-    throw new Error(`git diff failed: ${res.error.message}`);
+    const detail =
+      res.error.code === "ENOBUFS" ? `output is larger than ${limit} bytes` : res.error.message;
+    return { failure: `git diff: ${detail}` };
   }
   if (res.status !== 0) {
     throw new Error(`git diff failed (exit ${res.status}): ${(res.stderr || "").trim()}`);
   }
-  return res.stdout || "";
+  return { diff: res.stdout || "" };
 }
 
 function runSmokeTest(opts) {
   if (opts.backend !== "claude" && opts.backend !== "codex") {
     throw new Error("--smoke-test requires --backend claude|codex");
   }
-  const cmd = resolveCommand(opts.backend);
   const effectiveModel = opts.backend === "claude" ? opts.model || "opus" : opts.model || null;
-  const args =
-    opts.backend === "claude"
-      ? buildClaudeArgs(SMOKE_PROMPT, effectiveModel, opts.effort || "high")
-      : buildCodexArgs(effectiveModel);
   const input = opts.backend === "codex" ? SMOKE_PROMPT : "";
 
-  const res = invokeCli(cmd, args, {
+  const res = invokeBackend(opts.backend, SMOKE_PROMPT, effectiveModel, opts.effort || "high", {
     cwd: opts.cwd,
     input,
     timeoutMs: opts.timeoutMs,
@@ -252,16 +287,20 @@ function persistState(cwd, fallbackToNative, reason) {
       fallbackToNative,
       reason,
     });
-  } catch {
-    return;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
   }
 }
 
 function withState(cwd, result, persist = true) {
-  if (persist) {
-    persistState(cwd, result.fallbackToNative === true, result.fallbackToNative ? result.reason || null : null);
-  }
-  return result;
+  if (!persist) return result;
+  const stateError = persistState(
+    cwd,
+    result.fallbackToNative === true,
+    result.fallbackToNative ? result.reason || null : null
+  );
+  return stateError === null ? result : { ...result, stateError };
 }
 
 export function runBlindReview(opts) {
@@ -324,7 +363,20 @@ export function runBlindReview(opts) {
     throw new Error("--base <git-ref> is required");
   }
 
-  const diff = extractGitDiff(opts.base, opts.cwd);
+  const extracted = extractGitDiff(opts.base, opts.cwd);
+  if (extracted.failure) {
+    return withState(
+      opts.cwd,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: `diff extraction failed: ${extracted.failure}`,
+        base: opts.base,
+      },
+      shouldPersist
+    );
+  }
+  const diff = extracted.diff;
   const diffBytes = Buffer.byteLength(diff, "utf8");
 
   if (diffBytes === 0) {
@@ -358,16 +410,11 @@ export function runBlindReview(opts) {
     );
   }
 
-  const cmd = resolveCommand(targetBackend);
   const resolvedModel = targetBackend === "claude" ? effectiveModel || "opus" : effectiveModel || null;
-  const args =
-    targetBackend === "claude"
-      ? buildClaudeArgs(BLIND_REVIEW_PROMPT, resolvedModel, effectiveEffort)
-      : buildCodexArgs(resolvedModel);
   const stdinPayload =
     targetBackend === "claude" ? diff : `${BLIND_REVIEW_PROMPT}\n\n${diff}`;
 
-  const res = invokeCli(cmd, args, {
+  const res = invokeBackend(targetBackend, BLIND_REVIEW_PROMPT, resolvedModel, effectiveEffort, {
     cwd: opts.cwd,
     input: stdinPayload,
     timeoutMs: opts.timeoutMs,
@@ -423,6 +470,12 @@ function main() {
   const result = runBlindReview(opts);
   if (opts.json || opts.smokeTest || result.useNative) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.useNative && result.stateError) {
+      const statePath = blindReviewStatePath(brokerDataDir(brokerHome()));
+      process.stderr.write(
+        `fallback marker could not be recorded at ${statePath}: ${result.stateError}\n`
+      );
+    }
   } else {
     process.stdout.write(result.output || "");
   }
