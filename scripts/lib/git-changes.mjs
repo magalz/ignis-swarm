@@ -141,7 +141,11 @@ export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAUL
       return result;
     }
     const realIndex = path.resolve(root, firstLine(located));
-    if (fs.existsSync(realIndex)) fs.copyFileSync(realIndex, indexCopy);
+    if (fs.existsSync(realIndex)) {
+      const stat = fs.statSync(realIndex);
+      fs.copyFileSync(realIndex, indexCopy);
+      fs.utimesSync(indexCopy, stat.atime, stat.mtime);
+    }
     const indexEnv = { GIT_INDEX_FILE: indexCopy };
     if (entries.length > 0) {
       const added = git(root, ["add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"], {
