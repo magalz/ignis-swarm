@@ -252,3 +252,46 @@ test("ensureDaemon kills an old-version daemon that ignores shutdown and starts 
   assert.equal(await stopDaemon(dataDir), true);
   assert.equal(isPidAlive(fresh.pid), false);
 });
+
+const SLOW_DAEMON = `
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+const [dataDir, marker] = process.argv.slice(2);
+const server = http.createServer((req, res) => {
+  res.setHeader("content-type", "application/json");
+  if (req.url.includes("shutdown")) {
+    res.end("{}");
+    server.close();
+    setTimeout(() => {
+      fs.writeFileSync(marker, "cleaned");
+      process.exit(0);
+    }, 2200);
+    return;
+  }
+  res.end(JSON.stringify({ ok: true, version: "0.0.1" }));
+});
+server.listen(0, "127.0.0.1", () => {
+  const info = { pid: process.pid, port: server.address().port, token: "fake-token", version: "0.0.1" };
+  fs.writeFileSync(path.join(dataDir, "daemon.json"), JSON.stringify(info));
+});
+setInterval(() => {}, 1000);
+`;
+
+test("stopDaemon lets a cooperative daemon finish its slow cleanup before escalating", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "slow-daemon.mjs");
+  const marker = path.join(iso.dirs.root, "cleaned.txt");
+  fs.writeFileSync(script, SLOW_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir, marker], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  await waitFor(() => readDaemonInfo(dataDir), 10_000, "slow daemon.json");
+  assert.equal(await stopDaemon(dataDir), true);
+  assert.equal(fs.readFileSync(marker, "utf8"), "cleaned", "the daemon finished its own cleanup before it was killed");
+  assert.equal(isPidAlive(child.pid), false);
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), false);
+});
