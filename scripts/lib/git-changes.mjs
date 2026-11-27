@@ -89,8 +89,8 @@ export function gitToplevel(cwd, { env, timeoutMs = 10_000 } = {}) {
   return { root: path.resolve(top) };
 }
 
-export function headSha(root, { env, timeoutMs = 10_000 } = {}) {
-  const head = readHead(root, env, timeoutMs);
+export function headSha(root, { env } = {}) {
+  const head = readHead(root, env, 10_000);
   if (head.error) throw new Error(head.error.message);
   return head.unborn ? "unborn" : head.sha;
 }
@@ -173,8 +173,6 @@ export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAUL
     result.diff = diffed.stdout.toString("utf8");
     result.bytes = diffed.stdout.length;
   } catch (err) {
-    result.diff = "";
-    result.bytes = 0;
     result.error = { code: "git_failed", message: err instanceof Error ? err.message : String(err) };
   } finally {
     if (scratch) removeDir(scratch);
