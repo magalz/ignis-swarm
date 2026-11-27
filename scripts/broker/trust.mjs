@@ -41,8 +41,102 @@ function sha256Of(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+function jsonErrorOffset(text) {
+  let i = 0;
+  const fail = () => {
+    throw i;
+  };
+  const ws = () => {
+    while (i < text.length && [" ", "\t", "\n", "\r"].includes(text[i])) i++;
+  };
+  const expect = (ch) => {
+    if (text[i] !== ch) fail();
+    i++;
+  };
+  const string = () => {
+    expect('"');
+    for (;;) {
+      const c = text[i];
+      if (c === undefined || c < " ") fail();
+      i++;
+      if (c === '"') return;
+      if (c !== "\\") continue;
+      const esc = text[i];
+      if (esc === "u") {
+        if (!/^[0-9a-fA-F]{4}$/.test(text.slice(i + 1, i + 5))) fail();
+        i += 5;
+      } else if (esc !== undefined && '"\\/bfnrt'.includes(esc)) {
+        i++;
+      } else {
+        fail();
+      }
+    }
+  };
+  const list = (close, item) => {
+    i++;
+    ws();
+    if (text[i] === close) {
+      i++;
+      return;
+    }
+    for (;;) {
+      ws();
+      item();
+      ws();
+      if (text[i] === ",") i++;
+      else {
+        expect(close);
+        return;
+      }
+    }
+  };
+  const value = () => {
+    ws();
+    const c = text[i];
+    if (c === "{") {
+      list("}", () => {
+        string();
+        ws();
+        expect(":");
+        value();
+      });
+    } else if (c === "[") {
+      list("]", value);
+    } else if (c === '"') {
+      string();
+    } else {
+      const literal = /true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+      literal.lastIndex = i;
+      const m = literal.exec(text);
+      if (!m) fail();
+      i += m[0].length;
+    }
+  };
+  try {
+    value();
+    ws();
+    if (i < text.length) fail();
+  } catch (at) {
+    return typeof at === "number" ? at : -1;
+  }
+  return -1;
+}
+
+export function parseJsonSafely(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const at = jsonErrorOffset(text);
+    if (at < 0) throw new Error("invalid JSON");
+    const before = text.slice(0, at);
+    const line = before.split("\n").length;
+    const column = at - before.lastIndexOf("\n");
+    throw new Error(`invalid JSON at line ${line}, column ${column}`);
+  }
+}
+
 function parseObject(bytes) {
-  const parsed = JSON.parse(bytes.toString("utf8"));
+  const parsed = parseJsonSafely(bytes.toString("utf8"));
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("top level must be a JSON object");
   }
@@ -60,7 +154,7 @@ function loadStore(dataDir, { strict }) {
     return {};
   }
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = parseJsonSafely(raw);
     const configs = parsed?.configs;
     if (!configs || typeof configs !== "object" || Array.isArray(configs)) {
       throw new Error("missing configs object");

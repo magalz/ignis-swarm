@@ -11,9 +11,9 @@ import {
   brokerHome,
   discoverLocalConfig,
   discoverMcpConfig,
-  externalizeSecrets,
   importMcpConfig,
   mergeServersConfig,
+  prepareSecrets,
   redactServerConfig,
   removeServer,
   writeDotenvSecrets,
@@ -312,7 +312,7 @@ function cmdImportMcp({ home, flags }) {
     return;
   }
 
-  const ext = externalizeSecrets(imported.servers);
+  const ext = prepareSecrets(home, imported.servers);
   const wrote = writeDotenvSecrets(home, ext.secrets);
   const merged = mergeServersConfig(home, ext.servers);
   console.log(`Imported ${entries.length} server(s) into ${merged.dest}:`);
@@ -370,7 +370,7 @@ function cmdRegisterMcp({ home, flags, asJson }) {
       }
     }
   }
-  const ext = externalizeSecrets(imported.servers);
+  const ext = prepareSecrets(home, imported.servers);
   const wrote = writeDotenvSecrets(home, ext.secrets);
   const merged = mergeServersConfig(home, ext.servers, {
     perWorkspaceSet,
