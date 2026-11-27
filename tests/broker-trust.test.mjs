@@ -221,3 +221,18 @@ test("a repo under a linked parent folder can be trusted and read", (t) => {
   assert.equal(read.error, undefined);
   assert.equal(read.status, "trusted");
 });
+
+test("a deleted config trusted through a linked parent folder is revoked through the same path", (t) => {
+  const { home, repo } = fixture(t);
+  const holder = mkTemp("ignis-trust-parent-");
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true }));
+  const link = path.join(holder, "link");
+  fs.symlinkSync(repo, link, LINK_TYPE);
+  const viaLink = path.join(link, ".agents", "ignis-broker.json");
+  trustLocalConfig(home, viaLink);
+  fs.rmSync(viaLink);
+  const realFile = path.join(fs.realpathSync.native(repo), ".agents", "ignis-broker.json");
+  assert.equal(normalizeTrustPath(viaLink), normalizeTrustPath(realFile));
+  assert.equal(revokeLocalConfig(home, viaLink), true);
+  assert.deepEqual(listTrustedLocalConfigs(home), []);
+});
