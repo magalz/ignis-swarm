@@ -259,7 +259,7 @@ function scan(script, escapes, stringMode, ticks) {
         frame.parens = Math.max(0, frame.parens - 1);
         endSegment(true);
       }
-    } else if ((ch === "{" || ch === "}") && frame.current === null && (next === "" || BRACE_NEIGHBOUR.test(next))) {
+    } else if ((ch === "{" && next !== "}" && !/[$@]$/.test(frame.current ?? "")) || (ch === "}" && (next === "" || BRACE_NEIGHBOUR.test(next)) && !(frame.current ?? "").includes("{"))) {
       endSegment(true);
     } else if (ch === "&" && next === "&") {
       endSegment(false);
