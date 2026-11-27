@@ -135,10 +135,9 @@ export class Supervisor {
     }
   }
 
-  async _evictKey(key) {
-    const entry = this.pool.get(key);
-    if (!entry) return false;
-    this.pool.delete(key);
+  async _evictEntry(entry) {
+    if (this.pool.get(entry.key) !== entry) return false;
+    this.pool.delete(entry.key);
     await entry.adapter.shutdown();
     return true;
   }
@@ -192,7 +191,7 @@ export class Supervisor {
           tools = await entry.adapter.listTools();
         } catch (err) {
           if (err instanceof BrokerError && err.isRetryable() && defaults.retryOnTransportError) {
-            await this._evictKey(keyInfo.key);
+            if (err.kind !== "timeout") await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, defaults, cwd);
             tools = await entry.adapter.listTools();
@@ -354,10 +353,10 @@ export class Supervisor {
         } catch (err) {
           if (
             err instanceof BrokerError &&
-            err.isRetryable() &&
+            err.kind === "transport" &&
             resolved.defaults.retryOnTransportError
           ) {
-            await this._evictKey(keyInfo.key);
+            await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
             res = await entry.adapter.callTool(req.tool, req.arguments || {});
@@ -396,6 +395,7 @@ export class Supervisor {
         };
       } catch (err) {
         const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+        if (bErr.kind === "timeout") throw bErr;
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
           this._recordFallback({

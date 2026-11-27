@@ -312,6 +312,9 @@ export class McpStdioAdapter {
       const id = this.nextId++;
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
+          if (method !== "initialize") {
+            this._notify("notifications/cancelled", { requestId: id, reason: "timeout" });
+          }
           reject(new BrokerError("timeout", `timeout after ${timeoutMs}ms`));
         }
       }, timeoutMs);
@@ -481,6 +484,9 @@ export class McpHttpAdapter {
       });
     } catch (err) {
       if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+        if (method !== "initialize") {
+          void this._notify("notifications/cancelled", { requestId: id, reason: "timeout" }, 5000);
+        }
         throw new BrokerError("timeout", `timeout after ${timeoutMs}ms`);
       }
       this.alive = false;
