@@ -34,5 +34,5 @@ Assign the **Standard Coding Tier** for everything else:
 
 | Lens | Subagent / Role | Isolation & Tier |
 | :--- | :--- | :--- |
-| **`@blind-edge-hunter`** *(100% blind — ONLY `git diff`, zero plan or tracker)* | Bundled `blind-edge-hunter` subagent (`inheritMcp: false`, read-only tools) | `model: pro` (independent high-reasoning model when available) |
+| **`@blind-edge-hunter`** *(100% blind — ONLY `git diff`, zero plan or tracker)* | Native `blind-edge-hunter` subagent (`inheritMcp: false`, read-only tools) runs **Gemini Pro** (`model: pro`), NOT native Claude Opus. Cross-family reviewers (Claude Opus / Codex Sol) run only via `scripts/run-blind-review.mjs` | Routed by `reviewRouting.strategy`: `antigravity_gemini_only` → native; `antigravity_first` → native, CLI on quota exhaustion; `headless_always` → CLI first (mandatory; `PreToolUse` blocks native `invoke_subagent` until a fresh `fallbackToNative: true` marker). `SessionStart` injects `[ignis-swarm][Phase 4 Review Routing]` with the resolved script path |
 | **`@acceptance-auditor`** *(full access to plan, issue tracker, and ADRs/BDRs)* | Independent acceptance & integration reviewer | `model: pro` / highest reasoning tier |

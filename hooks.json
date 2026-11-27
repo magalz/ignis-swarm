@@ -11,7 +11,7 @@
   "ignis-safety-guard": {
     "PreToolUse": [
       {
-        "matcher": "run_command",
+        "matcher": "run_command|invoke_subagent",
         "hooks": [
           {
             "type": "command",

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { recordBlindReviewState } from "../scripts/broker/onboarding.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
@@ -296,7 +297,8 @@ test("compaction-watch triggers at threshold, enforces +150KB cooldown, resets o
   );
   const firstMsg = firstTrigger.injectSteps[0].systemMessage.systemMessage;
   assert.match(firstMsg, /\[ignis-swarm\]\[Compaction Checkpoint\]/);
-  assert.match(firstMsg, /\/compact Preserve:/);
+  assert.match(firstMsg, /\/compact manually/);
+  assert.match(firstMsg, /Preserve: /);
 
   const cooldownHit = runHook(
     "hooks/compaction-watch.mjs",
@@ -412,3 +414,141 @@ test("stop-gate prevents loops, checks ADR INDEX integrity, and catches banned d
 
   fs.rmSync(repoDir, { recursive: true, force: true });
 });
+
+const RUNNER = path.resolve(PLUGIN_ROOT, "scripts", "run-blind-review.mjs");
+
+function routing(strategy) {
+  return {
+    reviewRouting: {
+      strategy,
+      headlessBackend: strategy === "antigravity_gemini_only" ? null : "claude",
+      headlessModel: null,
+      effort: "high",
+    },
+  };
+}
+
+test("session-start injects Phase 4 routing notice per strategy for interactive sessions only", () => {
+  const projDir = makeTempDir("ignis-route-proj-");
+  const homeDir = makeTempDir("ignis-route-home-");
+  const tempDirs = [projDir, homeDir];
+  try {
+    fs.mkdirSync(path.join(projDir, ".git"));
+    const msg = (strategy, extra = {}, routingOverride = null) => {
+      const dataDir = makeTempDir("ignis-route-data-");
+      tempDirs.push(dataDir);
+      writeCompletedOnboarding(dataDir, routingOverride ? { reviewRouting: routingOverride } : routing(strategy));
+      const out = runHook(
+        "hooks/session-start.mjs",
+        { cwd: projDir, lastUserInput: "hi", ...extra },
+        { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
+      );
+      return out.injectSteps?.[0]?.systemMessage?.systemMessage ?? "";
+    };
+    const hl = msg("headless_always");
+    assert.match(hl, /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always \(backend=claude, model=opus, effort=high\)/);
+    assert.ok(hl.includes(RUNNER));
+    const af = msg("antigravity_first");
+    assert.match(af, /strategy=antigravity_first/);
+    assert.match(af, /--fallback/);
+    assert.doesNotMatch(msg("antigravity_gemini_only"), /Phase 4 Review Routing/);
+    assert.doesNotMatch(msg("headless_always", { isSubagent: true }), /Phase 4 Review Routing/);
+    const unconf = msg("headless_always", {}, {
+      strategy: "headless_always",
+      headlessBackend: null,
+      headlessModel: null,
+      effort: "high",
+    });
+    assert.match(unconf, /\(backend=unconfigured, model=none, effort=high\)/);
+  } finally {
+    for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("pre-tool-use gates blind-edge-hunter under headless_always", () => {
+  const wsRoot = makeTempDir("ignis-gate-ws-");
+  const projDir = path.join(wsRoot, "repo");
+  const subDir = path.join(projDir, "packages", "app");
+  const siblingDir = path.join(wsRoot, "repo-other");
+  const homeDir = makeTempDir("ignis-gate-home-");
+  const tempDirs = [wsRoot, homeDir];
+  try {
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.mkdirSync(siblingDir, { recursive: true });
+    const run = (strategy, args, seed, { cwd = projDir, routingOverride = null } = {}) => {
+      const dataDir = makeTempDir("ignis-gate-data-");
+      tempDirs.push(dataDir);
+      writeCompletedOnboarding(dataDir, routingOverride ? { reviewRouting: routingOverride } : routing(strategy));
+      if (seed) seed(dataDir);
+      return runHook(
+        "hooks/pre-tool-use.mjs",
+        { cwd, toolCall: { name: "invoke_subagent", args } },
+        { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
+      );
+    };
+    const denied = run("headless_always", { TypeName: "blind-edge-hunter" });
+    assert.equal(denied.decision, "deny");
+    assert.ok(denied.reason.includes(`node "${RUNNER}" --base <base-sha> --backend auto`));
+    assert.equal(run("headless_always", { typeName: "blind-edge-hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "", typeName: "blind-edge-hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "Blind-Edge-Hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "ignis-swarm:blind-edge-hunter" }).decision, "deny");
+    assert.equal(run("headless_always", { TypeName: "ignis-swarm/blind-edge-hunter" }).decision, "deny");
+
+    const seeded = run("headless_always", { TypeName: "blind-edge-hunter" }, (d) =>
+      recordBlindReviewState(d, projDir, { fallbackToNative: true })
+    );
+    assert.equal(seeded.decision, "allow");
+
+    const subSeeded = run("headless_always", { TypeName: "blind-edge-hunter" }, (d) =>
+      recordBlindReviewState(d, subDir, { fallbackToNative: true })
+    );
+    assert.equal(subSeeded.decision, "allow");
+
+    const siblingDenied = run(
+      "headless_always",
+      { TypeName: "blind-edge-hunter" },
+      (d) => recordBlindReviewState(d, subDir, { fallbackToNative: true }),
+      { cwd: siblingDir }
+    );
+    assert.equal(siblingDenied.decision, "deny");
+
+    const unconfDenied = run("headless_always", { TypeName: "blind-edge-hunter" }, null, {
+      routingOverride: {
+        strategy: "headless_always",
+        headlessBackend: null,
+        headlessModel: null,
+        effort: "high",
+      },
+    });
+    assert.equal(unconfDenied.decision, "deny");
+    assert.match(unconfDenied.reason, /\(backend=unconfigured, model=none\)/);
+
+    assert.equal(run("antigravity_first", { TypeName: "blind-edge-hunter" }).decision, "allow");
+    assert.equal(run("antigravity_gemini_only", { TypeName: "blind-edge-hunter" }).decision, "allow");
+    assert.equal(run("headless_always", { TypeName: "research" }).decision, "allow");
+  } finally {
+    for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("compaction-watch emits payload-only Preserve block without /compact in copyable text", () => {
+  const dataDir = makeTempDir("ignis-compact-payload-");
+  try {
+    writeCompletedOnboarding(dataDir, { compaction: { transcriptThresholdKb: 100 } });
+    const transcriptPath = path.join(dataDir, "t.jsonl");
+    fs.writeFileSync(transcriptPath, "x".repeat(110 * 1024));
+    const out = runHook(
+      "hooks/compaction-watch.mjs",
+      { conversationId: "conv-payload", transcriptPath },
+      { IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir }
+    );
+    const m = out.injectSteps[0].systemMessage.systemMessage;
+    assert.match(m, /Preserve: /);
+    assert.match(m, /slash menu/);
+    assert.doesNotMatch(m, /`\/compact Preserve:/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+

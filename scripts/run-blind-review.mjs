@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
-import { defaultOnboardingState, detectCli, loadOnboardingState } from "./broker/onboarding.mjs";
+import {
+  defaultOnboardingState,
+  detectCli,
+  loadOnboardingState,
+  recordBlindReviewState,
+} from "./broker/onboarding.mjs";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
@@ -16,6 +21,8 @@ const BLIND_REVIEW_PROMPT = [
   "Do not assume external context or invent requirements not visible in the diff.",
   "Report concrete findings with file paths and line references, or state clearly if no issues are found.",
 ].join(" ");
+
+const VALID_BACKENDS = new Set(["auto", "native", "claude", "codex"]);
 
 const VALUE_FLAG_MAP = {
   "--base": "base",
@@ -55,6 +62,10 @@ export function parseArgs(argv) {
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
+  }
+
+  if (!VALID_BACKENDS.has(opts.backend)) {
+    throw new Error(`unsupported backend: ${opts.backend}`);
   }
 
   if (opts.timeoutMs === null || Number.isNaN(opts.timeoutMs) || opts.timeoutMs <= 0) {
@@ -145,7 +156,28 @@ function invokeCli(cmd, args, { cwd, input, timeoutMs }) {
 }
 
 function extractGitDiff(base, cwd) {
-  const res = spawnSync("git", ["diff", `${base}...HEAD`], {
+  const trimmedBase = typeof base === "string" ? base.trim() : "";
+  if (!trimmedBase) {
+    throw new Error("--base <git-ref> is required");
+  }
+  if (trimmedBase.startsWith("-")) {
+    throw new Error("--base must not start with '-'");
+  }
+  const mergeBaseRes = spawnSync("git", ["merge-base", trimmedBase, "HEAD"], {
+    cwd,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (mergeBaseRes.error) {
+    throw new Error(`git merge-base failed: ${mergeBaseRes.error.message}`);
+  }
+  const mergeBase = (mergeBaseRes.stdout || "").trim();
+  if (mergeBaseRes.status !== 0 || !mergeBase) {
+    const detail = (mergeBaseRes.stderr || "").trim() || `exit ${mergeBaseRes.status}`;
+    throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
+  }
+
+  const res = spawnSync("git", ["diff", mergeBase, "--"], {
     cwd,
     encoding: "utf8",
     maxBuffer: 20 * 1024 * 1024,
@@ -201,7 +233,25 @@ function runSmokeTest(opts) {
   };
 }
 
+function persistState(cwd, fallbackToNative, reason) {
+  try {
+    recordBlindReviewState(brokerDataDir(brokerHome()), cwd, { fallbackToNative, reason });
+  } catch {
+    return;
+  }
+}
+
+function withState(cwd, result, persist = true) {
+  if (persist) {
+    persistState(cwd, result.fallbackToNative === true, result.fallbackToNative ? result.reason || null : null);
+  }
+  return result;
+}
+
 export function runBlindReview(opts) {
+  if (!VALID_BACKENDS.has(opts.backend)) {
+    throw new Error(`unsupported backend: ${opts.backend}`);
+  }
   if (opts.smokeTest) {
     return runSmokeTest(opts);
   }
@@ -213,6 +263,7 @@ export function runBlindReview(opts) {
     onboarding = defaultOnboardingState();
   }
   const routing = onboarding.reviewRouting || {};
+  const shouldPersist = opts.backend === "auto" || opts.backend === routing.headlessBackend;
 
   let targetBackend = opts.backend;
   let effectiveModel = opts.model;
@@ -253,7 +304,7 @@ export function runBlindReview(opts) {
     }
   }
 
-  if (!opts.base) {
+  if (!opts.base || !String(opts.base).trim()) {
     throw new Error("--base <git-ref> is required");
   }
 
@@ -261,26 +312,34 @@ export function runBlindReview(opts) {
   const diffBytes = Buffer.byteLength(diff, "utf8");
 
   if (diffBytes === 0) {
-    return {
-      useNative: false,
-      fallbackToNative: false,
-      backend: targetBackend || null,
-      model: effectiveModel || null,
-      base: opts.base,
-      diffBytes: 0,
-      output: "No changes found in diff.\n",
-      stderr: "",
-    };
+    return withState(
+      opts.cwd,
+      {
+        useNative: false,
+        fallbackToNative: false,
+        backend: targetBackend || null,
+        model: effectiveModel || null,
+        base: opts.base,
+        diffBytes: 0,
+        output: "No changes found in diff.\n",
+        stderr: "",
+      },
+      shouldPersist
+    );
   }
 
   if (targetBackend !== "claude" && targetBackend !== "codex") {
-    return {
-      useNative: true,
-      fallbackToNative: true,
-      reason: `invalid or unconfigured headless backend: ${String(targetBackend)}`,
-      base: opts.base,
-      diffBytes,
-    };
+    return withState(
+      opts.cwd,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: `invalid or unconfigured headless backend: ${String(targetBackend)}`,
+        base: opts.base,
+        diffBytes,
+      },
+      shouldPersist
+    );
   }
 
   const cmd = resolveCommand(targetBackend);
@@ -299,35 +358,48 @@ export function runBlindReview(opts) {
   });
 
   if (res.error) {
-    return {
-      useNative: true,
-      fallbackToNative: true,
-      reason: res.error.message,
-      base: opts.base,
-      diffBytes,
-    };
+    return withState(
+      opts.cwd,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: res.error.message,
+        base: opts.base,
+        diffBytes,
+      },
+      shouldPersist
+    );
   }
 
   if (res.status !== 0) {
-    return {
-      useNative: true,
-      fallbackToNative: true,
-      reason: `${targetBackend} exited with status ${res.status}: ${(res.stderr || "").trim()}`,
-      base: opts.base,
-      diffBytes,
-    };
+    const detail = ((res.stderr || "").trim() || (res.stdout || "").trim()).slice(0, 400);
+    return withState(
+      opts.cwd,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: `${targetBackend} exited with status ${res.status}: ${detail}`,
+        base: opts.base,
+        diffBytes,
+      },
+      shouldPersist
+    );
   }
 
-  return {
-    useNative: false,
-    fallbackToNative: false,
-    backend: targetBackend,
-    model: resolvedModel,
-    base: opts.base,
-    diffBytes,
-    output: res.stdout || "",
-    stderr: res.stderr || "",
-  };
+  return withState(
+    opts.cwd,
+    {
+      useNative: false,
+      fallbackToNative: false,
+      backend: targetBackend,
+      model: resolvedModel,
+      base: opts.base,
+      diffBytes,
+      output: res.stdout || "",
+      stderr: res.stderr || "",
+    },
+    shouldPersist
+  );
 }
 
 function main() {

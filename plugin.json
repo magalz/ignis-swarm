@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "ignis-swarm",
   "displayName": "Ignis Swarm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Contract-driven /swarm workflow with atomic wave planning, BDD+TDD verification, ADR/BDR audit trails, blind diff review, and a resilient MCP broker.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

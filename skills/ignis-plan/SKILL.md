@@ -38,14 +38,13 @@ Each **nuclear task** must represent 1 cohesive responsibility (1–3 files, 0 i
 ## Step 5: Sync & Mandatory 2-Step Post-`/plan` Handoff
 After the user approves the plan:
 1. **Opt-in tracker sync:** Only if `onboarding.json` has `tracker.kind !== "none"` (see `ignis-audit-docs/references/tracker-profiles.md`), create/update issues and checklists so every nuclear task is tracked.
-2. **Explain the manual handoff clearly:** Tell the user explicitly that Antigravity requires them to trigger `/compact` and `/swarm` directly (agents cannot auto-launch native `/swarm`). Always emit both steps verbatim, with **Step 1 pre-filled with the exact live slice state (never `<placeholder>` text)**:
+2. **Explain the manual handoff clearly:** Antigravity requires the user to trigger `/compact` and `/swarm` themselves (agents cannot auto-launch native `/swarm`), and a pasted code block starting with `/compact` or `/swarm` is sent as plain text and does NOT trigger the command. Instruct in prose, and keep fenced blocks to the **payload only**, pre-filled with the exact live slice state (never `<placeholder>` text):
 
-   - **Step 1 (Recommended — Compact context first):**
-     Emit a **complete, pre-filled** `/compact Preserve: ...` command containing the real issue IDs (if any), approved Wave 0..N task list and file ownership, frozen interface contracts, BDD criteria per task, and `[ADR]`/`[BDR]` flags.
+   - **Step 1 (Compact context first):** Tell the user: "Run `/compact` (via the slash menu) with the following text in the same message:"
      ```text
-     /compact Preserve: <fill with exact issue IDs, approved Wave 0..N tasks & file ownership, frozen interface contracts, BDD criteria, and [ADR]/[BDR] flags — never emit placeholders>.
+     Preserve: <exact issue IDs, approved Wave 0..N tasks & file ownership, frozen interface contracts, BDD criteria, and [ADR]/[BDR] flags — never emit placeholders>.
      ```
-   - **Step 2 (Required to start Swarm):**
+   - **Step 2 (Required to start Swarm):** Tell the user: "Run `/swarm` (via the slash menu) with the following text in the same message:"
      ```text
-     /swarm Execute the approved plan starting at Wave 0/1 using ignis-swarm.
+     Execute the approved plan starting at Wave 0/1 using ignis-swarm.
      ```

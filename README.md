@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/magalz/ignis-swarm/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-orange" alt="Release v1.0.0" /></a>
+  <a href="https://github.com/magalz/ignis-swarm/releases/tag/v1.0.1"><img src="https://img.shields.io/badge/release-v1.0.1-orange" alt="Release v1.0.1" /></a>
   <a href="https://codecov.io/gh/magalz/ignis-swarm"><img src="https://codecov.io/gh/magalz/ignis-swarm/graph/badge.svg" alt="Codecov Coverage" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/dependencies-zero-blue" alt="Zero Dependencies" />
@@ -55,7 +55,7 @@ agy plugin install ./ignis-swarm
 agy plugin list
 ```
 
-You should see `ignis-swarm (enabled, 1.0.0)` with **10 skills, 1 agent, 1 rule, 1 MCP server, and 5 hooks**.
+You should see `ignis-swarm (enabled, 1.0.1)` with **10 skills, 1 agent, 1 rule, 1 MCP server, and 5 hooks**.
 
 ---
 
@@ -68,10 +68,10 @@ The wizard probes your environment (with secrets redacted) and configures 4 area
 1. **Managed MCP Servers** — Selectively register discovered MCP servers into `ignis-broker` without modifying your existing `~/.gemini/config/mcp_config.json`.
 2. **Opt-In Issue Trackers** — Choose `None` (local repo only), **Linear**, **ItsAPlan**, and/or **GitHub Issues** for Phase 0 discovery and Phase 3 ADR/BDR mirroring.
 3. **Opt-In Memtrace** — Optionally enable Memtrace code-intelligence health checks and broker integration (disabled by default).
-4. **Phase 4 Blind Review Routing (`reviewRouting`)** — Pick how diff-only blind audits run:
+4. **Phase 4 Blind Review Routing (`reviewRouting`)** — Before every question the wizard briefs you neutrally (what it is, what it does, why/trade-offs; no default labels). Q4 asks whether to use another model family (Claude Code CLI or Codex CLI) as blind reviewer; "No" saves `antigravity_gemini_only`. If "Yes", Q5 picks routing priority and Q6 picks the CLI backend (`claude` Opus / `codex` Sol) with an optional smoke test:
    - `antigravity_gemini_only` — Uses only the bundled Antigravity `blind-edge-hunter` subagent (zero external CLIs required).
-   - `antigravity_first` — Uses `blind-edge-hunter` first, falling back to a headless external CLI (`claude` Opus or `codex` Sol) if native quota runs out.
-   - `headless_always` — Runs `scripts/run-blind-review.mjs` directly, falling back to native only if the external CLI fails.
+   - `antigravity_first` — Uses `blind-edge-hunter` (Gemini Pro, not Claude Opus) first, falling back to a headless external CLI (`claude` Opus or `codex` Sol) if native quota runs out.
+   - `headless_always` — Runs `scripts/run-blind-review.mjs` directly, falling back to native only if the external CLI fails (`fallbackToNative: true`). `PreToolUse` (`run_command|invoke_subagent`) blocks premature native `blind-edge-hunter` calls, and `SessionStart` injects `[ignis-swarm][Phase 4 Review Routing]` with the resolved script path.
 
 > Deep dive into `onboarding.json` schema, CLI probing, and smoke tests: **[Getting Started & Onboarding](https://github.com/magalz/ignis-swarm/wiki/Getting-Started-and-Onboarding)**.
 
@@ -86,10 +86,12 @@ The wizard probes your environment (with secrets redacted) and configures 4 area
 | Step | Command you type | What happens |
 | :--- | :--- | :--- |
 | **1. Plan** | `/plan <feature or slice goal>` | Loads `ignis-plan` (Phase 0): targeted discovery, YAGNI gate, frozen contracts, atomic waves, BDD criteria, and `[ADR]`/`[BDR]` flags. |
-| **2. Compact** | `/compact Preserve: ...` *(pre-filled by Phase 0)* | Compacts the conversation cleanly while keeping exact wave tasks, contracts, and file ownership. |
-| **3. Execute** | `/swarm Execute the approved plan starting at Wave 0/1 using ignis-swarm.` | Activates Antigravity's native Swarm runtime and loads `ignis-swarm` to dispatch waves, verify each task, write ADRs/BDRs, and run the 3-lens final audit. |
+| **2. Compact** | Run `/compact` via the slash menu with the pre-filled `Preserve: ...` payload *(from Phase 0)* | Compacts the conversation cleanly while keeping exact wave tasks, contracts, and file ownership. |
+| **3. Execute** | Run `/swarm` via the slash menu with payload `Execute the approved plan starting at Wave 0/1 using ignis-swarm.` | Activates Antigravity's native Swarm runtime and loads `ignis-swarm` to dispatch waves, verify each task, write ADRs/BDRs, and run the 3-lens final audit. |
 
 > [!IMPORTANT]
+> **Handoffs are payload-only:** pasting text that starts with `/compact` or `/swarm` sends plain text and does not trigger the command; pick the command from the slash menu and paste only the payload.
+>
 > **Always use native `/swarm` (not `/ignis-swarm` alone) to run a swarm.**
 > Antigravity only activates the native Swarm message board and `swarm` tool when you invoke `/swarm` explicitly. Once `/swarm` starts, `rules/AGENTS.md` automatically loads the `ignis-swarm` coordinator playbook.
 
@@ -125,7 +127,7 @@ These skills trigger automatically during `/plan` and `/swarm`, and also work st
 ```mermaid
 flowchart LR
     P0["Phase 0: /plan\nDiscovery · YAGNI\nFrozen Contracts · Waves"]
-    HO["2-Step Handoff\n/compact Preserve: ...\n/swarm ..."]
+    HO["2-Step Handoff\n/compact + payload\n/swarm + payload"]
     P12["Phases 1-2: /swarm Waves\n5-Field Nuclear Briefs\nBDD+TDD · @verifier"]
     P3["Phase 3: @doc-auditor\n1-File ADRs/BDRs\nINDEX.md · Opt-In Sync"]
     P4["Phase 4: 3-Lens Audit\nblind-edge-hunter (diff-only)\n@acceptance-auditor"]
@@ -158,8 +160,8 @@ node scripts/ignis-broker.mjs discover-mcp
 ### Automatic Lifecycle Hooks (`hooks.json`)
 | Hook | What it does automatically |
 | :--- | :--- |
-| **`SessionStart`** | Prompts first-run onboarding (main session only), detects `docs/{adr,bdr}/INDEX.md`, warns on local broker config errors/fallbacks, and checks opt-in Memtrace health. |
-| **`PreToolUse`** | Blocks `--no-verify`, force-push to `main`/`master`, `git reset --hard`, and destructive root deletions; asks confirmation before other force pushes or `git clean -f`. |
+| **`SessionStart`** | Prompts first-run onboarding and injects `[ignis-swarm][Phase 4 Review Routing]` notice for `headless_always` / `antigravity_first` (main session only), detects `docs/{adr,bdr}/INDEX.md`, warns on local broker config errors/fallbacks, and checks opt-in Memtrace health. |
+| **`PreToolUse`** (`run_command\|invoke_subagent`) | Enforces Phase 4 routing (blocks premature `blind-edge-hunter` under `headless_always`). Also blocks `--no-verify`, force-push to `main`/`master`, `git reset --hard`, and destructive root deletions; asks confirmation before other force pushes or `git clean -f`. |
 | **`PostToolUse`** | Logs lightweight per-conversation JSONL audit entries (`~/.ignis-broker/audit/<id>.jsonl`) and tags test executions. |
 | **`PostInvocation`** | Deterministic `compaction-watch.mjs` monitors active transcript size (default `550 KB`) and prompts a pre-filled `/compact` checkpoint. |
 | **`Stop`** | Blocks finishing if any `ADR-NNN`/`BDR-NNN` file is missing from `INDEX.md` or if added git diff lines contain `.only`, `.skip`, `#[ignore]`, `t.Skip`, `@ts-ignore`, `eslint-disable`, bare `// nolint`, or new `TODO`/`FIXME`. |
@@ -173,7 +175,7 @@ Detailed guides, schemas, CLI flags, environment variables, and troubleshooting 
 | Wiki Page | What you'll find |
 | :--- | :--- |
 | **[Home](https://github.com/magalz/ignis-swarm/wiki)** | Documentation map by role and task |
-| **[Getting Started & Onboarding](https://github.com/magalz/ignis-swarm/wiki/Getting-Started-and-Onboarding)** | Install methods, Q1–Q5 wizard walkthrough, `onboarding.json` schema, CLI management |
+| **[Getting Started & Onboarding](https://github.com/magalz/ignis-swarm/wiki/Getting-Started-and-Onboarding)** | Install methods, Q1–Q4 + Q5–Q6 wizard walkthrough, `onboarding.json` schema, CLI management |
 | **[Commands & Skills Reference](https://github.com/magalz/ignis-swarm/wiki/Commands-and-Skills-Reference)** | All 10 skills, native `/plan` & `/swarm` rules, triggers, and standalone examples |
 | **[Five-Phase Swarm Workflow](https://github.com/magalz/ignis-swarm/wiki/Five-Phase-Swarm-Workflow)** | Wave anatomy, 5-field nuclear brief, model routing tiers, compaction checkpoints |
 | **[TDD/BDD & Audit Documentation](https://github.com/magalz/ignis-swarm/wiki/TDD-BDD-and-Audit-Documentation)** | BDD+TDD loop, anti-Goodhart rules, mutation testing, ADR/BDR templates, tracker profiles |

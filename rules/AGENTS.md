@@ -25,7 +25,7 @@
 - `/plan` & `/swarm` Coordinator: High-reasoning tier
 - Coding Workers (default): Fast/low-effort coding tier; Mechanical Workers (allowlist only): Lightweight tier
 - Per-Task `@verifier` & `@doc-auditor`: Balanced verification tier
-- Final `@acceptance-auditor` & `@blind-edge-hunter`: Independent Pro / high-reasoning review tier (see `skills/ignis-swarm/references/model-routing.md`)
+- Final `@acceptance-auditor`: Independent Pro / high-reasoning review tier; `@blind-edge-hunter`: native subagent runs Gemini Pro (not Claude Opus), routed per `reviewRouting.strategy` — under `headless_always`, run `scripts/run-blind-review.mjs` first (`PreToolUse` blocks premature native invocation; see `[ignis-swarm][Phase 4 Review Routing]` from `SessionStart`) (see `skills/ignis-swarm/references/model-routing.md`)
 
 ## 5. Triggers → On-Demand Skills
 - First-run setup / reconfiguring MCP broker or opt-in integrations → read `ignis-onboarding`
@@ -39,7 +39,7 @@
 - Parallel read-only investigation → read `ignis-investigate`
 - Performance measurement or speedup claim → read `ignis-benchmark`
 
-> **Plan → Swarm Handoff:** After an approved `/plan`, always present the 2-step handoff: **Step 1:** `/compact Preserve: ...`; **Step 2:** user must explicitly run `/swarm ...` (agents cannot launch native `/swarm` automatically).
+> **Plan → Swarm Handoff:** After an approved `/plan`, present a 2-step handoff in prose: **Step 1:** tell the user to run `/compact` (via the slash menu) with a pre-filled `Preserve: ...` payload in the same message; **Step 2:** tell the user to run `/swarm` (via the slash menu) with `Execute the approved plan...` in the same message. Fenced blocks hold the payload only — never start a block with `/compact` or `/swarm` (pasted, it is plain text and does not trigger the command). Agents cannot launch native `/swarm` automatically.
 
 ## 6. Board Report Contract
 Every worker/verifier report on `/swarm` must end with:

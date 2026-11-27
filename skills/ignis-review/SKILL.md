@@ -21,20 +21,22 @@ Run **once** after all waves and `@doc-auditor` (Phase 3) finish. Combines 3 non
 ### Reviewer A — `@blind-edge-hunter` (Blind Hunting + Edge Case Hunting)
 Routes according to the user's `reviewRouting.strategy` in `~/.ignis-broker/onboarding.json` (set via `/ignis-onboarding`):
 
-- **`antigravity_gemini_only`:** Invoke the bundled **`blind-edge-hunter`** subagent directly (`subagent: true`, `mainAgent: false`, `model: pro`, `inheritMcp: false`, read-only tools).
-- **`antigravity_first`:** Invoke the bundled Antigravity native `blind-edge-hunter` subagent first; if native quota is exhausted, run the headless fallback:
+`SessionStart` injects `[ignis-swarm][Phase 4 Review Routing]` on interactive sessions for `headless_always` and `antigravity_first`, with the exact resolved `scripts/run-blind-review.mjs` path. Native `blind-edge-hunter` (`model: pro`) runs **Gemini Pro**, not native Claude Opus.
+
+- **`antigravity_gemini_only`:** Invoke the bundled **`blind-edge-hunter`** subagent (Gemini Pro; `subagent: true`, `mainAgent: false`, `model: pro`, `inheritMcp: false`, read-only tools).
+- **`antigravity_first`:** Invoke the native `blind-edge-hunter` subagent (Gemini Pro) first; if native quota is exhausted, run the headless fallback:
   ```bash
   node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto --fallback
   ```
   (`claude` Opus or `codex` Sol).
-- **`headless_always`:** Run the headless reviewer directly:
+- **`headless_always`:** Running the headless reviewer is mandatory BEFORE native `blind-edge-hunter`:
   ```bash
   node <plugin-root>/scripts/run-blind-review.mjs --base <base-sha> --backend auto
   ```
-  (`claude` Opus or `codex` Sol), falling back to the native `blind-edge-hunter` subagent **only** if `{ fallbackToNative: true }` is returned.
+  (`claude` Opus or `codex` Sol). `PreToolUse` deterministically blocks premature `invoke_subagent(TypeName: "blind-edge-hunter")` calls until `run-blind-review.mjs` records a fresh `fallbackToNative: true` marker; only then fall back to native Gemini Pro.
 
 In all routing modes:
-1. Pass **only** the diff range (`<base-sha>...HEAD`) and repository path — **never** include implementation plan files, issue tracker notes, or author rationales.
+1. Pass **only** the diff scope and repository path — **never** include implementation plan files, issue tracker notes, or author rationales. `run-blind-review.mjs --base <base-sha>` diffs from the merge-base of `<base-sha>` through the current working tree (committed and uncommitted tracked changes); for native `blind-edge-hunter`, pass the same scope (`<base-sha>...HEAD` plus any uncommitted tracked changes).
 2. Require concrete proof (`file:line` + trace or read-only command output) for every `HIGH`/`MEDIUM` finding and post the verbatim verdict (`PASS | ISSUES`) onto the `/swarm` board.
 
 ### Reviewer B — `@acceptance-auditor` (Acceptance + Integration + Audit Compliance)

@@ -313,3 +313,100 @@ export function probeEnvironment(home, dataDir, fromMcpPath, codexHome) {
     codex: probeCodexModels(codexHome),
   };
 }
+
+export const BLIND_REVIEW_FALLBACK_TTL_MS = 10 * 60 * 1000;
+
+export function blindReviewStatePath(dataDir) {
+  return path.join(dataDir, "blind-review-state.json");
+}
+
+export function normalizeWorkspaceKey(dir) {
+  const resolved = path.resolve(dir);
+  let canonical = resolved;
+  try {
+    canonical = fs.realpathSync.native
+      ? fs.realpathSync.native(resolved)
+      : fs.realpathSync(resolved);
+  } catch {
+    canonical = resolved;
+  }
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+function isSameOrSubpath(a, b) {
+  if (a === b) return true;
+  const prefixA = a.endsWith(path.sep) ? a : `${a}${path.sep}`;
+  if (b.startsWith(prefixA)) return true;
+  const prefixB = b.endsWith(path.sep) ? b : `${b}${path.sep}`;
+  return a.startsWith(prefixB);
+}
+
+function readBlindReviewState(dataDir) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(blindReviewStatePath(dataDir), "utf8"));
+    if (raw && typeof raw === "object" && raw.workspaces && typeof raw.workspaces === "object") {
+      return raw;
+    }
+  } catch {
+    return { workspaces: {} };
+  }
+  return { workspaces: {} };
+}
+
+export function recordBlindReviewState(
+  dataDir,
+  cwd,
+  { fallbackToNative, reason = null, nowMs = Date.now() },
+) {
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const existing = readBlindReviewState(dataDir);
+  const workspaces = {};
+  for (const [key, entry] of Object.entries(existing.workspaces)) {
+    const ts = entry?.timestampMs;
+    if (Number.isFinite(ts) && nowMs - ts <= BLIND_REVIEW_FALLBACK_TTL_MS) {
+      workspaces[key] = entry;
+    }
+  }
+  workspaces[normalizeWorkspaceKey(cwd)] = {
+    fallbackToNative: Boolean(fallbackToNative),
+    timestampMs: nowMs,
+    reason,
+  };
+  const state = { workspaces };
+  const target = blindReviewStatePath(dataDir);
+  const tmp = `${target}.${process.pid}.tmp`;
+  const payload = `${JSON.stringify(state, null, 2)}\n`;
+  try {
+    fs.writeFileSync(tmp, payload, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {}
+    if (err && (err.code === "EPERM" || err.code === "EACCES")) {
+      fs.writeFileSync(target, payload, { encoding: "utf8", mode: 0o600 });
+    } else {
+      throw err;
+    }
+  }
+  return state;
+}
+
+export function hasFreshNativeFallback(dataDir, dirs, nowMs = Date.now()) {
+  const { workspaces } = readBlindReviewState(dataDir);
+  const freshKeys = [];
+  for (const [storedKey, entry] of Object.entries(workspaces)) {
+    if (!storedKey || !storedKey.trim()) continue;
+    if (!entry || entry.fallbackToNative !== true) continue;
+    if (!Number.isFinite(entry.timestampMs)) continue;
+    const delta = nowMs - entry.timestampMs;
+    if (!(delta >= 0 && delta <= BLIND_REVIEW_FALLBACK_TTL_MS)) continue;
+    freshKeys.push(normalizeWorkspaceKey(storedKey));
+  }
+  if (freshKeys.length === 0) return false;
+  return (dirs ?? []).some((dir) => {
+    if (typeof dir !== "string" || !dir.trim()) return false;
+    const normDir = normalizeWorkspaceKey(dir);
+    return freshKeys.some((storedKey) => isSameOrSubpath(normDir, storedKey));
+  });
+}
