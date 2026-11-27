@@ -16,8 +16,16 @@ export function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function ensurePrivateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  try {
+    if (fs.statSync(dir).mode & 0o077) fs.chmodSync(dir, 0o700);
+  } catch {}
+}
+
 export function writeDaemonInfoAtomic(dataDir, info) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDir(dataDir);
   const target = daemonInfoPath(dataDir);
   const tmp = path.join(dataDir, `daemon.${process.pid}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -82,7 +90,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function isPidAlive(pid) {
+export function isPidAlive(pid) {
   if (!pid || typeof pid !== "number") return false;
   try {
     process.kill(pid, 0);
@@ -142,7 +150,7 @@ export async function stopDaemon(dataDir) {
   await requestShutdown(info);
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline) {
-    if (!(await probeHealth(info))) break;
+    if (!(await probeHealth(info)) && !isPidAlive(info.pid)) break;
     await sleep(40);
   }
   try {
@@ -169,6 +177,8 @@ export function isDaemonVersionAcceptable(daemonVersion, clientVersion = BROKER_
 }
 
 export async function ensureDaemon(home, dataDir, entryScript) {
+  home = path.resolve(home);
+  dataDir = path.resolve(dataDir);
   const existing = readDaemonInfo(dataDir);
   if (existing) {
     const h = await probeHealth(existing);
@@ -177,7 +187,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
     }
   }
 
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDir(dataDir);
   const release = await acquireLock(daemonLockPath(dataDir));
 
   try {
@@ -201,6 +211,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
     }
 
     const child = spawn(process.execPath, [entryScript, "daemon"], {
+      cwd: dataDir,
       detached: true,
       stdio: "ignore",
       windowsHide: true,
