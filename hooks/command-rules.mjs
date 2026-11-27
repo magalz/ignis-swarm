@@ -9,17 +9,25 @@ const CLEAN_FORCE_REASON = "ignis-swarm requires explicit user confirmation befo
 const NESTING_REASON = "ignis-swarm requires explicit user confirmation before running deeply nested shell wrappers.";
 const WORK_REASON = "ignis-swarm requires explicit user confirmation before analysing an oversized command line.";
 
-const DESTRUCTIVE_RULES = [
-  {
-    pattern:
-      /\brm\s+(?:-[a-z]*(?:r[a-z]*f|f[a-z]*r)[a-z]*|(?:-r|-R|--recursive)\s+(?:-f|--force)|(?:-f|--force)\s+(?:-r|-R|--recursive))\s+(\/|\/\*|\*|~|[A-Za-z]:[\\/]?)(?=\s*(?:$|;|&&|\|\||\|))/i,
-    reason: "Blocked by ignis-swarm: destructive root/wildcard deletion command.",
-  },
-  {
-    pattern:
-      /\bRemove-Item\b(?:(?=[^\n]*\s-Recurse\b)(?=[^\n]*\s-Force\b)[^\n]*\s([A-Za-z]:\\?|\/|\*)(?=\s*(?:$|;|&&|\|\||\|))|\s+(?:-Path\s+)?([A-Za-z]:\\?|\/)(?=\s+-(?:Recurse|Force)\b))/i,
-    reason: "Blocked by ignis-swarm: destructive recursive root deletion command.",
-  },
+const DELETE_ROOT_REASON = "Blocked by ignis-swarm: destructive root/home deletion command.";
+const TRUST_REASON = "ignis-swarm requires explicit user confirmation before trusting a repository-local broker config.";
+
+const ROOT_TARGET = /^(?:[A-Za-z]:[\\/]*(?:\*(?:\.\*)?)?|[\\/]+\*?)$/;
+const HOME_TARGET = /^(?:~|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME))(?:[\\/]+\*?)?$/i;
+const CMD_TARGET = /^(?:[A-Za-z]:|%USERPROFILE%)[\\/]*(?:\*(?:\.\*)?)?$/i;
+const RM_CLUSTER = /^[dfiIPrRvWx]*$/;
+const CMD_SWITCHES = /^(?:\/[a-z?])+$/i;
+const POWERSHELL_PARAMETER = /^-([A-Za-z]+)(?::(.*))?$/s;
+const POWERSHELL_VALUE_PARAMETERS = [
+  ["-path", 2, true],
+  ["-literalpath", 2, true],
+  ["-lp", 3, true],
+  ["-pspath", 3, true],
+  ["-include", 2, false],
+  ["-exclude", 2, false],
+  ["-filter", 3, false],
+  ["-credential", 3, false],
+  ["-stream", 2, false],
 ];
 
 const HOOKED_SUBCOMMANDS = new Set(["commit", "push", "merge", "rebase", "cherry-pick"]);
@@ -57,6 +65,8 @@ const PREFIX_WORDS = new Map([
 const PREFIX_POSITIONALS = new Map([["timeout", 1]]);
 const SH_FAMILY = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 const POWERSHELL = new Set(["pwsh", "powershell"]);
+const POWERSHELL_REMOVE = new Set(["remove-item", "ri", "rm", "del", "erase", "rmdir", "rd"]);
+const CMD_DELETE = new Set(["del", "erase", "rd", "rmdir"]);
 const EXPRESSION_COMMANDS = new Set(["iex", "invoke-expression"]);
 const EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 const EXEC_END = new Set([";", "+", "\\"]);
@@ -82,10 +92,10 @@ function strongest(current, candidate) {
   return (RANK[candidate?.decision] ?? 0) > (RANK[current?.decision] ?? 0) ? candidate : current;
 }
 
-function makeWord(text, quoted) {
+function makeWord(text, quoted, partial) {
   const cmp = text.replace(/\\/g, "");
   const names = [text, cmp].map((value) => value.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, ""));
-  return { text, cmp, names, quoted };
+  return { text, cmp, names, quoted, partial };
 }
 
 function newFrame(kind, string) {
@@ -95,6 +105,7 @@ function newFrame(kind, string) {
     arith: false,
     quote: string ? '"' : null,
     quoted: false,
+    opened: false,
     current: string ? "" : null,
     hereString: false,
     afterPipe: false,
@@ -148,15 +159,16 @@ function scan(script, escapes, stringMode, ticks) {
   let frame = newFrame("top", stringMode);
   let lines = null;
 
-  const endWord = () => {
+  const endWord = (cut = false) => {
     if (frame.current !== null) {
-      const word = makeWord(frame.current, frame.quoted);
+      const word = makeWord(frame.current, frame.quoted, cut || frame.opened);
       if (frame.hereString) frame.strings.push(word);
       else frame.words.push(word);
       frame.hereString = false;
     }
     frame.current = null;
     frame.quoted = false;
+    frame.opened = false;
   };
   const endSegment = (keepPipe) => {
     endWord();
@@ -173,6 +185,7 @@ function scan(script, escapes, stringMode, ticks) {
   };
   const open = (kind) => {
     frame.current ??= "";
+    frame.opened = true;
     frame.blanked += " ";
     stack.push(frame);
     frame = newFrame(kind, false);
@@ -260,6 +273,7 @@ function scan(script, escapes, stringMode, ticks) {
         endSegment(true);
       }
     } else if ((ch === "{" && next !== "}" && !/[$@]$/.test(frame.current ?? "")) || (ch === "}" && (next === "" || BRACE_NEIGHBOUR.test(next)) && !(frame.current ?? "").includes("{"))) {
+      endWord(ch === "{");
       endSegment(true);
     } else if (ch === "&" && next === "&") {
       endSegment(false);
@@ -502,8 +516,70 @@ function evaluateGit(args, depth) {
   return null;
 }
 
+function deletesTarget(target, recursive) {
+  return ROOT_TARGET.test(target) || (recursive && (target === "*" || HOME_TARGET.test(target)));
+}
+
+function posixRm(args) {
+  const { longs, clusters, positionals } = parseOptions(args, NO_VALUE_LETTERS);
+  const recursive =
+    hasLongOption(longs, "--recursive", 3) || clusters.some((cluster) => RM_CLUSTER.test(cluster) && /[rR]/.test(cluster));
+  return recursive && positionals.some((target) => deletesTarget(target, true));
+}
+
+function powershellRemove(args) {
+  const targets = [];
+  const addTargets = (value) => {
+    for (const target of value.split(",")) targets.push(target);
+  };
+  let recursive = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const { text, quoted } = args[i];
+    const flag = quoted ? null : POWERSHELL_PARAMETER.exec(text);
+    if (flag === null) {
+      addTargets(text);
+      continue;
+    }
+    const name = `-${flag[1].toLowerCase()}`;
+    if (name.length >= 2 && "-recurse".startsWith(name)) {
+      recursive = flag[2]?.toLowerCase() !== "$false";
+      continue;
+    }
+    const parameter = POWERSHELL_VALUE_PARAMETERS.find(([full, minLength]) => name.length >= minLength && full.startsWith(name));
+    if (parameter === undefined) continue;
+    let value = flag[2];
+    if (!value) {
+      const next = args[i + 1];
+      if (next === undefined || (!next.quoted && POWERSHELL_PARAMETER.test(next.text))) continue;
+      value = next.text;
+      i += 1;
+    }
+    if (parameter[2]) addTargets(value);
+  }
+  return targets.some((target) => deletesTarget(target, recursive));
+}
+
+function cmdDelete(args) {
+  const isSwitch = ({ text }) => CMD_SWITCHES.test(text);
+  const recursive = args.some((word) => isSwitch(word) && /\/s/i.test(word.text));
+  return recursive && args.some((word) => !isSwitch(word) && CMD_TARGET.test(word.text));
+}
+
+function deletesRoot(names, args) {
+  return (
+    (names.includes("rm") && posixRm(args)) ||
+    (names.some((name) => POWERSHELL_REMOVE.has(name)) && powershellRemove(args)) ||
+    (names.some((name) => CMD_DELETE.has(name)) && cmdDelete(args))
+  );
+}
+
+function trustsBrokerConfig(args) {
+  const broker = args.findIndex(({ names }) => names.includes("ignis-broker.mjs"));
+  return broker !== -1 && args[broker + 1]?.cmp === "trust";
+}
+
 function evaluateSegment(segment, depth) {
-  const { words, blanked, docs, strings, pipe } = segment;
+  const { words, docs, strings, pipe } = segment;
   let verdict = null;
   const decided = (candidate) => {
     verdict = strongest(verdict, candidate);
@@ -514,12 +590,12 @@ function evaluateSegment(segment, depth) {
   for (const doc of docs) {
     if (doc.expand && decided(evaluateScript(doc.text, depth + 1, true))) return verdict;
   }
-  for (const rule of DESTRUCTIVE_RULES) {
-    if (rule.pattern.test(blanked)) return deny(rule.reason);
-  }
   const start = commandStart(words);
   if (start >= words.length) return verdict;
   const { names } = words[start];
+  const operands = words.slice(start + 1).filter((word) => !word.partial);
+  if (deletesRoot(names, operands)) return deny(DELETE_ROOT_REASON);
+  if (names.includes("node") && trustsBrokerConfig(operands)) decided(forceAsk(TRUST_REASON));
   if (names.includes("git")) return strongest(verdict, evaluateGit(words.slice(start + 1), depth));
   if (names.includes("find") && decidedAll(findScripts(words.slice(start + 1)))) return verdict;
   if (names.some((name) => EXPRESSION_COMMANDS.has(name))) {
