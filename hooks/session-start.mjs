@@ -6,17 +6,9 @@ import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
 import { brokerDataDir, brokerHome, resolveConfig } from "../scripts/broker/config.mjs";
 import { readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState, probeEnvironment } from "../scripts/broker/onboarding.mjs";
+import { isInteractiveUserSession, readStdin, resolveWorkspace } from "./lib.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-function readStdin() {
-  try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
 
 function isProjectWorkspace(dir) {
   if (!dir || !fs.existsSync(dir)) return false;
@@ -24,49 +16,12 @@ function isProjectWorkspace(dir) {
   return markers.some((m) => fs.existsSync(path.join(dir, m)));
 }
 
-function resolveWorkspace(payload) {
-  if (payload.cwd && fs.existsSync(payload.cwd)) return payload.cwd;
-  if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-    return payload.workspacePaths[0];
-  }
-  return "";
-}
-
-function checkDecisionIndexes(cwd) {
+function findDecisionIndexHint(cwd) {
   const found = [];
   if (fs.existsSync(path.join(cwd, "docs", "adr", "INDEX.md"))) found.push("docs/adr/INDEX.md");
   if (fs.existsSync(path.join(cwd, "docs", "bdr", "INDEX.md"))) found.push("docs/bdr/INDEX.md");
   if (found.length === 0) return null;
   return `[ignis-swarm] Decision indexes detected (${found.join(", ")}). Check relevant ADRs/BDRs before planning or modifying architecture.`;
-}
-
-function isInteractiveUserSession(payload) {
-  if (
-    payload.isSubagent === true ||
-    payload.subagent === true ||
-    Boolean(payload.parentConversationId)
-  ) {
-    return false;
-  }
-  if (typeof payload.lastUserInput === "string" && payload.lastUserInput.trim().length > 0) {
-    return true;
-  }
-  if (typeof payload.transcriptPath === "string" && payload.transcriptPath.trim()) {
-    try {
-      const fd = fs.openSync(payload.transcriptPath, "r");
-      try {
-        const buf = Buffer.alloc(4096);
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-        const head = buf.subarray(0, bytesRead).toString("utf8");
-        if (/"type"\s*:\s*"USER_INPUT"/.test(head)) {
-          return true;
-        }
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch {}
-  }
-  return false;
 }
 
 async function checkBrokerWarning(cwd, home, dataDir) {
@@ -249,7 +204,7 @@ async function main() {
     }
   }
 
-  const indexHint = checkDecisionIndexes(cwd);
+  const indexHint = findDecisionIndexHint(cwd);
   if (indexHint) messages.push(indexHint);
 
   const brokerNotice = await checkBrokerWarning(cwd, home, dataDir);

@@ -1,15 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { brokerDataDir, brokerHome } from "../scripts/broker/config.mjs";
-
-function readStdin() {
-  try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
+import { readStdin, sanitizeConversationId } from "./lib.mjs";
 
 function isTestCommand(cmd) {
   return /\b(cargo\s+test|go\s+test|npm\s+test|pnpm\s+test|yarn\s+test|vitest|jest|pytest|node\s+--test|dotnet\s+test|ctest|mutants|stryker|mutmut)\b/i.test(
@@ -20,7 +12,7 @@ function isTestCommand(cmd) {
 function main() {
   try {
     const payload = readStdin();
-    const convId = String(payload.conversationId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const convId = sanitizeConversationId(payload.conversationId);
     const baseDir = path.join(brokerDataDir(brokerHome()), "audit");
     fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
 
