@@ -1,88 +1,202 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { initGitRepo, isolatedEnv, mkTemp, runGit, runNode } from "./helpers.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN_ROOT = path.resolve(__dirname, "..");
+const HOOK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "hooks", "stop-gate.mjs");
+const LIB = "export function add(a, b) { return a + b; }\n";
 
-function runHook(scriptRelPath, inputObj, extraEnv = {}) {
-  const scriptPath = path.join(PLUGIN_ROOT, scriptRelPath);
-  const res = spawnSync(process.execPath, [scriptPath], {
-    cwd: PLUGIN_ROOT,
-    input: JSON.stringify(inputObj),
-    encoding: "utf8",
-    env: { ...process.env, ...extraEnv },
-    timeout: 8000,
-    windowsHide: true,
+function sandbox(t) {
+  const iso = isolatedEnv();
+  const root = mkTemp("ignis-stop-");
+  t.after(() => {
+    iso.cleanup();
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  assert.equal(res.status, 0, `Hook ${scriptRelPath} failed: ${res.stderr}`);
-  return JSON.parse(res.stdout.trim());
+  const env = { ...iso.env, GIT_CEILING_DIRECTORIES: path.dirname(root) };
+  return { root, env };
 }
 
-function makeTempDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function runStopGate({ root, env }, cwd, extra = {}) {
+  const res = runNode(HOOK, [], {
+    input: JSON.stringify({ cwd, terminationReason: "NO_TOOL_CALL", ...extra }),
+    env,
+    cwd: root,
+    timeoutMs: 20_000,
+  });
+  assert.equal(res.timedOut, false, "stop-gate timed out");
+  assert.equal(res.status, 0, `stop-gate failed: ${res.stderr}`);
+  return { out: JSON.parse(res.stdout.trim()), stderr: res.stderr };
 }
 
-function initGitRepo(dir) {
-  spawnSync("git", ["init"], { cwd: dir, windowsHide: true });
-  spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: dir, windowsHide: true });
-  spawnSync("git", ["config", "user.name", "Test"], { cwd: dir, windowsHide: true });
+function repoIn({ root, env }, files = { "src/lib.js": LIB }, name = "repo") {
+  return initGitRepo(path.join(root, name), { env, files });
 }
 
-test("stop-gate prevents loops, checks ADR INDEX integrity, and catches banned diff shortcuts", () => {
-  const repoDir = makeTempDir("ignis-repo-");
-  initGitRepo(repoDir);
+function append(repo, relPath, text) {
+  fs.appendFileSync(path.join(repo, relPath), text);
+}
 
-  fs.mkdirSync(path.join(repoDir, "src"), { recursive: true });
-  fs.writeFileSync(path.join(repoDir, "src", "lib.js"), "export function add(a, b) { return a + b; }\n");
-  spawnSync("git", ["add", "."], { cwd: repoDir, windowsHide: true });
-  spawnSync("git", ["commit", "-m", "init"], { cwd: repoDir, windowsHide: true });
+test("stop-gate prevents loops, checks ADR INDEX integrity, and catches banned diff shortcuts", (t) => {
+  const box = sandbox(t);
+  const repoDir = repoIn(box);
 
   fs.mkdirSync(path.join(repoDir, "docs", "adr"), { recursive: true });
   fs.writeFileSync(path.join(repoDir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n| ADR-0010 | ADR-0010-other.md |\n");
   fs.writeFileSync(path.join(repoDir, "docs", "adr", "ADR-001-cache.md"), "# ADR-001\n");
 
-  const unindexed = runHook("hooks/stop-gate.mjs", {
-    cwd: repoDir,
-    terminationReason: "NO_TOOL_CALL",
-    continuationActive: false,
-  });
+  const unindexed = runStopGate(box, repoDir, { continuationActive: false }).out;
   assert.equal(unindexed.decision, "continue");
   assert.match(unindexed.reason, /ADR-001-cache\.md/);
 
-  const noLoop = runHook("hooks/stop-gate.mjs", {
-    cwd: repoDir,
-    terminationReason: "NO_TOOL_CALL",
-    continuationActive: true,
-  });
+  const noLoop = runStopGate(box, repoDir, { continuationActive: true }).out;
   assert.deepEqual(noLoop, {});
 
   fs.writeFileSync(
     path.join(repoDir, "docs", "adr", "INDEX.md"),
     "| ID | File |\n|---|---|\n| ADR-001 | ADR-001-cache.md |\n"
   );
-  const cleanOut = runHook("hooks/stop-gate.mjs", {
-    cwd: repoDir,
-    terminationReason: "NO_TOOL_CALL",
-    continuationActive: false,
-  });
+  const cleanOut = runStopGate(box, repoDir, { continuationActive: false }).out;
   assert.deepEqual(cleanOut, {});
 
-  fs.writeFileSync(
-    path.join(repoDir, "src", "lib.js"),
-    "export function add(a, b) { return a + b; }\ntest.skip('skipped', () => {});\n"
-  );
-  const bannedDiff = runHook("hooks/stop-gate.mjs", {
-    cwd: repoDir,
-    terminationReason: "NO_TOOL_CALL",
-    continuationActive: false,
-  });
+  append(repoDir, "src/lib.js", "test.skip('skipped', () => {});\n");
+  const bannedDiff = runStopGate(box, repoDir, { continuationActive: false }).out;
   assert.equal(bannedDiff.decision, "continue");
   assert.match(bannedDiff.reason, /\.skip/);
+});
 
-  fs.rmSync(repoDir, { recursive: true, force: true });
+test("stop-gate flags a focused test in an untracked file", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  fs.writeFileSync(path.join(repo, "a.test.js"), "it.only('focused', () => {});\n");
+
+  const { out } = runStopGate(box, repo);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /a\.test\.js: detected focused test/);
+});
+
+test("stop-gate scans from the repository root when cwd is a subdirectory", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box, { "src/lib.js": LIB, "other/util.js": LIB });
+  append(repo, "src/lib.js", "test.skip('later', () => {});\n");
+  append(repo, "other/util.js", "it.only('elsewhere', () => {});\n");
+
+  const { out } = runStopGate(box, path.join(repo, "src"));
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /src\/lib\.js: detected skipped test/);
+  assert.match(out.reason, /other\/util\.js: detected focused test/);
+});
+
+test("stop-gate checks the ADR INDEX at the repository root when cwd is a subdirectory", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  fs.mkdirSync(path.join(repo, "docs", "adr"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "docs", "adr", "ADR-002-queue.md"), "# ADR-002\n");
+
+  const { out } = runStopGate(box, path.join(repo, "src"));
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /Missing docs\/adr\/INDEX\.md/);
+});
+
+test("stop-gate finds a shortcut next to a generated change larger than 1 MB", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box, { "data.json": "[]\n", "src/spec.test.js": "export {};\n" });
+  const generated = Array.from({ length: 25_000 }, (_, i) => `  {"id": ${i}, "label": "generated-item-${i}", "ok": true},`).join("\n");
+  assert.ok(Buffer.byteLength(generated) > 1_400_000, "the generated change must exceed 1.4 MB");
+  fs.writeFileSync(path.join(repo, "data.json"), `[\n${generated}\n]\n`);
+  append(repo, "src/spec.test.js", "it.only('focused', () => {});\n");
+
+  const { out } = runStopGate(box, repo);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /src\/spec\.test\.js: detected focused test/);
+});
+
+test("stop-gate flags a shortcut that is committed but not pushed", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  const remote = path.join(box.root, "remote.git");
+  runGit(box.root, ["init", "--bare", "--initial-branch=main", remote], { env: box.env });
+  runGit(repo, ["remote", "add", "origin", remote], { env: box.env });
+  runGit(repo, ["push", "-u", "origin", "main"], { env: box.env });
+  fs.writeFileSync(path.join(repo, "x.test.js"), "describe.only('suite', () => {});\n");
+  runGit(repo, ["add", "-A"], { env: box.env });
+  runGit(repo, ["commit", "-m", "wip"], { env: box.env });
+  assert.equal(runGit(repo, ["status", "--porcelain"], { env: box.env }), "");
+
+  const { out } = runStopGate(box, repo);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /x\.test\.js: detected focused test/);
+});
+
+test("stop-gate compares a branch without an upstream against origin/HEAD", (t) => {
+  const box = sandbox(t);
+  const seed = repoIn(box, { "src/lib.js": LIB }, "seed");
+  const remote = path.join(box.root, "remote.git");
+  runGit(box.root, ["init", "--bare", "--initial-branch=main", remote], { env: box.env });
+  runGit(seed, ["remote", "add", "origin", remote], { env: box.env });
+  runGit(seed, ["push", "origin", "main"], { env: box.env });
+  const clone = path.join(box.root, "clone");
+  runGit(box.root, ["clone", remote, clone], { env: box.env });
+  runGit(clone, ["switch", "-c", "feature"], { env: box.env });
+  fs.writeFileSync(path.join(clone, "y.test.js"), "test.only('focused', () => {});\n");
+  runGit(clone, ["add", "-A"], { env: box.env });
+  runGit(clone, ["commit", "-m", "wip"], { env: box.env });
+
+  const { out } = runStopGate(box, clone);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /y\.test\.js: detected focused test/);
+});
+
+test("stop-gate does not flag iterator and collection skip calls", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box, { "src/main.rs": "fn main() {}\n", "src/rows.js": LIB });
+  append(repo, "src/main.rs", "fn tail(v: &[i32]) { for x in v.iter().skip(1) { println!(\"{}\", x); } }\n");
+  append(repo, "src/rows.js", "const rest = rows.skip(2);\nconst first = stream.only(1);\n");
+
+  const { out } = runStopGate(box, repo);
+  assert.deepEqual(out, {});
+});
+
+test("stop-gate reads added lines that start with ++ as content, not as diff headers", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  append(repo, "src/lib.js", "++ b/notes.md\n++it.only('plus', () => {});\nit.only('plain', () => {});\n");
+
+  const { out } = runStopGate(box, repo);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /src\/lib\.js: detected focused test .*\+\+it\.only\('plus'/);
+  assert.match(out.reason, /src\/lib\.js: detected focused test .*it\.only\('plain'/);
+  assert.doesNotMatch(out.reason, /notes\.md/);
+});
+
+test("stop-gate stays silent when a continuation is already active", (t) => {
+  const box = sandbox(t);
+  const repo = repoIn(box);
+  append(repo, "src/lib.js", "it.only('focused', () => {});\n");
+
+  assert.deepEqual(runStopGate(box, repo, { continuationActive: true }).out, {});
+});
+
+test("stop-gate skips the diff scan outside a git repository without failing", (t) => {
+  const box = sandbox(t);
+  const plain = path.join(box.root, "plain");
+  fs.mkdirSync(plain, { recursive: true });
+  fs.writeFileSync(path.join(plain, "a.test.js"), "it.only('focused', () => {});\n");
+
+  const { out, stderr } = runStopGate(box, plain);
+  assert.deepEqual(out, {});
+  assert.equal(stderr, "");
+});
+
+test("stop-gate checks the ADR INDEX in cwd when cwd is not in a git repository", (t) => {
+  const box = sandbox(t);
+  const plain = path.join(box.root, "plain");
+  fs.mkdirSync(path.join(plain, "docs", "bdr"), { recursive: true });
+  fs.writeFileSync(path.join(plain, "docs", "bdr", "BDR-001-rule.md"), "# BDR-001\n");
+
+  const { out } = runStopGate(box, plain);
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /Missing docs\/bdr\/INDEX\.md/);
 });
