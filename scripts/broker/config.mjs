@@ -300,6 +300,8 @@ export function redactServerConfig(cfg) {
   };
 }
 
+const BROKER_SELF_NAMES = new Set(["ignis-broker", "broker", "ignis-swarm_broker"]);
+
 export function importMcpConfig(fromPath, onlyServers = null) {
   const raw = fs.readFileSync(fromPath, "utf8");
   const json = JSON.parse(raw);
@@ -312,7 +314,7 @@ export function importMcpConfig(fromPath, onlyServers = null) {
 
   for (const [name, entry] of Object.entries(json.mcpServers)) {
     if (filter && !filter.has(name)) continue;
-    if (name === "ignis-broker" || name === "broker" || name === "ignis-swarm_broker") continue;
+    if (BROKER_SELF_NAMES.has(name)) continue;
     if (!entry || typeof entry !== "object") continue;
 
     const command = typeof entry.command === "string" ? entry.command : null;
@@ -342,30 +344,32 @@ export function importMcpConfig(fromPath, onlyServers = null) {
     servers[name] = srv;
   }
 
-  return {
-    version: 1,
-    defaults: { ...DEFAULT_CONFIG },
-    servers,
-  };
+  return { version: 1, servers };
 }
 
-const BROKER_SELF_NAMES = new Set(["ignis-broker", "broker", "ignis-swarm_broker"]);
 const PER_WORKSPACE_HINT_RE = /context|serena|lsp|git|fs|filesystem|workspace|repo|sqlite/i;
 
 function readServersFile(home) {
   const dest = path.join(home, "servers.json");
   if (!fs.existsSync(dest)) {
-    return { dest, data: { version: 1, defaults: { ...DEFAULT_CONFIG }, servers: {} } };
+    return { dest, data: { version: 1, defaults: {}, servers: {} } };
   }
   const parsed = JSON.parse(fs.readFileSync(dest, "utf8"));
   return {
     dest,
     data: {
       version: parsed.version ?? 1,
-      defaults: parsed.defaults ?? { ...DEFAULT_CONFIG },
+      defaults: parsed.defaults ?? {},
       servers: parsed.servers && typeof parsed.servers === "object" ? { ...parsed.servers } : {},
     },
   };
+}
+
+function writeServersFile(home, dest, data) {
+  const { defaults, ...rest } = data;
+  const out = defaults && Object.keys(defaults).length > 0 ? { ...rest, defaults } : rest;
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(dest, JSON.stringify(out, null, 2), { encoding: "utf8", mode: 0o600 });
 }
 
 export function discoverMcpConfig(fromPath, home) {
@@ -431,6 +435,7 @@ export function mergeServersConfig(home, incomingServers, opts = {}) {
     : incomingServers || {};
 
   for (const [name, cfg] of Object.entries(source)) {
+    if (BROKER_SELF_NAMES.has(name)) continue;
     if (!cfg || typeof cfg !== "object") continue;
     const mergedEntry = { ...cfg };
     if (perWorkspaceSet.has(name)) {
@@ -442,8 +447,7 @@ export function mergeServersConfig(home, incomingServers, opts = {}) {
     data.servers[name] = mergedEntry;
   }
 
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(dest, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
+  writeServersFile(home, dest, data);
   return { dest, ...data };
 }
 
@@ -475,6 +479,6 @@ export function removeServer(home, name) {
   const { data } = readServersFile(home);
   if (!Object.hasOwn(data.servers, name)) return false;
   delete data.servers[name];
-  fs.writeFileSync(dest, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
+  writeServersFile(home, dest, data);
   return true;
 }
