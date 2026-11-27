@@ -26,7 +26,10 @@ const BLIND_REVIEW_PROMPT = [
   "End your answer with exactly one final line, either Status: PASS or Status: ISSUES.",
   "Use Status: PASS when you found no HIGH or MEDIUM issues, otherwise use Status: ISSUES.",
 ].join(" ");
-const VERDICT_LINE = /^\s*[*_`]*\s*Status\s*:\s*(PASS|ISSUES)\b/gim;
+const VERDICT_LINE =
+  /^[ \t]*(?:>[ \t]*|[-*+][ \t]+)*[*_`]*[ \t]*Status[ \t]*[*_`]*[ \t]*:[ \t*_`]*(PASS|ISSUES)(?![A-Za-z0-9])(.*)$/i;
+const VERDICT_TEMPLATE_TAIL = /^[\s*_`]*[|/]|\b(?:PASS|ISSUES)\b/;
+const NO_VERDICT_DETAIL_CHARS = 200;
 
 const VALID_BACKENDS = new Set(["auto", "native", "claude", "codex"]);
 
@@ -91,10 +94,11 @@ export function buildClaudeArgs(prompt, model, effort, mcpConfigPath) {
     effort || "high",
     "--permission-mode",
     "dontAsk",
-    "--allowedTools",
-    "Read",
-    "Grep",
-    "Glob",
+    "--tools",
+    "",
+    "--setting-sources",
+    "",
+    "--disable-slash-commands",
     "--strict-mcp-config",
     "--mcp-config",
     mcpConfigPath,
@@ -104,8 +108,8 @@ export function buildClaudeArgs(prompt, model, effort, mcpConfigPath) {
 
 export function buildCodexArgs(model) {
   return [
-    ...(model ? ["-m", model] : []),
     "exec",
+    ...(model ? ["-m", model] : []),
     "--sandbox",
     "read-only",
     "-c",
@@ -307,8 +311,12 @@ function runSmokeTest(opts) {
 }
 
 function parseVerdict(output) {
-  const matches = [...output.matchAll(VERDICT_LINE)];
-  return matches.length === 0 ? null : matches[matches.length - 1][1].toUpperCase();
+  let verdict = null;
+  for (const line of output.split(/\r?\n/)) {
+    const match = VERDICT_LINE.exec(line);
+    if (match && !VERDICT_TEMPLATE_TAIL.test(match[2])) verdict = match[1].toUpperCase();
+  }
+  return verdict;
 }
 
 function gitEnv() {
@@ -498,13 +506,14 @@ export function runBlindReview(opts) {
   const output = res.stdout || "";
   const verdict = parseVerdict(output);
   if (verdict === null) {
-    const detail = output.trim() ? "no Status line" : "empty output";
+    const snippet = output.replace(/\s+/g, " ").trim().slice(0, NO_VERDICT_DETAIL_CHARS);
+    const detail = snippet ? `no Status line): ${snippet}` : "empty output)";
     return withState(
       extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
-        reason: `headless reviewer returned no verdict (${detail})`,
+        reason: `headless reviewer returned no verdict (${detail}`,
         base: opts.base,
         diffBytes,
       },
@@ -544,8 +553,21 @@ function main() {
   }
 }
 
-const isEntrypoint =
-  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+function canonicalPath(file) {
+  const real = fs.realpathSync.native(file);
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return canonicalPath(process.argv[1]) === canonicalPath(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+const isEntrypoint = isMainModule();
 
 if (isEntrypoint) {
   try {
