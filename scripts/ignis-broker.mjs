@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runMcpBridge } from "./broker/bridge.mjs";
+import { postToDaemon, runMcpBridge } from "./broker/bridge.mjs";
 import {
   BROKER_VERSION,
   addHttpServer,
@@ -72,21 +72,11 @@ function parseFlags(argv) {
 }
 
 async function postDaemon(home, dataDir, endpoint, body) {
-  const info = await ensureDaemon(home, dataDir, ENTRY_SCRIPT);
-  const resp = await fetch(`http://127.0.0.1:${info.port}${endpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${info.token}`,
-      Connection: "close",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(300_000),
+  const resp = await postToDaemon({
+    ensure: () => ensureDaemon(home, dataDir, ENTRY_SCRIPT),
+    path: endpoint,
+    body,
   });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`HTTP ${resp.status}: ${text}`);
-  }
   return resp.json();
 }
 
