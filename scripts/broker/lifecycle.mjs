@@ -63,7 +63,7 @@ export async function probeHealth(info) {
     const resp = await fetch(`http://127.0.0.1:${info.port}/health`, {
       method: "GET",
       headers: { Authorization: `Bearer ${info.token}` },
-      signal: AbortSignal.timeout(400),
+      signal: AbortSignal.timeout(HEALTH_PROBE_MS),
     });
     if (!resp.ok) return null;
     return await resp.json();
@@ -78,7 +78,7 @@ export async function requestShutdown(info) {
     const resp = await fetch(`http://127.0.0.1:${info.port}/admin/shutdown`, {
       method: "POST",
       headers: { Authorization: `Bearer ${info.token}` },
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(SHUTDOWN_REQUEST_MS),
     });
     return resp.ok;
   } catch {
@@ -100,42 +100,102 @@ export function isPidAlive(pid) {
   }
 }
 
-export async function acquireLock(lockPath, timeoutMs = 6000) {
+const HEALTH_PROBE_MS = 400;
+const SHUTDOWN_REQUEST_MS = 1500;
+const SHUTDOWN_WAIT_MS = 2000;
+const TERM_GRACE_MS = 1500;
+const KILL_WAIT_MS = 1500;
+const SPAWN_WAIT_MS = 6000;
+export const LOCK_MAX_HOLD_MS =
+  HEALTH_PROBE_MS + SHUTDOWN_REQUEST_MS + SHUTDOWN_WAIT_MS + TERM_GRACE_MS + KILL_WAIT_MS + SPAWN_WAIT_MS;
+export const LOCK_STALE_MS = 30_000;
+export const LOCK_WAIT_MS = LOCK_STALE_MS + LOCK_MAX_HOLD_MS;
+
+function readLockRaw(lockPath) {
+  try {
+    return fs.readFileSync(lockPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function isLockStale(lockPath, raw, staleMs) {
+  try {
+    const parsed = JSON.parse(raw);
+    return !isPidAlive(parsed.pid) || Date.now() - (parsed.ts || 0) > staleMs;
+  } catch {
+    try {
+      return Date.now() - fs.statSync(lockPath).mtimeMs > staleMs;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function evictStaleLock(lockPath, raw) {
+  const moved = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  try {
+    fs.renameSync(lockPath, moved);
+  } catch {
+    return;
+  }
+  try {
+    if (readLockRaw(moved) !== raw) fs.linkSync(moved, lockPath);
+  } catch {}
+  try {
+    fs.rmSync(moved, { force: true });
+  } catch {}
+}
+
+export async function acquireLock(lockPath, timeoutMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    const content = JSON.stringify({ pid: process.pid, ts: Date.now(), nonce: crypto.randomBytes(8).toString("hex") });
     try {
       const fd = fs.openSync(lockPath, "wx");
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+      try {
+        fs.writeSync(fd, content);
+      } finally {
+        fs.closeSync(fd);
+      }
       return () => {
-        try {
-          fs.closeSync(fd);
-        } catch {}
+        if (readLockRaw(lockPath) !== content) return;
         try {
           fs.rmSync(lockPath, { force: true });
         } catch {}
       };
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;
-      try {
-        const raw = fs.readFileSync(lockPath, "utf8");
-        const parsed = JSON.parse(raw);
-        if (!isPidAlive(parsed.pid) || Date.now() - (parsed.ts || 0) > 15_000) {
-          fs.rmSync(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        try {
-          const stat = fs.statSync(lockPath);
-          if (Date.now() - stat.mtimeMs > 15_000) {
-            fs.rmSync(lockPath, { force: true });
-            continue;
-          }
-        } catch {}
+      const raw = readLockRaw(lockPath);
+      if (raw !== null && isLockStale(lockPath, raw, staleMs)) {
+        evictStaleLock(lockPath, raw);
+        continue;
       }
       await sleep(30);
     }
   }
   throw new Error("timed out acquiring ignis-broker daemon lock");
+}
+
+async function waitUntilGone(pid, ms) {
+  const deadline = Date.now() + ms;
+  while (isPidAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(40);
+  }
+  return true;
+}
+
+async function killAndWait(pid) {
+  if (!isPidAlive(pid)) return true;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {}
+  if (await waitUntilGone(pid, TERM_GRACE_MS)) return true;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {}
+  return waitUntilGone(pid, KILL_WAIT_MS);
 }
 
 export async function stopDaemon(dataDir) {
@@ -148,11 +208,12 @@ export async function stopDaemon(dataDir) {
     return false;
   }
   await requestShutdown(info);
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + SHUTDOWN_WAIT_MS;
   while (Date.now() < deadline) {
     if (!(await probeHealth(info)) && !isPidAlive(info.pid)) break;
     await sleep(40);
   }
+  if (!(await killAndWait(info.pid))) return true;
   try {
     fs.rmSync(daemonInfoPath(dataDir), { force: true });
   } catch {}
@@ -199,10 +260,13 @@ export async function ensureDaemon(home, dataDir, entryScript) {
       }
       if (h?.ok) {
         await requestShutdown(recheck);
-        const waitUntil = Date.now() + 2000;
+        const waitUntil = Date.now() + SHUTDOWN_WAIT_MS;
         while (Date.now() < waitUntil) {
           if (!(await probeHealth(recheck))) break;
           await sleep(40);
+        }
+        if (!(await killAndWait(recheck.pid))) {
+          throw new Error("could not stop the outdated ignis-broker daemon");
         }
       }
       try {
@@ -223,7 +287,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
     });
     child.unref();
 
-    const deadline = Date.now() + 6000;
+    const deadline = Date.now() + SPAWN_WAIT_MS;
     while (Date.now() < deadline) {
       const info = readDaemonInfo(dataDir);
       if (info) {
