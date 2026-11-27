@@ -12,10 +12,12 @@ import {
   brokerHome,
   discoverLocalConfig,
   discoverMcpConfig,
+  externalizeSecrets,
   importMcpConfig,
   mergeServersConfig,
   redactServerConfig,
   removeServer,
+  writeDotenvSecrets,
   resolveRepoRoot,
 } from "./broker/config.mjs";
 import { ensureDaemon, stopDaemon } from "./broker/lifecycle.mjs";
@@ -350,7 +352,9 @@ async function main() {
       return;
     }
 
-    const merged = mergeServersConfig(home, imported.servers);
+    const ext = externalizeSecrets(imported.servers);
+    const wrote = writeDotenvSecrets(home, ext.secrets);
+    const merged = mergeServersConfig(home, ext.servers);
     console.log(`Imported ${entries.length} server(s) into ${merged.dest}:`);
     for (const [name, cfg] of entries) {
       const tags = [];
@@ -359,6 +363,7 @@ async function main() {
       const extra = tags.length > 0 ? ` (${tags.join(", ")})` : "";
       console.log(`  - ${name} [${cfg.transport}]${extra}`);
     }
+    if (wrote.length > 0) console.log(`Stored ${wrote.length} secret(s) in ${path.join(home, ".env")}: ${wrote.join(", ")}`);
     console.log(`Your original ${sourcePath} was NOT modified.`);
     return;
   }
@@ -413,15 +418,18 @@ async function main() {
         }
       }
     }
-    const merged = mergeServersConfig(home, imported.servers, {
+    const ext = externalizeSecrets(imported.servers);
+    const wrote = writeDotenvSecrets(home, ext.secrets);
+    const merged = mergeServersConfig(home, ext.servers, {
       perWorkspaceSet,
       cliFallbackMap,
     });
     const entries = Object.entries(merged.servers);
     if (asJson) {
-      console.log(JSON.stringify({ dest: merged.dest, servers: Object.keys(merged.servers) }, null, 2));
+      console.log(JSON.stringify({ dest: merged.dest, servers: Object.keys(merged.servers), secrets: wrote }, null, 2));
     } else {
       console.log(`Registered ${entries.length} server(s) in ${merged.dest}:`);
+      if (wrote.length > 0) console.log(`Stored ${wrote.length} secret(s) in ${path.join(home, ".env")}: ${wrote.join(", ")}`);
       for (const [name, cfg] of entries) {
         const tags = [];
         if (cfg.perWorkspace) tags.push("perWorkspace");
