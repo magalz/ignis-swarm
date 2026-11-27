@@ -674,13 +674,12 @@ function buildMemtraceArgs(tool, args) {
       break;
     }
   }
-  if (typeof value !== "string" || !value.trim()) return null;
+  if (typeof value !== "string" || !value.trim() || value.trimStart().startsWith("-")) return null;
 
-  const cliArgs = [entry.sub];
+  const cliArgs = [entry.sub, value];
   if (typeof safeArgs.limit === "number" && Number.isFinite(safeArgs.limit)) {
     cliArgs.push("--limit", String(safeArgs.limit));
   }
-  cliArgs.push("--", value);
   return cliArgs;
 }
 

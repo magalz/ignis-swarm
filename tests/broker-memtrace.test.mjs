@@ -79,9 +79,9 @@ beforeEach(() => {
 const run = (tool, args) => tryCliFallback("memtrace", tool, args, iso.dirs.root, 20_000);
 
 describe("memtrace CLI fallback", () => {
-  test("the value comes last, with options before it", async () => {
+  test("the argv follows the documented usage: subcommand, value, then --limit", async () => {
     await run("find_symbol", { query: "Widget render", limit: 5 });
-    assert.deepEqual(readArgv(), ["find", "--limit", "5", "Widget render"]);
+    assert.deepEqual(readArgv(), ["find", "Widget render", "--limit", "5"]);
   });
 
   test("a value that looks like a flag is never passed to the CLI", async () => {
