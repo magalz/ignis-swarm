@@ -674,7 +674,8 @@ function buildMemtraceArgs(tool, args) {
       break;
     }
   }
-  if (typeof value !== "string" || !value.trim() || value.trimStart().startsWith("-")) return null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  if (value.trimStart().startsWith("-") || /[%!]|\\$/.test(value)) return null;
 
   const cliArgs = [entry.sub, value];
   if (typeof safeArgs.limit === "number" && Number.isFinite(safeArgs.limit)) {
