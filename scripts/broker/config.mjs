@@ -155,7 +155,7 @@ export function resolveRepoRoot(cwd) {
   while (true) {
     if (fs.existsSync(path.join(current, ".git"))) {
       try {
-        return fs.realpathSync(current);
+        return fs.realpathSync.native(current);
       } catch {
         return current;
       }
@@ -163,7 +163,7 @@ export function resolveRepoRoot(cwd) {
     const parent = path.dirname(current);
     if (parent === current) {
       try {
-        return fs.realpathSync(start);
+        return fs.realpathSync.native(start);
       } catch {
         return start;
       }

@@ -4,6 +4,7 @@ import { BROKER_VERSION, resolveConfig, resolveRepoRoot } from "./config.mjs";
 import { cleanupExpiredSpills, truncateContentBlocks } from "./spill.mjs";
 
 const MAX_FALLBACK_EVENTS = 32;
+const MAX_SWEEP_ERRORS = 10;
 
 function poolKeyString(candidate, cwd) {
   let scope = "global";
@@ -47,6 +48,7 @@ export class Supervisor {
     this.pool = new Map();
     this.pendingConnects = new Map();
     this.recentFallbacks = [];
+    this.sweepErrors = [];
   }
 
   async _connectCandidate(candidate, defaults, cwd) {
@@ -90,14 +92,39 @@ export class Supervisor {
     throw new BrokerError("config", `unsupported transport \`${cfg.transport}\``);
   }
 
-  async _evictLruWorkspaceIfNeeded(maxInstances) {
+  async _evictLruWorkspaceIfNeeded(maxInstances, keyInfo) {
     if (!maxInstances || maxInstances <= 0) return;
-    const wsEntries = [...this.pool.entries()].filter(([, e]) => e.perWorkspace);
-    if (wsEntries.length < maxInstances) return;
-    wsEntries.sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-    const [oldestKey, oldest] = wsEntries[0];
-    this.pool.delete(oldestKey);
-    await oldest.adapter.shutdown();
+    const siblings = [...this.pool.entries()].filter(
+      ([, e]) => e.perWorkspace && e.server === keyInfo.server && e.source === keyInfo.source
+    );
+    const idle = siblings.filter(([, e]) => e.inFlight === 0).sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    let excess = siblings.length - maxInstances + 1;
+    while (excess > 0 && idle.length > 0) {
+      const [key, entry] = idle.shift();
+      this.pool.delete(key);
+      await entry.adapter.shutdown();
+      excess -= 1;
+    }
+  }
+
+  async _callTracked(entry, tool, args) {
+    entry.inFlight += 1;
+    try {
+      return await entry.adapter.callTool(tool, args);
+    } finally {
+      entry.inFlight -= 1;
+      entry.lastUsed = Date.now();
+    }
+  }
+
+  _recordSweepError(err, configs, entry) {
+    const message = sanitizeError(err, configs).message;
+    this.sweepErrors.push({
+      ts: String(Math.floor(Date.now() / 1000)),
+      ...(entry ? { server: entry.server, scope: entry.scope } : {}),
+      message,
+    });
+    if (this.sweepErrors.length > MAX_SWEEP_ERRORS) this.sweepErrors.shift();
   }
 
   async _getOrConnect(keyInfo, candidate, defaults, cwd) {
@@ -119,7 +146,7 @@ export class Supervisor {
 
     const connectPromise = (async () => {
       if (candidate.config.perWorkspace) {
-        await this._evictLruWorkspaceIfNeeded(defaults.maxWorkspaceInstances);
+        await this._evictLruWorkspaceIfNeeded(defaults.maxWorkspaceInstances, keyInfo);
       }
 
       const adapter = await this._connectCandidate(candidate, defaults, cwd);
@@ -127,6 +154,8 @@ export class Supervisor {
         ...keyInfo,
         adapter,
         lastUsed: Date.now(),
+        inFlight: 0,
+        redact: candidate.config,
         cachedTools: null,
         perWorkspace: candidate.config.perWorkspace,
         configDigest,
@@ -359,7 +388,7 @@ export class Supervisor {
         let entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
         let res;
         try {
-          res = await entry.adapter.callTool(req.tool, req.arguments || {});
+          res = await this._callTracked(entry, req.tool, req.arguments || {});
         } catch (err) {
           if (
             err instanceof BrokerError &&
@@ -369,7 +398,7 @@ export class Supervisor {
             await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
-            res = await entry.adapter.callTool(req.tool, req.arguments || {});
+            res = await this._callTracked(entry, req.tool, req.arguments || {});
           } else {
             throw err;
           }
@@ -508,6 +537,7 @@ export class Supervisor {
       servers,
       pool: poolSnap,
       recentFallbacks: [...this.recentFallbacks],
+      sweepErrors: [...this.sweepErrors],
     };
   }
 
@@ -529,18 +559,35 @@ export class Supervisor {
   }
 
   async maintenanceSweep() {
+    let resolved;
     try {
-      const resolved = resolveConfig(this.brokerHome, null, this.dataDir);
-      const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
-      const now = Date.now();
-      for (const [key, entry] of [...this.pool.entries()]) {
-        if (entry.perWorkspace && maxIdleMs > 0 && now - entry.lastUsed >= maxIdleMs) {
+      resolved = resolveConfig(this.brokerHome, null, this.dataDir);
+    } catch (err) {
+      this._recordSweepError(err, []);
+      return;
+    }
+    const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
+    const now = Date.now();
+    for (const [key, entry] of [...this.pool.entries()]) {
+      try {
+        if (
+          entry.perWorkspace &&
+          entry.inFlight === 0 &&
+          maxIdleMs > 0 &&
+          now - entry.lastUsed >= maxIdleMs
+        ) {
           this.pool.delete(key);
           await entry.adapter.shutdown();
         }
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
       }
+    }
+    try {
       cleanupExpiredSpills(path.join(this.dataDir, "spill"), resolved.defaults.spillTtlHours);
-    } catch {}
+    } catch (err) {
+      this._recordSweepError(err, []);
+    }
   }
 
   async shutdown() {
