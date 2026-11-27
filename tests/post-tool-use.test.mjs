@@ -155,6 +155,16 @@ const REDACTION_CASES = [
     expected: "git clone https://user:[REDACTED]@github.com/org/repo.git",
   },
   {
+    name: "URL credentials whose user name holds a keyword keep the host",
+    command: `git clone https://x-access-token:${TOKENS.githubClassic}@github.com/org/repo.git`,
+    expected: "git clone https://x-access-token:[REDACTED]@github.com/org/repo.git",
+  },
+  {
+    name: "URL credentials with a keyword user and an api key flag",
+    command: "git clone https://apikey:abc123@host.example.com/repo.git --token abc123",
+    expected: "git clone https://apikey:[REDACTED]@host.example.com/repo.git --token [REDACTED]",
+  },
+  {
     name: "credentials in a URL with an at sign in the password",
     command: "git clone https://user:p@ss@github.com/org/repo.git",
     expected: "git clone https://user:[REDACTED]@github.com/org/repo.git",
