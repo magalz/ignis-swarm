@@ -655,38 +655,32 @@ export class McpHttpAdapter {
   }
 }
 
+const MEMTRACE_COMMANDS = [
+  { sub: "find", tools: ["find_symbol", "find_code", "find"], keys: ["query", "symbol", "name", "pattern"] },
+  { sub: "callers", tools: ["callers", "get_callers"], keys: ["symbol", "name", "target", "query"] },
+  { sub: "callees", tools: ["callees", "get_callees"], keys: ["symbol", "name", "target", "query"] },
+  { sub: "impact", tools: ["get_impact", "impact"], keys: ["target", "symbol", "name", "query"] },
+];
+
 function buildMemtraceArgs(tool, args) {
   const safeArgs = args && typeof args === "object" ? args : {};
-  let cliArgs = null;
+  const entry = MEMTRACE_COMMANDS.find((c) => c.tools.includes(tool));
+  if (!entry) return null;
 
-  if (tool === "find_symbol" || tool === "find_code" || tool === "find") {
-    const query = safeArgs.query ?? safeArgs.symbol ?? safeArgs.name ?? safeArgs.pattern;
-    if (typeof query === "string" && query.trim()) {
-      cliArgs = ["find", query];
-    }
-  } else if (tool === "callers" || tool === "get_callers") {
-    const symbol = safeArgs.symbol ?? safeArgs.name ?? safeArgs.target ?? safeArgs.query;
-    if (typeof symbol === "string" && symbol.trim()) {
-      cliArgs = ["callers", symbol];
-    }
-  } else if (tool === "callees" || tool === "get_callees") {
-    const symbol = safeArgs.symbol ?? safeArgs.name ?? safeArgs.target ?? safeArgs.query;
-    if (typeof symbol === "string" && symbol.trim()) {
-      cliArgs = ["callees", symbol];
-    }
-  } else if (tool === "get_impact" || tool === "impact") {
-    const target = safeArgs.target ?? safeArgs.symbol ?? safeArgs.name ?? safeArgs.query;
-    if (typeof target === "string" && target.trim()) {
-      cliArgs = ["impact", target];
+  let value;
+  for (const key of entry.keys) {
+    if (safeArgs[key] != null) {
+      value = safeArgs[key];
+      break;
     }
   }
+  if (typeof value !== "string" || !value.trim()) return null;
+  if (value.trimStart().startsWith("-") || /[%!]|\\$/.test(value)) return null;
 
-  if (!cliArgs) return null;
-
+  const cliArgs = [entry.sub, value];
   if (typeof safeArgs.limit === "number" && Number.isFinite(safeArgs.limit)) {
     cliArgs.push("--limit", String(safeArgs.limit));
   }
-
   return cliArgs;
 }
 
@@ -758,7 +752,7 @@ export async function tryCliFallback(kind, tool, args, cwd, timeoutMs = 30_000) 
           content: [{ type: "text", text: stdout }],
           isError: false,
         });
-      } else if (code === 1) {
+      } else if (code === 1 && !stderr.trim()) {
         finish(resolve, {
           content: [{ type: "text", text: stdout || "No results found." }],
           isError: false,
