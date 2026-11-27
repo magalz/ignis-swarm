@@ -81,56 +81,79 @@ test("mkTemp creates a unique directory under os.tmpdir() with the given prefix"
 
 test("isolatedEnv strips IGNIS_* variables and isolates the git config and home", () => {
   const scratch = mkTemp();
-  const hostileConfig = writeHostileGitConfig(scratch);
-  const patch = {
-    IGNIS_FOO: "leaked",
-    IGNIS_BROKER_HOME: path.join(scratch, "real-broker-home"),
-    CODEX_HOME: path.join(scratch, "real-codex"),
-    GIT_CONFIG_GLOBAL: hostileConfig,
+  try {
+    const hostileConfig = writeHostileGitConfig(scratch);
+    const patch = {
+      IGNIS_FOO: "leaked",
+      IGNIS_BROKER_HOME: path.join(scratch, "real-broker-home"),
+      CODEX_HOME: path.join(scratch, "real-codex"),
+      GIT_CONFIG_GLOBAL: hostileConfig,
+    };
+    withProcessEnv(patch, () => {
+      const iso = isolatedEnv();
+      try {
+        assert.equal(iso.env.IGNIS_FOO, undefined);
+        assert.deepEqual(
+          Object.keys(iso.env)
+            .filter((key) => key.toUpperCase().startsWith("IGNIS_"))
+            .sort(),
+          ["IGNIS_BROKER_DATA", "IGNIS_BROKER_HOME"]
+        );
+        assert.equal(iso.env.IGNIS_BROKER_HOME, iso.dirs.brokerHome);
+        assert.equal(iso.env.IGNIS_BROKER_DATA, iso.dirs.brokerData);
+        assert.notEqual(iso.env.IGNIS_BROKER_HOME, patch.IGNIS_BROKER_HOME);
+        assert.equal(iso.env.CODEX_HOME, iso.dirs.codexHome);
+        assert.notEqual(iso.env.CODEX_HOME, patch.CODEX_HOME);
+        assert.equal(iso.env.HOME, iso.dirs.home);
+        assert.equal(iso.env.USERPROFILE, iso.dirs.home);
+        assert.equal(iso.env.GIT_CONFIG_NOSYSTEM, "1");
+        assert.notEqual(iso.env.GIT_CONFIG_GLOBAL, hostileConfig);
+
+        // The parent environment is copied, not mutated.
+        assert.equal(process.env.IGNIS_FOO, "leaked");
+        assert.equal(process.env.GIT_CONFIG_GLOBAL, hostileConfig);
+
+        // Git sees the temp config, not the hostile one.
+        const read = (key) => git(iso.env, scratch, ["config", "--global", "--get", key]).stdout.trim();
+        assert.equal(read("user.email"), "ignis-test@example.invalid");
+        assert.equal(read("commit.gpgsign"), "false");
+        assert.equal(read("init.defaultBranch"), "main");
+        assert.equal(read("core.autocrlf"), "false");
+
+        // Code under test resolves its home directory to the temp home.
+        const home = spawnSync(process.execPath, ["-p", "require('node:os').homedir()"], {
+          env: iso.env,
+          encoding: "utf8",
+          windowsHide: true,
+        });
+        assert.equal(home.stdout.trim(), iso.dirs.home);
+      } finally {
+        iso.cleanup();
+      }
+    });
+  } finally {
+    rmTemp(scratch);
+  }
+});
+
+test("isolatedEnv strips git config injected through the environment, as a parent git -c or hook would", () => {
+  const injected = {
+    GIT_CONFIG_PARAMETERS: "'commit.gpgsign=true'",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "commit.gpgsign",
+    GIT_CONFIG_VALUE_0: "true",
   };
-  withProcessEnv(patch, () => {
+  withProcessEnv(injected, () => {
     const iso = isolatedEnv();
     try {
-      assert.equal(iso.env.IGNIS_FOO, undefined);
-      assert.deepEqual(
-        Object.keys(iso.env)
-          .filter((key) => key.toUpperCase().startsWith("IGNIS_"))
-          .sort(),
-        ["IGNIS_BROKER_DATA", "IGNIS_BROKER_HOME"]
-      );
-      assert.equal(iso.env.IGNIS_BROKER_HOME, iso.dirs.brokerHome);
-      assert.equal(iso.env.IGNIS_BROKER_DATA, iso.dirs.brokerData);
-      assert.notEqual(iso.env.IGNIS_BROKER_HOME, patch.IGNIS_BROKER_HOME);
-      assert.equal(iso.env.CODEX_HOME, iso.dirs.codexHome);
-      assert.notEqual(iso.env.CODEX_HOME, patch.CODEX_HOME);
-      assert.equal(iso.env.HOME, iso.dirs.home);
-      assert.equal(iso.env.USERPROFILE, iso.dirs.home);
-      assert.equal(iso.env.GIT_CONFIG_NOSYSTEM, "1");
-      assert.notEqual(iso.env.GIT_CONFIG_GLOBAL, hostileConfig);
-
-      // The parent environment is copied, not mutated.
-      assert.equal(process.env.IGNIS_FOO, "leaked");
-      assert.equal(process.env.GIT_CONFIG_GLOBAL, hostileConfig);
-
-      // Git sees the temp config, not the hostile one.
-      const read = (key) => git(iso.env, scratch, ["config", "--global", "--get", key]).stdout.trim();
-      assert.equal(read("user.email"), "ignis-test@example.invalid");
-      assert.equal(read("commit.gpgsign"), "false");
-      assert.equal(read("init.defaultBranch"), "main");
-      assert.equal(read("core.autocrlf"), "false");
-
-      // Code under test resolves its home directory to the temp home.
-      const home = spawnSync(process.execPath, ["-p", "require('node:os').homedir()"], {
-        env: iso.env,
-        encoding: "utf8",
-        windowsHide: true,
-      });
-      assert.equal(home.stdout.trim(), iso.dirs.home);
+      for (const key of Object.keys(injected)) assert.equal(iso.env[key], undefined, `${key} is stripped`);
+      // Git itself, which reads these variables ahead of any file, sees the temp config.
+      const res = git(iso.env, iso.dirs.root, ["config", "--get", "commit.gpgsign"]);
+      assert.equal(res.stdout.trim(), "false");
     } finally {
       iso.cleanup();
     }
   });
-  rmTemp(scratch);
 });
 
 test("isolatedEnv applies overrides last", () => {
@@ -162,30 +185,55 @@ test("isolatedEnv cleanup removes every temp dir it created and is idempotent", 
 
 test("initGitRepo commits even when the real global config signs commits with a broken gpg", () => {
   const scratch = mkTemp();
-  const hostileConfig = writeHostileGitConfig(scratch);
-  withProcessEnv({ GIT_CONFIG_GLOBAL: hostileConfig }, () => {
-    // Control: the simulated global config really does break an unisolated commit.
-    const control = path.join(scratch, "control");
-    fs.mkdirSync(control);
-    assert.equal(git(process.env, control, ["init"]).status, 0);
-    const broken = git(process.env, control, ["commit", "--allow-empty", "-m", "control"]);
-    assert.notEqual(broken.status, 0, "hostile config must break a plain commit");
-    assert.match(broken.stderr, /gpg|sign/i, "the commit must fail because of the signing config, not for another reason");
+  try {
+    const hostileConfig = writeHostileGitConfig(scratch);
+    withProcessEnv({ GIT_CONFIG_GLOBAL: hostileConfig }, () => {
+      // Control: the simulated global config really does break an unisolated commit.
+      const control = path.join(scratch, "control");
+      fs.mkdirSync(control);
+      assert.equal(git(process.env, control, ["init"]).status, 0);
+      const broken = git(process.env, control, ["commit", "--allow-empty", "-m", "control"]);
+      assert.notEqual(broken.status, 0, "hostile config must break a plain commit");
+      assert.match(broken.stderr, /gpg|sign/i, "the commit must fail because of the signing config, not for another reason");
 
-    const iso = isolatedEnv();
-    try {
-      const repo = path.join(iso.dirs.root, "repo");
-      initGitRepo(repo, { env: iso.env, files: { "a.txt": "hello\n" } });
+      const iso = isolatedEnv();
+      try {
+        const repo = path.join(iso.dirs.root, "repo");
+        initGitRepo(repo, { env: iso.env, files: { "a.txt": "hello\n" } });
 
-      assert.equal(runGit(repo, ["rev-list", "--count", "HEAD"], { env: iso.env }), "1");
-      assert.equal(runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"], { env: iso.env }), "main");
-      assert.equal(runGit(repo, ["ls-files"], { env: iso.env }), "a.txt");
-      assert.equal(runGit(repo, ["log", "-1", "--format=%ae"], { env: iso.env }), "ignis-test@example.invalid");
-    } finally {
-      iso.cleanup();
-    }
-  });
-  rmTemp(scratch);
+        assert.equal(runGit(repo, ["rev-list", "--count", "HEAD"], { env: iso.env }), "1");
+        assert.equal(runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"], { env: iso.env }), "main");
+        assert.equal(runGit(repo, ["ls-files"], { env: iso.env }), "a.txt");
+        assert.equal(runGit(repo, ["log", "-1", "--format=%ae"], { env: iso.env }), "ignis-test@example.invalid");
+      } finally {
+        iso.cleanup();
+      }
+    });
+  } finally {
+    rmTemp(scratch);
+  }
+});
+
+test("initGitRepo does not write into the repository a leaked GIT_DIR points at", () => {
+  const scratch = mkTemp();
+  try {
+    const outer = path.join(scratch, "outer");
+    initGitRepo(outer, { commit: false });
+    const outerGitDir = path.join(outer, ".git");
+    const outerConfigBefore = fs.readFileSync(path.join(outerGitDir, "config"), "utf8");
+
+    withProcessEnv({ GIT_DIR: outerGitDir }, () => {
+      const inner = path.join(scratch, "inner");
+      initGitRepo(inner, { files: { "c.txt": "x\n" } });
+      assert.ok(fs.existsSync(path.join(inner, ".git")), "the repo is created in its own directory");
+      assert.equal(runGit(inner, ["rev-list", "--count", "HEAD"]), "1");
+    });
+
+    assert.equal(fs.readFileSync(path.join(outerGitDir, "config"), "utf8"), outerConfigBefore, "outer repo config untouched");
+    assert.equal(runGit(outer, ["rev-list", "--all", "--count"]), "0", "outer repo gained no commit");
+  } finally {
+    rmTemp(scratch);
+  }
 });
 
 test("initGitRepo stays self-sufficient when the caller passes no isolated env", () => {
@@ -259,6 +307,9 @@ test("writeMockStdioServer answers initialize, tools/list and an echo call over 
 
     assert.equal(msgs[1].result.tools.length, 1);
     assert.equal(msgs[1].result.tools[0].name, "echo");
+    // Two sentences on purpose: the supervisor's compactSummary keeps only the first,
+    // and the migrated supervisor test needs a description that proves it.
+    assert.equal(msgs[1].result.tools[0].description, "Echo the label and cwd. Extra detail.");
 
     const [label, echoedCwd] = [
       msgs[2].result.content[0].text.slice(0, "demo:".length),

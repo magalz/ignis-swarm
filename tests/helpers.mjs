@@ -20,10 +20,15 @@ const ISOLATED_GIT_CONFIG = `[user]
 `;
 
 // Variables a test must never inherit: the plugin's own settings, and the git
-// variables that point at another repository or override the commit identity
-// (set when the suite runs from inside a git hook).
+// variables that point at another repository, override the commit identity or
+// inject config ahead of GIT_CONFIG_GLOBAL (set when the suite runs from inside
+// a git hook or under a parent `git -c`).
 const STRIPPED_ENV =
-  /^(IGNIS_.*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|PREFIX|(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)))$/i;
+  /^(IGNIS_.*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|PREFIX|CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)|(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)))$/i;
+
+function withoutStrippedEnv(source) {
+  return Object.fromEntries(Object.entries(source).filter(([key]) => !STRIPPED_ENV.test(key)));
+}
 
 export function mkTemp(prefix = "ignis-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -59,10 +64,9 @@ export function isolatedEnv(overrides = {}) {
   };
   // Windows environment names are case-insensitive: drop case variants too.
   const replaced = new Set(Object.keys(isolated).map((key) => key.toUpperCase()));
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!STRIPPED_ENV.test(key) && !replaced.has(key.toUpperCase())) env[key] = value;
-  }
+  const env = Object.fromEntries(
+    Object.entries(withoutStrippedEnv(process.env)).filter(([key]) => !replaced.has(key.toUpperCase()))
+  );
   Object.assign(env, isolated, overrides);
 
   return {
@@ -74,9 +78,12 @@ export function isolatedEnv(overrides = {}) {
   };
 }
 
-/** Run git in `cwd`; returns trimmed stdout and throws with the command and stderr on any failure. */
+/**
+ * Run git in `cwd`; returns trimmed stdout and throws with the command and stderr on any failure.
+ * Without `env`, git inherits process.env minus the variables that would aim it at another repository.
+ */
 export function runGit(cwd, args, { env } = {}) {
-  const res = spawnSync("git", args, { cwd, env, encoding: "utf8", windowsHide: true });
+  const res = spawnSync("git", args, { cwd, env: env ?? withoutStrippedEnv(process.env), encoding: "utf8", windowsHide: true });
   if (res.error || res.status !== 0) {
     const detail = [res.error?.message, res.stderr?.trim()].filter(Boolean).join(": ");
     throw new Error(`git ${args.join(" ")} failed (exit ${res.status}): ${detail}`);
@@ -114,6 +121,8 @@ let mockServerCount = 0;
  * Write a newline-delimited JSON-RPC MCP server script into `dir` and return its path.
  * It answers initialize, tools/list (one tool, "echo") and tools/call; echo returns
  * `${label}:${process.cwd()}` as content[0] and the JSON-encoded arguments as content[1].
+ * The tool description has two sentences on purpose: the supervisor's compactSummary keeps
+ * only the first, and a test of that needs the second to be there.
  * - banner: print a non-JSON line on stdout at startup
  * - crashOnFirstCallMarker: path of a marker file; the first tools/call that finds
  *   no marker creates it and exits 1
@@ -146,7 +155,7 @@ rl.on("line", (line) => {
   if (msg.method === "initialize") {
     send({ id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } });
   } else if (msg.method === "tools/list") {
-    send({ id: msg.id, result: { tools: [{ name: "echo", description: "Echo the label, cwd and arguments.", inputSchema: { type: "object" } }] } });
+    send({ id: msg.id, result: { tools: [{ name: "echo", description: "Echo the label and cwd. Extra detail.", inputSchema: { type: "object" } }] } });
   } else if (msg.method === "tools/call") {
     if (config.marker && !fs.existsSync(config.marker)) {
       fs.writeFileSync(config.marker, "1");
