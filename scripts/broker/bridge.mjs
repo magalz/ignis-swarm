@@ -12,7 +12,12 @@ function injectDefaultCwd(msg, defaultCwd) {
   }
 }
 
+function neverReached(err) {
+  return (err?.cause?.code ?? err?.code) === "ECONNREFUSED";
+}
+
 export async function postToDaemon({ ensure, path, body, timeoutMs = 300_000 }) {
+  let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const info = await ensure();
     let resp;
@@ -28,48 +33,50 @@ export async function postToDaemon({ ensure, path, body, timeoutMs = 300_000 }) 
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      if (attempt === 1) throw err;
+      if (!neverReached(err)) throw err;
+      lastError = err;
       continue;
     }
     if (resp.ok) return resp;
     const text = await resp.text().catch(() => "");
-    throw new Error(`HTTP ${resp.status}: ${text}`);
+    lastError = new Error(`HTTP ${resp.status}: ${text}`);
+    if (resp.status !== 401) throw lastError;
   }
+  throw lastError;
 }
 
-async function forwardWithReconnect(home, dataDir, entryScript, msg) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const info = await ensureDaemon(home, dataDir, entryScript);
-    let resp;
-    try {
-      resp = await fetch(`http://127.0.0.1:${info.port}/mcp`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${info.token}`,
-          Connection: "close",
-        },
-        body: JSON.stringify(msg),
-        signal: AbortSignal.timeout(300_000),
-      });
-    } catch (err) {
-      if (err?.name === "TimeoutError" || err?.name === "AbortError") {
-        throw err;
-      }
-      if (attempt === 0) continue;
-      throw err;
+async function forward(home, dataDir, entryScript, msg) {
+  const resp = await postToDaemon({
+    ensure: () => ensureDaemon(home, dataDir, entryScript),
+    path: "/mcp",
+    body: msg,
+  });
+  if (resp.status === 202) return null;
+  return await resp.json();
+}
+
+async function handle(home, dataDir, entryScript, msg, isNotification) {
+  try {
+    const out = await forward(home, dataDir, entryScript, msg);
+    if (!isNotification && out !== null) {
+      process.stdout.write(`${JSON.stringify(out)}\n`);
     }
-    if (resp.status === 202) return null;
-    if (resp.ok) return await resp.json();
-    if (resp.status === 401 && attempt === 0) continue;
-    const body = await resp.text().catch(() => "");
-    throw new Error(`daemon /mcp HTTP ${resp.status}: ${body}`);
+  } catch (err) {
+    if (!isNotification) {
+      process.stdout.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: msg.id ?? null,
+          error: { code: -32000, message: err.message || String(err) },
+        })}\n`
+      );
+    }
   }
-  throw new Error("bridge failed to reach daemon after reconnect");
 }
 
 export async function runMcpBridge(home, dataDir, entryScript, defaultCwd) {
   const rl = readline.createInterface({ input: process.stdin });
+  const inFlight = new Set();
 
   for await (const line of rl) {
     const trimmed = line.trim();
@@ -93,21 +100,11 @@ export async function runMcpBridge(home, dataDir, entryScript, defaultCwd) {
 
     injectDefaultCwd(msg, defaultCwd);
 
-    try {
-      const out = await forwardWithReconnect(home, dataDir, entryScript, msg);
-      if (!isNotification && out !== null) {
-        process.stdout.write(`${JSON.stringify(out)}\n`);
-      }
-    } catch (err) {
-      if (!isNotification) {
-        process.stdout.write(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            id: msg.id ?? null,
-            error: { code: -32000, message: err.message || String(err) },
-          })}\n`
-        );
-      }
-    }
+    const task = handle(home, dataDir, entryScript, msg, isNotification).finally(() =>
+      inFlight.delete(task)
+    );
+    inFlight.add(task);
   }
+
+  await Promise.allSettled([...inFlight]);
 }
