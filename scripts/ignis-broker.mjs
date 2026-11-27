@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,10 +10,12 @@ import {
   addHttpServer,
   brokerDataDir,
   brokerHome,
+  discoverLocalConfig,
   discoverMcpConfig,
   importMcpConfig,
   mergeServersConfig,
   removeServer,
+  resolveRepoRoot,
 } from "./broker/config.mjs";
 import { ensureDaemon, stopDaemon } from "./broker/lifecycle.mjs";
 import {
@@ -23,6 +26,12 @@ import {
   skipOnboarding,
 } from "./broker/onboarding.mjs";
 import { runDaemon } from "./broker/server.mjs";
+import {
+  listTrustedLocalConfigs,
+  readTrustedLocalConfig,
+  revokeLocalConfig,
+  trustLocalConfig,
+} from "./broker/trust.mjs";
 
 const ENTRY_SCRIPT = fileURLToPath(import.meta.url);
 const BOOLEAN_FLAGS = new Set([
@@ -33,6 +42,8 @@ const BOOLEAN_FLAGS = new Set([
   "all",
   "get",
   "probe",
+  "revoke",
+  "list",
   "skip",
   "reset",
   "version",
@@ -69,6 +80,98 @@ function parseFlags(argv) {
     }
   }
   return { positional, flags };
+}
+
+function maskValues(obj) {
+  const out = {};
+  for (const key of Object.keys(obj && typeof obj === "object" ? obj : {})) out[key] = "***";
+  return out;
+}
+
+function redactUrl(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.username || u.password) {
+      u.username = "***";
+      u.password = "";
+    }
+    for (const key of [...u.searchParams.keys()]) u.searchParams.set(key, "***");
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return "***";
+  }
+}
+
+function summarizeServers(parsed) {
+  const servers = parsed?.servers && typeof parsed.servers === "object" ? parsed.servers : {};
+  return Object.keys(servers).map((name) => {
+    const raw = servers[name] && typeof servers[name] === "object" ? servers[name] : {};
+    const summary = {
+      name,
+      type: raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio"),
+      enabled: raw.enabled !== false,
+    };
+    if (typeof raw.command === "string") {
+      summary.command = raw.command;
+      summary.args = Array.isArray(raw.args) ? raw.args.map(String) : [];
+    }
+    if (typeof raw.url === "string") summary.url = redactUrl(raw.url);
+    if (raw.env) summary.env = maskValues(raw.env);
+    if (raw.headers) summary.headers = maskValues(raw.headers);
+    return summary;
+  });
+}
+
+function trustState(entry) {
+  let bytes;
+  try {
+    bytes = fs.readFileSync(entry.path);
+  } catch {
+    return "missing";
+  }
+  return crypto.createHash("sha256").update(bytes).digest("hex") === entry.sha256 ? "ok" : "changed";
+}
+
+function runTrust(flags, dataDir, asJson) {
+  const say = (value, lines) => console.log(asJson ? JSON.stringify(value, null, 2) : lines.join("\n"));
+  if (flags.list) {
+    const entries = listTrustedLocalConfigs(dataDir).map((e) => ({ ...e, state: trustState(e) }));
+    say(
+      { entries },
+      entries.length === 0
+        ? ["no trusted local broker configs"]
+        : entries.map((e) => `${e.path}  ${String(e.sha256).slice(0, 12)}  ${e.trustedAt}  ${e.state}`)
+    );
+    return;
+  }
+  const dir = path.resolve(typeof flags.cwd === "string" ? flags.cwd : process.cwd());
+  if (flags.revoke) {
+    const file =
+      typeof flags.file === "string"
+        ? path.resolve(flags.file)
+        : (discoverLocalConfig(dir) ?? path.join(resolveRepoRoot(dir), ".agents", "ignis-broker.json"));
+    const revoked = revokeLocalConfig(dataDir, file);
+    say({ path: file, revoked }, [revoked ? `revoked ${file}` : `nothing to revoke for ${file}`]);
+    return;
+  }
+  const file = discoverLocalConfig(dir);
+  if (!file) {
+    throw new Error(`no local broker config found for ${dir} (it must be inside a git repository)`);
+  }
+  const read = readTrustedLocalConfig(dataDir, file);
+  if (read.error) throw new Error(read.error.message);
+  const servers = summarizeServers(read.parsed);
+  const { sha256 } = trustLocalConfig(dataDir, file);
+  const lines = [`config: ${file}`, `sha256: ${sha256}`, "servers:"];
+  for (const s of servers) {
+    const target = s.url ?? [s.command, ...(s.args ?? [])].join(" ");
+    lines.push(`  - ${s.name} [${s.type}, ${s.enabled ? "enabled" : "disabled"}] ${target}`);
+    if (s.env) lines.push(`      env: ${Object.keys(s.env).map((k) => `${k}=***`).join(" ")}`);
+    if (s.headers) lines.push(`      headers: ${Object.keys(s.headers).map((k) => `${k}=***`).join(" ")}`);
+  }
+  lines.push("trusted");
+  say({ path: file, sha256, servers, trusted: true }, lines);
 }
 
 async function postDaemon(home, dataDir, endpoint, body) {
@@ -112,9 +215,14 @@ async function main() {
     console.log(
       [
         `ignis-broker ${BROKER_VERSION} — resilient local MCP broker daemon`,
-        "Commands: list | describe | call | status | restart | stop | daemon | mcp-bridge | import-mcp | discover-mcp | register-mcp | add-http-mcp | unregister-mcp | onboarding",
+        "Commands: trust [--cwd <dir>] [--revoke | --list] [--json] | list | describe | call | status | restart | stop | daemon | mcp-bridge | import-mcp | discover-mcp | register-mcp | add-http-mcp | unregister-mcp | onboarding",
       ].join("\n")
     );
+    return;
+  }
+
+  if (cmd === "trust") {
+    runTrust(flags, dataDir, asJson);
     return;
   }
 

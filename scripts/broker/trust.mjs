@@ -21,6 +21,17 @@ export function normalizeTrustPath(file) {
   }
 }
 
+function assertContained(file) {
+  const dir = path.dirname(path.dirname(path.resolve(file)));
+  const real = fs.realpathSync.native(file);
+  const expected = path.join(fs.realpathSync.native(dir), ".agents", "ignis-broker.json");
+  if (fold(real) !== fold(expected)) {
+    throw new Error(
+      `refusing to trust ${file}: it resolves to ${real}; a local broker config must be a regular file in its own .agents folder, not a link`
+    );
+  }
+}
+
 function sha256Of(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
@@ -74,6 +85,7 @@ function saveStore(dataDir, configs) {
 }
 
 export function trustLocalConfig(dataDir, file, { nowMs = Date.now() } = {}) {
+  assertContained(file);
   const bytes = fs.readFileSync(file);
   try {
     parseObject(bytes);
@@ -109,6 +121,7 @@ export function readTrustedLocalConfig(dataDir, file) {
   let bytes;
   let parsed;
   try {
+    assertContained(file);
     bytes = fs.readFileSync(file);
     parsed = parseObject(bytes);
   } catch (err) {

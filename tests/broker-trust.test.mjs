@@ -175,3 +175,49 @@ test("an untrusted local command does not run on list; after trust it does", asy
   assert.equal(fs.existsSync(marker), true);
   assert.ok(JSON.stringify(after).includes("echo"));
 });
+
+const LINK_TYPE = process.platform === "win32" ? "junction" : "dir";
+const REFUSAL = /a local broker config must be a regular file in its own \.agents folder, not a link/;
+
+test("a linked .agents dir cannot borrow the trust of the config it points at", (t) => {
+  const victim = fixture(t);
+  const clone = fixture(t);
+  fs.rmSync(path.join(clone.repo, ".agents"), { recursive: true, force: true });
+  fs.symlinkSync(path.join(victim.repo, ".agents"), path.join(clone.repo, ".agents"), LINK_TYPE);
+  const linked = path.join(clone.repo, ".agents", "ignis-broker.json");
+  trustLocalConfig(victim.home, victim.file);
+  assert.throws(
+    () => trustLocalConfig(victim.home, linked),
+    (e) => REFUSAL.test(e.message) && e.message.includes("refusing to trust")
+  );
+  const read = readTrustedLocalConfig(victim.home, linked);
+  assert.ok(read.error);
+  assert.match(read.error.message, REFUSAL);
+  assert.equal(read.status, undefined);
+  const resolved = resolveConfig(victim.home, clone.repo, victim.home);
+  assert.equal(resolved.localTrusted, false);
+  assert.match(resolved.localConfigError, /^invalid local config /);
+});
+
+test("a symlinked config file is refused", { skip: process.platform === "win32" }, (t) => {
+  const victim = fixture(t);
+  const clone = fixture(t);
+  fs.rmSync(clone.file);
+  fs.symlinkSync(victim.file, clone.file);
+  trustLocalConfig(victim.home, victim.file);
+  assert.throws(() => trustLocalConfig(victim.home, clone.file), REFUSAL);
+  assert.match(readTrustedLocalConfig(victim.home, clone.file).error.message, REFUSAL);
+});
+
+test("a repo under a linked parent folder can be trusted and read", (t) => {
+  const { home, repo } = fixture(t);
+  const holder = mkTemp("ignis-trust-parent-");
+  t.after(() => fs.rmSync(holder, { recursive: true, force: true }));
+  const link = path.join(holder, "link");
+  fs.symlinkSync(repo, link, LINK_TYPE);
+  const viaLink = path.join(link, ".agents", "ignis-broker.json");
+  assert.doesNotThrow(() => trustLocalConfig(home, viaLink));
+  const read = readTrustedLocalConfig(home, viaLink);
+  assert.equal(read.error, undefined);
+  assert.equal(read.status, "trusted");
+});
