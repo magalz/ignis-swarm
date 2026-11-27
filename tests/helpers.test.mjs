@@ -170,6 +170,7 @@ test("initGitRepo commits even when the real global config signs commits with a 
     assert.equal(git(process.env, control, ["init"]).status, 0);
     const broken = git(process.env, control, ["commit", "--allow-empty", "-m", "control"]);
     assert.notEqual(broken.status, 0, "hostile config must break a plain commit");
+    assert.match(broken.stderr, /gpg|sign/i, "the commit must fail because of the signing config, not for another reason");
 
     const iso = isolatedEnv();
     try {
