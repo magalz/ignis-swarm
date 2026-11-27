@@ -108,8 +108,12 @@ function buildOnboardingNotice(home, dataDir) {
     .map(([name, info]) => `${name}=${info.available ? "yes" : "no"}`)
     .join(", ");
 
+  const brokerCli = path.resolve(PLUGIN_ROOT, "scripts", "ignis-broker.mjs");
+
   return (
     `[ignis-swarm][First-Run Onboarding Required] Load skill \`ignis-onboarding\` before starting the user's request (or let the user skip). ` +
+    `In that skill, replace \`<plugin-root>\` with \`${PLUGIN_ROOT}\` (broker CLI: \`${brokerCli}\`). ` +
+    `Example: \`node "${brokerCli}" onboarding --probe\`. ` +
     `Discovered MCPs (redacted): ${mcpSummary}. Local CLIs: ${cliSummary}. ` +
     `(Main interactive session only — subagents and /swarm workers must ignore this.)`
   );
@@ -188,20 +192,21 @@ async function main() {
     onboarding = null;
   }
 
-  if (!onboarding || onboarding.completed !== true) {
-    if (isInteractiveUserSession(payload)) {
+  const interactive = isInteractiveUserSession(payload);
+  const onboardingDone = onboarding?.completed === true || onboarding?.skipped === true;
+
+  if (!onboardingDone) {
+    if (interactive) {
       try {
         messages.push(buildOnboardingNotice(home, dataDir));
       } catch {}
     }
-  } else {
-    if (onboarding.memtrace?.enabled === true) {
-      messages.push(checkMemtraceStatus(cwd));
-    }
-    if (isInteractiveUserSession(payload)) {
-      const notice = buildReviewRoutingNotice(onboarding.reviewRouting);
-      if (notice) messages.push(notice);
-    }
+  } else if (onboarding.memtrace?.enabled === true) {
+    messages.push(checkMemtraceStatus(cwd));
+  }
+  if (interactive) {
+    const notice = buildReviewRoutingNotice(onboarding?.reviewRouting);
+    if (notice) messages.push(notice);
   }
 
   const indexHint = findDecisionIndexHint(cwd);
