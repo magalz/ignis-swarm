@@ -375,6 +375,15 @@ function withoutStamp(state) {
   return rest;
 }
 
+test("onboarding --save and --reset write the state file atomically, leaving no temp file", () => {
+  withIso((iso) => {
+    onbJson(iso, ["--save", JSON.stringify(SAMPLE_STATE)]);
+    onbJson(iso, ["--reset"]);
+    assert.deepEqual(fs.readdirSync(iso.dirs.brokerData).filter((n) => n.endsWith(".tmp")), []);
+    assert.equal(onbJson(iso, ["--get"]).completed, false);
+  });
+});
+
 test("onboarding --save sets completed true and persists it", () => {
   withIso((iso) => {
     const saved = onbJson(iso, ["--save", JSON.stringify(SAMPLE_STATE)]);

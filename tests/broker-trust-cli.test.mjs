@@ -94,7 +94,7 @@ test("trust --list shows trusted, then changed after an edit, then missing", (t)
   assert.equal(cli(iso, ["trust", "--cwd", repo]).status, 0);
   const ok = cli(iso, ["trust", "--list"]);
   assert.equal(ok.status, 0);
-  assert.match(ok.stdout, /\bok\b/);
+  assert.match(ok.stdout, /\btrusted\b/);
   const okJson = JSON.parse(cli(iso, ["trust", "--list", "--json"]).stdout);
   assert.equal(okJson.entries.length, 1);
   assert.equal(okJson.entries[0].status, "trusted");

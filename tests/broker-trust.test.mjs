@@ -10,6 +10,7 @@ import {
   readTrustedLocalConfig,
   revokeLocalConfig,
   trustLocalConfig,
+  trustStatus,
   trustStorePath,
 } from "../scripts/broker/trust.mjs";
 import { mkTemp, writeMockStdioServer } from "./helpers.mjs";
@@ -87,6 +88,34 @@ test("revoke and list", (t) => {
   assert.equal(readTrustedLocalConfig(home, a.file).status, "untrusted");
   assert.equal(revokeLocalConfig(home, a.file), false);
   assert.equal(listTrustedLocalConfigs(home).length, 1);
+});
+
+test("trustStatus names trusted, changed, untrusted and missing", (t) => {
+  const { home, file } = fixture(t);
+  trustLocalConfig(home, file);
+  const bytes = fs.readFileSync(file);
+  const [entry] = listTrustedLocalConfigs(home);
+  assert.equal(trustStatus(entry, bytes), "trusted");
+  assert.equal(trustStatus(entry, Buffer.concat([bytes, Buffer.from(" ")])), "changed");
+  assert.equal(trustStatus(undefined, bytes), "untrusted");
+  assert.equal(trustStatus({ sha256: 7 }, bytes), "untrusted");
+  assert.equal(trustStatus(entry, null), "missing");
+});
+
+test("listTrustedLocalConfigs reports each entry's status from the file on disk", (t) => {
+  const { home, file } = fixture(t);
+  trustLocalConfig(home, file);
+  assert.equal(listTrustedLocalConfigs(home)[0].status, "trusted");
+  fs.appendFileSync(file, " ");
+  assert.equal(listTrustedLocalConfigs(home)[0].status, "changed");
+  fs.rmSync(file);
+  assert.equal(listTrustedLocalConfigs(home)[0].status, "missing");
+});
+
+test("trusting leaves no temp file next to the store", (t) => {
+  const { home, file } = fixture(t);
+  trustLocalConfig(home, file);
+  assert.deepEqual(fs.readdirSync(home).filter((n) => n.endsWith(".tmp")), []);
 });
 
 test("the store is mode 0600 on POSIX", { skip: process.platform === "win32" }, (t) => {

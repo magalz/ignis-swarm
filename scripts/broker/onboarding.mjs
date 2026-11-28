@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveWindowsExecutable } from "./adapters.mjs";
-import { discoverLocalConfig, discoverMcpConfig } from "./config.mjs";
+import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
+import { describeServers, discoverLocalConfig, discoverMcpConfig } from "./config.mjs";
 import { parseJsonSafely, readTrustedLocalConfig } from "./trust.mjs";
 
 const VALID_TRACKER_KINDS = new Set(["none", "linear", "itsaplan", "github", "other"]);
@@ -12,7 +13,8 @@ const VALID_REVIEW_STRATEGIES = new Set([
   "antigravity_first",
   "headless_always",
 ]);
-const VALID_HEADLESS_BACKENDS = new Set(["claude", "codex"]);
+
+const VALID_HEADLESS_BACKENDS = new Set(["claude", "codex"]);
 const STATE_KEYS = new Set([
   "version",
   "completed",
@@ -190,16 +192,8 @@ export function saveOnboardingState(dataDir, patch = {}) {
   }
 
   const next = normalizeState(merged);
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(onboardingPath(dataDir), JSON.stringify(next, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  writePrivateFileAtomic(onboardingPath(dataDir), JSON.stringify(next, null, 2));
   return next;
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function oneOf(set) {
@@ -294,11 +288,7 @@ export function skipOnboarding(dataDir) {
 
 export function resetOnboarding(dataDir) {
   const next = defaultOnboardingState();
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(onboardingPath(dataDir), JSON.stringify(next, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  writePrivateFileAtomic(onboardingPath(dataDir), JSON.stringify(next, null, 2));
   return next;
 }
 
@@ -409,55 +399,14 @@ export function defaultMcpSourcePath(fromFlag) {
     : path.join(os.homedir(), ".gemini", "config", "mcp_config.json");
 }
 
-function maskValues(obj) {
-  const out = {};
-  for (const key of Object.keys(obj && typeof obj === "object" ? obj : {})) out[key] = "***";
-  return out;
-}
-
-function redactUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.username || u.password) {
-      u.username = "***";
-      u.password = "";
-    }
-    for (const key of [...u.searchParams.keys()]) u.searchParams.set(key, "***");
-    u.hash = "";
-    return u.toString();
-  } catch {
-    return "***";
-  }
-}
-
-export function summarizeServers(parsed) {
-  const servers = parsed?.servers && typeof parsed.servers === "object" ? parsed.servers : {};
-  return Object.keys(servers).map((name) => {
-    const raw = servers[name] && typeof servers[name] === "object" ? servers[name] : {};
-    const summary = {
-      name,
-      type: raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio"),
-      enabled: raw.enabled !== false,
-    };
-    if (typeof raw.command === "string") {
-      summary.command = raw.command;
-      summary.args = Array.isArray(raw.args) ? raw.args.map(String) : [];
-    }
-    if (typeof raw.url === "string") summary.url = redactUrl(raw.url);
-    if (raw.env) summary.env = maskValues(raw.env);
-    if (raw.headers) summary.headers = maskValues(raw.headers);
-    return summary;
-  });
-}
-
-export function probeLocalBrokerConfig(dataDir, cwd) {
+function probeLocalBrokerConfig(dataDir, cwd) {
   const file = discoverLocalConfig(cwd);
   if (!file) return null;
   const read = readTrustedLocalConfig(dataDir, file);
   if (read.error) {
     return { path: read.path, trusted: false, servers: [], error: read.error.message };
   }
-  return { path: read.path, trusted: read.status === "trusted", servers: summarizeServers(read.parsed) };
+  return { path: read.path, trusted: read.status === "trusted", servers: describeServers(read.parsed) };
 }
 
 export function probeEnvironment(home, dataDir, fromMcpPath, codexHome, cwd) {
