@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseJsonSafely, readTrustedLocalConfig } from "./trust.mjs";
 
-export const BROKER_VERSION = "1.0.1";
+export const BROKER_VERSION = "1.1.0";
 
 export const DEFAULT_CONFIG = Object.freeze({
   requestTimeoutMs: 120_000,

@@ -357,8 +357,8 @@ test("detectCli on Windows prefers .cmd over extensionless POSIX shim on PATH", 
   }
 });
 
-test("BROKER_VERSION is 1.0.1", () => {
-  assert.equal(BROKER_VERSION, "1.0.1");
+test("BROKER_VERSION is 1.1.0", () => {
+  assert.equal(BROKER_VERSION, "1.1.0");
 });
 
 const T = { timeoutMs: 30_000 };

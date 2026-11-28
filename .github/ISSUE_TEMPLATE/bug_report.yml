@@ -39,7 +39,7 @@ body:
     id: versions
     attributes:
       label: Versions (Plugin, Node.js, Antigravity)
-      placeholder: "ignis-swarm 1.0.0, Node v20.x, Antigravity CLI/App"
+      placeholder: "ignis-swarm 1.1.0, Node v22.x, Antigravity CLI/App"
     validations:
       required: true
 
