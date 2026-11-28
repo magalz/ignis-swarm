@@ -600,8 +600,9 @@ test("onboarding --probe redacts the env and headers of local config servers", (
     assert.equal(res.stdout.includes(LOCAL_SECRET), false);
     const local = JSON.parse(res.stdout).localBrokerConfig;
     assert.deepEqual(local.servers.map((s) => s.name).sort(), ["local", "remote"]);
-    assert.deepEqual(local.servers.find((s) => s.name === "local").env, { API_TOKEN: "***" });
-    assert.deepEqual(local.servers.find((s) => s.name === "remote").headers, { Authorization: "***" });
+    assert.deepEqual(local.servers.find((s) => s.name === "local").env, { API_TOKEN: "***REDACTED***" });
+    assert.deepEqual(local.servers.find((s) => s.name === "remote").headers, { Authorization: "***REDACTED***" });
+    assert.equal(local.servers.find((s) => s.name === "remote").url, "https://mcp.example.test/mcp");
   });
 });
 

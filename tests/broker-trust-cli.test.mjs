@@ -64,7 +64,9 @@ test("trust prints a redacted summary and trusts the config", (t) => {
   assert.ok(res.stdout.includes("local-http"));
   assert.ok(res.stdout.includes("srv.mjs"));
   assert.ok(res.stdout.includes("example.test"));
-  assert.ok(res.stdout.includes("***"));
+  assert.match(res.stdout, /^ {6}env: TOKEN=\*\*\*REDACTED\*\*\*$/m);
+  assert.match(res.stdout, /^ {6}headers: Authorization=\*\*\*REDACTED\*\*\*$/m);
+  assert.match(res.stdout, /^ {2}- local-http \[http, enabled\] https:\/\/example\.test\/mcp$/m);
   assert.match(res.stdout, /^trusted$/m);
   assertNoSecrets(res, secrets);
   const resolved = resolveConfig(iso.dirs.brokerHome, repo, iso.dirs.brokerData);
@@ -80,10 +82,14 @@ test("trust --json is one object without secrets", (t) => {
   assert.equal(out.sha256.length, 64);
   assert.equal(out.trusted, true);
   assert.deepEqual(out.servers.map((s) => s.name).sort(), ["local-http", "local-stdio"]);
+  const byName = Object.fromEntries(out.servers.map((s) => [s.name, s]));
+  assert.deepEqual(byName["local-stdio"].env, { TOKEN: "***REDACTED***" });
+  assert.deepEqual(byName["local-http"].headers, { Authorization: "***REDACTED***" });
+  assert.equal(byName["local-http"].url, "https://example.test/mcp");
   assertNoSecrets(res, secrets);
 });
 
-test("trust --list shows ok, then changed after an edit, then missing", (t) => {
+test("trust --list shows trusted, then changed after an edit, then missing", (t) => {
   const { iso, repo, file } = setup(t);
   assert.equal(cli(iso, ["trust", "--cwd", repo]).status, 0);
   const ok = cli(iso, ["trust", "--list"]);
@@ -91,7 +97,7 @@ test("trust --list shows ok, then changed after an edit, then missing", (t) => {
   assert.match(ok.stdout, /\bok\b/);
   const okJson = JSON.parse(cli(iso, ["trust", "--list", "--json"]).stdout);
   assert.equal(okJson.entries.length, 1);
-  assert.equal(okJson.entries[0].state, "ok");
+  assert.equal(okJson.entries[0].status, "trusted");
   fs.appendFileSync(file, " ");
   assert.match(cli(iso, ["trust", "--list"]).stdout, /\bchanged\b/);
   fs.rmSync(file);
