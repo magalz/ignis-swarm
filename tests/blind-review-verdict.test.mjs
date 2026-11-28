@@ -75,31 +75,34 @@ table("the last Status line wins", [
   ["Status: ISSUES\nRetracted.\nStatus: PASS\n", "PASS"],
 ]);
 
-test("an empty or whitespace-only output gives the empty-output reason", () => {
-  for (const text of ["", "  \n\t\n"]) {
+for (const text of ["", "  \n\t\n"]) {
+  test(`an empty or whitespace-only output gives the empty-output reason: ${JSON.stringify(text)}`, () => {
     assert.equal(noVerdictReason(text), NO_VERDICT_EMPTY);
-  }
-});
+  });
+}
 
-test("the reason carries the output as the detail, one line, trimmed", () => {
-  const cases = [
-    ["app.js line 1 looks fine to me.\n", "app.js line 1 looks fine to me."],
-    ["Overall Status: PASS\n", "Overall Status: PASS"],
-    ["Status: unknown\n", "Status: unknown"],
-    ["Status: PASSED\n", "Status: PASSED"],
-    ["**Status:** PASSED\n", "**Status:** PASSED"],
-    ["Status: ISSUESFOUND\n", "Status: ISSUESFOUND"],
-    ["The reviewer rambled.\r\n\r\n\tIt never\n   gave a verdict.\n", "The reviewer rambled. It never gave a verdict."],
-  ];
-  for (const [text, detail] of cases) {
+const DETAIL_CASES = [
+  ["app.js line 1 looks fine to me.\n", "app.js line 1 looks fine to me."],
+  ["Overall Status: PASS\n", "Overall Status: PASS"],
+  ["Status: unknown\n", "Status: unknown"],
+  ["Status: PASSED\n", "Status: PASSED"],
+  ["**Status:** PASSED\n", "**Status:** PASSED"],
+  ["Status: ISSUESFOUND\n", "Status: ISSUESFOUND"],
+  ["The reviewer rambled.\r\n\r\n\tIt never\n   gave a verdict.\n", "The reviewer rambled. It never gave a verdict."],
+];
+
+for (const [text, detail] of DETAIL_CASES) {
+  test(`the reason carries the output as the detail, one line, trimmed: ${JSON.stringify(text)}`, () => {
     assert.equal(noVerdictReason(text), `${NO_VERDICT_PREFIX}${detail}`);
-  }
+  });
+}
+
+const LONG_OUTPUT = `${"a".repeat(150)}\n${"b".repeat(300)}\n`;
+
+test("the reason carries the first 200 characters of the output", () => {
+  assert.equal(noVerdictReason(LONG_OUTPUT), `${NO_VERDICT_PREFIX}${"a".repeat(150)} ${"b".repeat(49)}`);
 });
 
-test("the reason carries the first 200 characters of the output on a single line", () => {
-  const long = `${"a".repeat(150)}\n${"b".repeat(300)}\n`;
-  const reason = noVerdictReason(long);
-  assert.equal(reason, `${NO_VERDICT_PREFIX}${"a".repeat(150)} ${"b".repeat(49)}`);
-  assert.equal(reason.length - NO_VERDICT_PREFIX.length, 200);
-  assert.ok(!/[\r\n]/.test(reason));
+test("the reason for a long output stays on a single line", () => {
+  assert.doesNotMatch(noVerdictReason(LONG_OUTPUT), /[\r\n]/);
 });
