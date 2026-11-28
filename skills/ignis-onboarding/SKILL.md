@@ -27,13 +27,13 @@ node "<broker-cli>" onboarding --probe [--cwd <repo-dir>]
 Parse the JSON output before asking any questions. Do **not** print raw secrets or tokens. Fields used later:
 
 - `discoveredMcps[]`: `name`, `transport`, `alreadyManaged`, `disabled`, `suggestedPerWorkspace` (true when the server sets a `cwd` or its name looks workspace-bound, such as context, serena, lsp, git, fs, repo, sqlite).
-- `localBrokerConfig`: `null` when the repository has no `.agents/ignis-broker.json`; otherwise `{ path, trusted, servers }` (servers redacted), or `{ path, trusted: false, servers: [], error }` when the file is unreadable.
+- `localBrokerConfig`: `null` when the repository has no `.agents/ignis-broker.json`; otherwise `{ path, trusted, servers }` (servers redacted: `env` and header values are `***REDACTED***`, URLs have no credentials or query), or `{ path, trusted: false, servers: [], error }` when the file is unreadable.
 
 ### Trust step (only when `localBrokerConfig` is not null and `trusted` is false)
 
 A repository-local config can start commands on the user's machine, so the broker ignores it until the user trusts that exact file. Do this before Step 2:
 
-1. Show the file `path` and the redacted `servers` (name, type, command or URL; values are masked). If `error` is set, show it and do not offer to trust.
+1. Show the file `path` and the redacted `servers` (name, type, command or URL; values are `***REDACTED***`, URLs carry no credentials or query). If `error` is set, show it and do not offer to trust.
 2. Ask whether to trust that exact file (`ask_question`, `is_multi_select: false`, neutral options, with the Step 2 briefing). Say that `${VAR}` references are never expanded in a local config (the text is used literally), and that editing the file afterwards voids the trust.
 3. On yes, run `node "<broker-cli>" trust --cwd <repo-dir>`. It prints the servers and records the file's hash. The permission hook always prompts the user to confirm `trust` (`force_ask`), even when you run it; expect that prompt. On no, change nothing: the broker keeps using the global config and reports the local one as untrusted.
 
