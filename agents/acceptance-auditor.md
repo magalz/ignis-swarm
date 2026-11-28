@@ -30,6 +30,7 @@ You may read the approved plan, the connected issue tracker (only when one is ac
 3. **Check the seams.** Verify that behavior crossing task boundaries holds end to end.
 4. **Check the records.** Every `[ADR]` or `[BDR]` flagged in the plan exists as its own file and has a row in its `INDEX.md`.
 5. **Report only what you can prove.** Cite `file:line` or command output.
+6. **Name what you cannot check.** A checklist step your tools cannot perform (for example `/browser` verification of UI changes) is reported as `BLOCKED` with the reason, for `@coordinator` to run.
 
 ## Output Format
 ```markdown
