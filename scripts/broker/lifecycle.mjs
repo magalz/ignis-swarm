@@ -253,8 +253,11 @@ function notExited(pid) {
 
 async function shutdownAndKill(info) {
   await requestShutdown(info);
-  if (await waitUntilGone(info.pid, SHUTDOWN_WAIT_MS)) return true;
-  return killAndWait(info.pid);
+  if (await waitUntilGone(info.pid, SHUTDOWN_WAIT_MS)) return "stopped";
+  const identity = await confirmedIdentity(info.pid);
+  if (identity === "dead") return "stopped";
+  if (identity === "other") return "other";
+  return (await killAndWait(info.pid)) ? "stopped" : "alive";
 }
 
 export async function stopDaemon(dataDir) {
@@ -265,14 +268,10 @@ export async function stopDaemon(dataDir) {
     if (identity === "dead" || identity === "other") dropDaemonInfo(dataDir);
     return false;
   }
-  const identity = await confirmedIdentity(info.pid);
-  if (identity === "other") {
-    dropDaemonInfo(dataDir);
-    return false;
-  }
-  if (!(await shutdownAndKill(info))) throw notExited(info.pid);
+  const outcome = await shutdownAndKill(info);
+  if (outcome === "alive") throw notExited(info.pid);
   dropDaemonInfo(dataDir);
-  return true;
+  return outcome === "stopped";
 }
 
 export function parseSemver(version) {
@@ -313,12 +312,12 @@ export async function ensureDaemon(home, dataDir, entryScript) {
       if (h?.ok && isDaemonVersionAcceptable(h.version, BROKER_VERSION)) {
         return recheck;
       }
-      if (isPidAlive(recheck.pid) && (await confirmedIdentity(recheck.pid)) === "broker") {
-        if (!h) {
-          if (!(await killAndWait(recheck.pid))) throw notExited(recheck.pid);
-        } else if (!(await shutdownAndKill(recheck))) {
+      if (h) {
+        if ((await shutdownAndKill(recheck)) === "alive") {
           throw new Error(`could not stop the outdated ignis-broker daemon pid ${recheck.pid}`);
         }
+      } else if ((await confirmedIdentity(recheck.pid)) === "broker" && !(await killAndWait(recheck.pid))) {
+        throw notExited(recheck.pid);
       }
       dropDaemonInfo(dataDir);
     }
