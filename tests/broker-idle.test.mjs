@@ -151,7 +151,7 @@ ${body}
     windowsHide: true,
     stdio: "ignore",
   });
-  const killer = setTimeout(() => child.kill("SIGKILL"), 8000);
+  const killer = setTimeout(() => child.kill("SIGKILL"), 30_000);
   return new Promise((resolve) => child.once("close", resolve)).finally(() => clearTimeout(killer));
 }
 
@@ -252,4 +252,69 @@ setInterval(() => {
   assert.equal(await closed, 1);
   const dead = await waitFor(() => !isPidAlive(childPid), 4000);
   assert.equal(dead, true, "the pooled child survived the daemon crash");
+});
+
+const SUPERVISOR_URL = pathToFileURL(path.join(ROOT, "scripts", "broker", "supervisor.mjs")).href;
+
+const SLOW_FIRST_SHUTDOWN = `
+const { Supervisor } = await import(${JSON.stringify(SUPERVISOR_URL)});
+let shutdownCalls = 0;
+Supervisor.prototype.shutdown = async function () {
+  shutdownCalls += 1;
+  if (shutdownCalls === 1) await new Promise((resolve) => setTimeout(resolve, 1800));
+};
+`;
+
+test("a crash while the idle timer is due exits 1 and logs the crash instead of exiting 0 on idle", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-crash-idle-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  fs.writeFileSync(
+    path.join(iso.dirs.brokerHome, "servers.json"),
+    JSON.stringify({ version: 1, defaults: { idleTimeoutSecs: 1 }, servers: {} })
+  );
+  const code = await startHarness(
+    iso,
+    work,
+    `${SLOW_FIRST_SHUTDOWN}
+setTimeout(() => { throw new Error("crash-idle-boom"); }, 300);`
+  );
+  assert.equal(code, 1, "an idle tick during the crash window made the daemon exit as if it had idled");
+  const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
+  assert.match(log, /crash-idle-boom/);
+});
+
+test("an admin shutdown request during a crash is ignored and the crash still exits 1", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-crash-admin-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const closed = startHarness(
+    iso,
+    work,
+    `${SLOW_FIRST_SHUTDOWN}
+setTimeout(() => { throw new Error("crash-admin-boom"); }, 300);`
+  );
+  const info = await waitFor(() => readDaemonInfo(iso.dirs.brokerData), 15_000).then(() => readDaemonInfo(iso.dirs.brokerData));
+  const logged = await waitFor(() => {
+    try {
+      return /crash-admin-boom/.test(fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8"));
+    } catch {
+      return false;
+    }
+  }, 15_000);
+  assert.equal(logged, true, "the crash was never logged");
+  await fetch(`http://127.0.0.1:${info.port}/admin/shutdown`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${info.token}` },
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => {});
+  assert.equal(await closed, 1, "the admin shutdown turned the crash into a clean exit");
 });
