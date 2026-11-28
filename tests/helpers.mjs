@@ -74,20 +74,43 @@ function comparablePath(text) {
 
 const OWN_ENTRIES = [...new Set([BROKER_ENTRY, fs.realpathSync.native(BROKER_ENTRY)].map(comparablePath))];
 
-// The daemon is spawned detached, so it leads its own process group: killing the
-// group takes its mock MCP children with it.
+// The broker spawns each stdio MCP child detached, so every child leads its own
+// process group. Collect the whole tree first: once the daemon dies its children
+// are re-parented and the link to them is lost.
+function descendantsOf(pid) {
+  const res = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 10_000 });
+  const children = new Map();
+  for (const line of (res.stdout ?? "").split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (!Number.isInteger(child) || !Number.isInteger(parent)) continue;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(child);
+  }
+  const found = [];
+  const queue = [pid];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
 function killTree(pid) {
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 20_000, windowsHide: true });
     return;
   }
-  try {
-    process.kill(-pid, "SIGKILL");
-    return;
-  } catch {}
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {}
+  for (const target of [pid, ...descendantsOf(pid)]) {
+    try {
+      process.kill(-target, "SIGKILL");
+      continue;
+    } catch {}
+    try {
+      process.kill(target, "SIGKILL");
+    } catch {}
+  }
 }
 
 /**
