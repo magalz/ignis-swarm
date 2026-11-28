@@ -70,7 +70,7 @@ function messageOf(out) {
   return out.injectSteps[0].systemMessage.systemMessage;
 }
 
-/** A user transcript of the given size, already prompted once, ready for cooldown scenarios. */
+/** A 110 KB user transcript, already prompted once, ready for cooldown scenarios. */
 function promptedOnce(t, conversationId) {
   const box = setup(t);
   const payload = { conversationId, transcriptPath: box.transcriptPath };

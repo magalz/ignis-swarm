@@ -179,12 +179,6 @@ test("empty workspace values deny and say that no workspace was supplied", (t) =
   assert.match(denied.reason, /no workspace supplied/);
 });
 
-test("with git available the same fallback record allows (control for the no-git denial)", (t) => {
-  const { mark, gate, repo } = setup(t);
-  mark(repo, "fallback");
-  assert.equal(gate().decision, "allow");
-});
-
 test("the gate denies when git cannot be run", (t) => {
   const { mark, gate, repo, noGitEnv } = setup(t);
   mark(repo, "fallback");
@@ -275,20 +269,15 @@ test("when no root has a current record the denial names the backend and model",
 });
 
 /** Hook environments that point git at the other repository; root detection must ignore them. */
-function redirectedEnvs({ env, other }) {
-  const pointedAtOther = { ...env, GIT_DIR: path.join(other, ".git") };
-  return [
-    ["GIT_DIR", pointedAtOther],
-    ["GIT_DIR and GIT_WORK_TREE", { ...pointedAtOther, GIT_WORK_TREE: other }],
-  ];
-}
-
-for (const [label, index] of [["GIT_DIR", 0], ["GIT_DIR and GIT_WORK_TREE", 1]]) {
+for (const [label, extra] of [
+  ["GIT_DIR", () => ({})],
+  ["GIT_DIR and GIT_WORK_TREE", (other) => ({ GIT_WORK_TREE: other })],
+]) {
   test(`${label} in the hook environment does not redirect root detection`, (t) => {
     const { mark, gate, repo, other, sub, env } = setup(t);
     runGit(other, ["commit", "--allow-empty", "-m", "other moved"], { env });
     mark(repo, "fallback");
-    const [, hookEnv] = redirectedEnvs({ env, other })[index];
+    const hookEnv = { ...env, GIT_DIR: path.join(other, ".git"), ...extra(other) };
     assert.equal(gate({ cwd: sub, hookEnv }).decision, "allow");
   });
 }
