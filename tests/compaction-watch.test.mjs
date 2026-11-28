@@ -233,4 +233,3 @@ test("compaction-watch stores the last CHECKPOINT end and the active size in its
   assert.equal(state.lastMarkerEnd, boundary);
   assert.equal(state.lastPromptedBytes, fs.statSync(transcriptPath).size - boundary);
 });
-
