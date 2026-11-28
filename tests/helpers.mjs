@@ -74,11 +74,17 @@ function comparablePath(text) {
 
 const OWN_ENTRIES = [...new Set([BROKER_ENTRY, fs.realpathSync.native(BROKER_ENTRY)].map(comparablePath))];
 
+// The daemon is spawned detached, so it leads its own process group: killing the
+// group takes its mock MCP children with it.
 function killTree(pid) {
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 20_000, windowsHide: true });
     return;
   }
+  try {
+    process.kill(-pid, "SIGKILL");
+    return;
+  } catch {}
   try {
     process.kill(pid, "SIGKILL");
   } catch {}
@@ -108,7 +114,8 @@ function stopLeftoverDaemons(dirs, env) {
   }
 }
 
-function removeTree(root) {
+/** Remove `root` recursively with retries; a folder that stays busy (EPERM on Windows) only warns, it never throws. */
+export function removeTree(root) {
   try {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 });
   } catch (err) {
