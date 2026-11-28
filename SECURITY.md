@@ -53,8 +53,8 @@ A `.agents/ignis-broker.json` can start processes, so it is untrusted by default
 - An agent that runs `node ... ignis-broker.mjs trust` always triggers a confirmation prompt (`force_ask`) from the command guard; only you can approve it.
 
 ### Command guard (`hooks/pre-tool-use.mjs`)
-- **Denied:** `--no-verify` (and `commit -n`) or a `core.hooksPath` override on `commit`, `push`, `merge`, `rebase` and `cherry-pick`, force-pushes whose refspec names `main` or `master` and deleting those branches remotely, `git reset --hard`, and deleting a filesystem root or home directory.
-- **Asks you first (`force_ask`):** other force-pushes (including a bare `git push --force`) and mirror pushes, `git clean` with force, `ignis-broker trust`, and command lines nested or large enough that the parser stops analysing them.
+- **Denied:** `--no-verify` (and `commit -n`) or a `core.hooksPath` override on `commit`, `push`, `merge`, `rebase` and `cherry-pick`, plain force-pushes (`--force`, `-f` or a `+refspec`) whose refspec names `main` or `master`, and deleting those branches remotely, `git reset --hard`, and deleting a filesystem root or home directory.
+- **Asks you first (`force_ask`):** other force-pushes (including a bare `git push --force`, and `--force-with-lease` or `--force-if-includes` to any branch, `main` included) and mirror pushes, `git clean` with force, `node ... ignis-broker.mjs trust`, and command lines nested or large enough that the parser stops analysing them.
 - **Limits.** The guard reads the command words of the text the agent sends, through shells, `-c` payloads, pipes and a set of interpreters' expressions. It is not a sandbox: it does not watch what a program does once it runs, it cannot see a command assembled at run time or inside a script file, and a tool it does not know can still do harm. Treat it as a guardrail against common mistakes, not a security boundary against a hostile agent.
 
 ### Blind review isolation

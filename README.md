@@ -163,13 +163,13 @@ How the broker behaves:
 - **`import-mcp` merges** into `~/.ignis-broker/servers.json` and keeps servers registered earlier (a server with the same name is replaced). Literal env/header secrets move to `~/.ignis-broker/.env` as `IGNIS_<SERVER>_<KEY>`; the import is rejected if a generated variable name collides with another server's variable or a value contains a line break.
 - **Working directory.** A stdio server without a `cwd` starts in the broker data directory (the daemon's working directory); a `perWorkspace` server without one starts in the workspace's repository root.
 - **Lifecycle.** `stop` waits for the daemon and fails, naming its pid, if it survives. An explicit `restart` stops busy servers at once. A config change lets in-flight calls finish first. The daemon exits after `idleTimeoutSecs` (default 900) without traffic.
-- **Errors mask known secrets.** In errors the broker returns, including fallback errors, expanded `${VAR}` values, header values, URL credentials and query values, and every stdio `env` value of 4 or more characters are replaced with `***`; shorter values are not. `import-mcp` and `discover-mcp` print redacted configs.
+- **Errors mask known secrets.** In errors the broker returns, including fallback errors, expanded `${VAR}` values, header values, URL credentials and query values, and every stdio `env` value are replaced with `***` when they are 4 or more characters long. `import-mcp` and `discover-mcp` print redacted configs.
 
 ### Automatic Lifecycle Hooks (`hooks.json`)
 | Hook | What it does automatically |
 | :--- | :--- |
 | **`SessionStart`** | Prompts first-run onboarding and injects `[ignis-swarm][Phase 4 Review Routing]` notice for `headless_always` / `antigravity_first` (main session only), detects `docs/{adr,bdr}/INDEX.md`, warns on local broker config errors/fallbacks, and checks opt-in Memtrace health. |
-| **`PreToolUse`** (`run_command\|invoke_subagent`) | Enforces Phase 4 routing (blocks premature `blind-edge-hunter` under `headless_always`). Also blocks `--no-verify`, force-push to `main`/`master`, `git reset --hard`, and destructive root deletions; asks confirmation before other force pushes or `git clean -f`. |
+| **`PreToolUse`** (`run_command\|invoke_subagent`) | Enforces Phase 4 routing (blocks premature `blind-edge-hunter` under `headless_always`). Also blocks `--no-verify`, plain force-push to `main`/`master`, `git reset --hard`, and destructive root deletions; asks confirmation before other force pushes or `git clean -f`. |
 | **`PostToolUse`** | Logs lightweight per-conversation JSONL audit entries (`~/.ignis-broker/audit/<id>.jsonl`) and tags test executions. |
 | **`PostInvocation`** | Deterministic `compaction-watch.mjs` monitors active transcript size (default `550 KB`) and prompts a pre-filled `/compact` checkpoint. |
 | **`Stop`** | Blocks finishing if any `ADR-NNN`/`BDR-NNN` file is missing from `INDEX.md` or if added git diff lines contain `.only`, `.skip`, `#[ignore]`, `t.Skip`, `@ts-ignore`, `eslint-disable`, bare `// nolint`, or new `TODO`/`FIXME`. |
