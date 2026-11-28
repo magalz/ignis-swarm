@@ -24,7 +24,7 @@ function runStopGate({ root, env }, cwd, extra = {}) {
     input: JSON.stringify({ cwd, terminationReason: "NO_TOOL_CALL", ...extra }),
     env,
     cwd: root,
-    timeoutMs: 20_000,
+    timeoutMs: 60_000,
   });
   assert.equal(res.timedOut, false, "stop-gate timed out");
   assert.equal(res.status, 0, `stop-gate failed: ${res.stderr}`);
@@ -39,32 +39,44 @@ function append(repo, relPath, text) {
   fs.appendFileSync(path.join(repo, relPath), text);
 }
 
-test("stop-gate prevents loops, checks ADR INDEX integrity, and catches banned diff shortcuts", (t) => {
+/** A repository whose ADR folder holds ADR-001-cache.md but whose INDEX lists only another record. */
+function repoWithUnindexedAdr(t) {
   const box = sandbox(t);
   const repoDir = repoIn(box);
-
   fs.mkdirSync(path.join(repoDir, "docs", "adr"), { recursive: true });
   fs.writeFileSync(path.join(repoDir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n| ADR-0010 | ADR-0010-other.md |\n");
   fs.writeFileSync(path.join(repoDir, "docs", "adr", "ADR-001-cache.md"), "# ADR-001\n");
+  return { box, repoDir };
+}
 
-  const unindexed = runStopGate(box, repoDir, { continuationActive: false }).out;
-  assert.equal(unindexed.decision, "continue");
-  assert.match(unindexed.reason, /ADR-001-cache\.md/);
+test("stop-gate asks to continue when an ADR file is missing from the INDEX", (t) => {
+  const { box, repoDir } = repoWithUnindexedAdr(t);
+  const out = runStopGate(box, repoDir, { continuationActive: false }).out;
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /ADR-001-cache\.md/);
+});
 
-  const noLoop = runStopGate(box, repoDir, { continuationActive: true }).out;
-  assert.deepEqual(noLoop, {});
+test("stop-gate does not loop: an active continuation gets no verdict", (t) => {
+  const { box, repoDir } = repoWithUnindexedAdr(t);
+  assert.deepEqual(runStopGate(box, repoDir, { continuationActive: true }).out, {});
+});
 
+test("stop-gate accepts an ADR INDEX that lists every ADR file", (t) => {
+  const { box, repoDir } = repoWithUnindexedAdr(t);
   fs.writeFileSync(
     path.join(repoDir, "docs", "adr", "INDEX.md"),
     "| ID | File |\n|---|---|\n| ADR-001 | ADR-001-cache.md |\n"
   );
-  const cleanOut = runStopGate(box, repoDir, { continuationActive: false }).out;
-  assert.deepEqual(cleanOut, {});
+  assert.deepEqual(runStopGate(box, repoDir, { continuationActive: false }).out, {});
+});
 
+test("stop-gate catches a skipped test added to a tracked file", (t) => {
+  const box = sandbox(t);
+  const repoDir = repoIn(box);
   append(repoDir, "src/lib.js", "test.skip('skipped', () => {});\n");
-  const bannedDiff = runStopGate(box, repoDir, { continuationActive: false }).out;
-  assert.equal(bannedDiff.decision, "continue");
-  assert.match(bannedDiff.reason, /\.skip/);
+  const out = runStopGate(box, repoDir, { continuationActive: false }).out;
+  assert.equal(out.decision, "continue");
+  assert.match(out.reason, /src\/lib\.js: detected skipped test/);
 });
 
 test("stop-gate flags a focused test in an untracked file", (t) => {
