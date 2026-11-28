@@ -38,7 +38,7 @@ Once the final coding wave passes `@verifier`:
 
 ## Phase 4: 3-Lens Final Slice Audit
 Spawn the final audit per `ignis-review` Level 2:
-1. **`@blind-edge-hunter`** — route via `reviewRouting.strategy` as defined in [ignis-review](../ignis-review/SKILL.md) ("Phase 4 Review Routing"). Pass **only** the git diff scope, with zero access to plans or issue trackers.
+1. **`@blind-edge-hunter`** — route via `reviewRouting.strategy` as defined in [ignis-review](../ignis-review/SKILL.md) ("Phase 4 Review Routing"). Pass **only** the git diff scope; never pass plans or issue-tracker notes (its tools and access are limited as `agents/blind-edge-hunter.md` states).
 2. **`@acceptance-auditor`** — independent high-reasoning reviewer with full access to the plan, `trackers` (if any), and `docs/{adr,bdr}/`.
 
 ## Phase 5: Closure & Hard Compaction Checkpoint

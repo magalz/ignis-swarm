@@ -38,16 +38,10 @@ Not enforced:
 - Anything the host does after the hook speaks: the hook returns `allow` (no objection) and never grants permission (see "Host decision semantics").
 
 ### 2. Per-workspace review state
-`scripts/broker/review-state.mjs` stores one JSON file per workspace root at `<dataDir>/blind-review/<sha256(key)>.json`, where `key` is `normalizeWorkspaceKey(root)`: the `realpath` of the git top-level, lowercased on Windows. The record is `{version, key, status, reason, headSha, timestampMs}`. There is no shared file and no lock: each write goes to a unique temp file (mode `0o600`, directory `0o700`) and is renamed into place, with a short retry on `EPERM`/`EACCES`/`EBUSY`. Files older than 7 days are pruned on write. A read never rewrites anything, and a record whose stored `key` differs from the requested root is ignored.
-
-`status` is one of:
-- `fallback`: the headless reviewer could not give a verdict (missing CLI, spawn error, non-zero exit, no `Status:` line, bad diff, unconfigured backend). Native review is allowed.
-- `reviewed`: the headless reviewer returned a verdict. Native review is not needed.
-- `empty`: the diff was empty. Native review is not needed.
-
-A record counts only while it is fresh (`0 <= now - timestampMs <= 10 minutes`) **and** its `headSha` equals the workspace's current `HEAD`. A new commit therefore invalidates every earlier state, in addition to the TTL. `scripts/run-blind-review.mjs` is the only writer, and a failed write does not throw, so a review never crashes on state; the failure is reported as `stateError` in the runner result.
-
-**Multi-root rule.** `reviewGateDecision(dataDir, dirs)` takes `payload.cwd` plus `payload.workspacePaths`, resolves each to its git top-level, and de-duplicates by key. Directories outside any git repository are skipped. It returns `allow: true` only when all three hold: there are no errors, no root is missing (no fresh state at the current `HEAD`), and **at least one** root has status `fallback`. So with several roots, every root must have a current state, and native review is allowed only if one of them recorded a fallback. If every root is `reviewed` or `empty`, the gate denies with "the headless reviewer already completed for every workspace root". If none of the supplied directories is in a git repository, the gate has no opinion.
+The state file, its three statuses (`fallback`, `reviewed`, `empty`), the freshness rule (at most 10 minutes old and bound to the current `HEAD`) and the multi-root rule are recorded in ADR-008. What this ADR adds:
+- `reviewGateDecision(dataDir, dirs)` takes `payload.cwd` plus `payload.workspacePaths`. When every root is `reviewed` or `empty`, it denies with "the headless reviewer already completed for every workspace root".
+- Each write goes to a unique temp file (mode `0o600`, directory `0o700`) that is renamed into place, with a short retry on `EPERM`/`EACCES`/`EBUSY`. Files older than 7 days are pruned on write. A read never rewrites anything, and a record whose stored `key` differs from the requested root is ignored.
+- `scripts/run-blind-review.mjs` is the only writer. A failed write does not throw; it is reported as `stateError` in the runner result, so a review never crashes on state.
 
 On a denial for missing state, the message lists one runner command per missing root (`node "<plugin>/scripts/run-blind-review.mjs" --base <base-sha> --backend auto --cwd "<root>"`) and says to use native `blind-edge-hunter` only if every command returns `fallbackToNative: true`.
 
