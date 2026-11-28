@@ -11,7 +11,7 @@ import { isolatedEnv, mkTemp, runNode } from "./helpers.mjs";
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 const POSIX = process.platform !== "win32";
-const BROKER_ARGS = [BIN, "daemon"];
+const brokerArgs = (dataDir) => [BIN, "daemon", "--data-dir", path.resolve(dataDir)];
 
 // An env where `ps` and `powershell` cannot be found, so the identity query fails.
 // Windows env names are case-insensitive: drop every PATH variant, or `Path` wins.
@@ -154,7 +154,7 @@ async function waitFor(check, timeoutMs, what) {
 function startFakeDaemon(root, dataDir, version) {
   const script = path.join(root, "fake-daemon.mjs");
   fs.writeFileSync(script, FAKE_DAEMON);
-  return spawn(process.execPath, [script, dataDir, version, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  return spawn(process.execPath, [script, dataDir, version, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
 }
 
 function killQuietly(pid) {
@@ -282,7 +282,7 @@ test("stopDaemon lets a cooperative daemon finish its slow cleanup before escala
   const script = path.join(iso.dirs.root, "slow-daemon.mjs");
   const marker = path.join(iso.dirs.root, "cleaned.txt");
   fs.writeFileSync(script, SLOW_DAEMON);
-  const child = spawn(process.execPath, [script, dataDir, marker, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const child = spawn(process.execPath, [script, dataDir, marker, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   t.after(() => {
     killQuietly(child.pid);
     iso.cleanup();
@@ -312,7 +312,7 @@ test("stopDaemon keeps daemon.json while a pid that does not answer health is st
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "mute-daemon.mjs");
   fs.writeFileSync(script, MUTE_DAEMON);
-  const child = spawn(process.execPath, [script, dataDir, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const child = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   t.after(() => {
     killQuietly(child.pid);
     iso.cleanup();
@@ -321,6 +321,22 @@ test("stopDaemon keeps daemon.json while a pid that does not answer health is st
   assert.equal(await stopDaemon(dataDir), false);
   assert.equal(isPidAlive(info.pid), true, "the unresponsive daemon is not killed");
   assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json still points at the live pid");
+});
+
+test("stopDaemon matches its own daemon when the data dir has a trailing separator", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "mute-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "mute daemon.json");
+  assert.equal(await stopDaemon(dataDir + path.sep), false);
+  assert.equal(isPidAlive(info.pid), true, "the unresponsive daemon is not killed");
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json of a live daemon of this data dir was dropped");
 });
 
 function pinPid(pid) {
@@ -385,7 +401,7 @@ test("ensureDaemon kills a hung daemon that no longer answers health before it s
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "mute-daemon.mjs");
   fs.writeFileSync(script, MUTE_DAEMON);
-  const hung = spawn(process.execPath, [script, dataDir, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const hung = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   t.after(() => {
     killQuietly(hung.pid);
     killQuietly(readDaemonInfo(dataDir)?.pid);
@@ -404,7 +420,7 @@ test("ensureDaemon throws instead of spawning a second daemon when the hung pid 
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "mute-daemon.mjs");
   fs.writeFileSync(script, MUTE_DAEMON);
-  const hung = spawn(process.execPath, [script, dataDir, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const hung = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   let unpin = () => {};
   t.after(() => {
     unpin();
@@ -425,7 +441,7 @@ test("stopDaemon escalates from SIGTERM to SIGKILL for a daemon that traps SIGTE
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "term-daemon.mjs");
   fs.writeFileSync(script, TERM_IGNORING_DAEMON);
-  const child = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...BROKER_ARGS], { stdio: "ignore" });
+  const child = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...brokerArgs(dataDir)], { stdio: "ignore" });
   const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
   t.after(() => {
     killQuietly(child.pid);
@@ -530,7 +546,7 @@ test("ensureDaemon refuses to spawn when it cannot confirm what the hung pid is"
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "mute-daemon.mjs");
   fs.writeFileSync(script, MUTE_DAEMON);
-  const hung = spawn(process.execPath, [script, dataDir, ...BROKER_ARGS], { stdio: "ignore" });
+  const hung = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore" });
   t.after(() => {
     killQuietly(hung.pid);
     iso.cleanup();
@@ -567,7 +583,7 @@ test("ensureDaemon does not drop daemon.json while a pid that answers ok:false i
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "not-ok-daemon.mjs");
   fs.writeFileSync(script, NOT_OK_DAEMON);
-  const sick = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const sick = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   t.after(() => {
     killQuietly(sick.pid);
     killQuietly(readDaemonInfo(dataDir)?.pid);
@@ -594,7 +610,7 @@ test("the win32 hard kill takes the daemon's child process down too", { skip: PO
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "tree-daemon.mjs");
   fs.writeFileSync(script, TREE_DAEMON);
-  const daemon = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...BROKER_ARGS], { stdio: "ignore", windowsHide: true });
+  const daemon = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
   let kidPid;
   t.after(() => {
     killQuietly(daemon.pid);
@@ -613,4 +629,95 @@ test("the win32 hard kill takes the daemon's child process down too", { skip: PO
   assert.equal(await stopDaemon(dataDir), true);
   assert.equal(isPidAlive(info.pid), false);
   await waitFor(() => !isPidAlive(kidPid), 10_000, "the daemon's child to die with it");
+});
+
+test("stopDaemon and ensureDaemon never kill the broker daemon of another data dir that reused the recorded pid", async (t) => {
+  const isoA = isolatedEnv();
+  const isoB = isolatedEnv();
+  const dataA = isoA.dirs.brokerData;
+  const dataB = isoB.dirs.brokerData;
+  t.after(() => {
+    killQuietly(readDaemonInfo(dataB)?.pid);
+    killQuietly(readDaemonInfo(dataA)?.pid);
+    isoA.cleanup();
+    isoB.cleanup();
+  });
+  const started = runNode(BIN, ["status"], { env: isoB.env, timeoutMs: 30_000 });
+  assert.equal(started.status, 0, started.stderr);
+  const infoB = readDaemonInfo(dataB);
+  assert.ok(isPidAlive(infoB?.pid), "the CLI started daemon B");
+  const staleA = { pid: infoB.pid, port: 1, token: "dead-token", version: BROKER_VERSION };
+  fs.mkdirSync(dataA, { recursive: true });
+  fs.writeFileSync(path.join(dataA, "daemon.json"), JSON.stringify(staleA));
+
+  assert.equal(await stopDaemon(dataA), false);
+  assert.equal(isPidAlive(infoB.pid), true, "stopDaemon(A) killed the daemon of data dir B");
+  assert.equal(readDaemonInfo(dataA), null, "A's stale daemon.json was kept");
+
+  fs.writeFileSync(path.join(dataA, "daemon.json"), JSON.stringify(staleA));
+  const freshA = await ensureDaemon(isoA.dirs.brokerHome, dataA, BIN);
+  assert.equal(isPidAlive(infoB.pid), true, "ensureDaemon(A) killed the daemon of data dir B");
+  assert.notEqual(freshA.pid, infoB.pid);
+  assert.equal(isPidAlive(freshA.pid), true, "A's own daemon is running");
+  assert.equal(readDaemonInfo(dataB)?.pid, infoB.pid, "B's daemon.json is untouched");
+  assert.equal(await stopDaemon(dataA), true);
+  assert.equal(isPidAlive(infoB.pid), true, "stopping A's daemon left B running");
+});
+
+test("a broker daemon whose --data-dir only starts with this data dir counts as another daemon", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "prefix-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const decoy = spawn(process.execPath, [script, dataDir, BIN, "daemon", "--data-dir", `${path.resolve(dataDir)}2`], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  t.after(() => {
+    killQuietly(decoy.pid);
+    killQuietly(readDaemonInfo(dataDir)?.pid);
+    iso.cleanup();
+  });
+  const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "prefix daemon.json");
+  const fresh = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
+  assert.equal(isPidAlive(oldInfo.pid), true, "the daemon of the prefix-sharing data dir was killed");
+  assert.notEqual(fresh.pid, oldInfo.pid);
+  assert.equal(isPidAlive(fresh.pid), true);
+  assert.equal(await stopDaemon(dataDir), true);
+});
+
+test("a broker command line without --data-dir is never killed and never replaced", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "old-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const old = spawn(process.execPath, [script, dataDir, BIN, "daemon"], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(old.pid);
+    killQuietly(readDaemonInfo(dataDir)?.pid);
+    iso.cleanup();
+  });
+  const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "old daemon.json");
+  await assert.rejects(ensureDaemon(iso.dirs.brokerHome, dataDir, BIN), new RegExp(`cannot confirm that pid ${oldInfo.pid} `));
+  assert.equal(isPidAlive(oldInfo.pid), true, "an unconfirmable daemon was killed");
+  assert.equal(readDaemonInfo(dataDir)?.pid, oldInfo.pid, "daemon.json was replaced by a second daemon");
+  assert.equal(await stopDaemon(dataDir), false);
+  assert.equal(isPidAlive(oldInfo.pid), true);
+  assert.equal(readDaemonInfo(dataDir)?.pid, oldInfo.pid, "stopDaemon dropped the daemon.json of an unconfirmable daemon");
+});
+
+test("a data dir with spaces is matched", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = path.join(iso.dirs.root, "data dir with spaces");
+  fs.mkdirSync(dataDir, { recursive: true });
+  const script = path.join(iso.dirs.root, "spaced-daemon.mjs");
+  fs.writeFileSync(script, FAKE_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir, BROKER_VERSION, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "spaced daemon.json");
+  assert.equal(await stopDaemon(dataDir), true);
+  assert.equal(isPidAlive(info.pid), false, "a daemon of a data dir with spaces was not recognised");
 });
