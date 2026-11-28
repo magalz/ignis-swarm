@@ -385,7 +385,11 @@ test("session-start first-run notice names the real broker CLI path and a runnab
     assert.match(msg, /\[ignis-swarm\]\[First-Run Onboarding Required\]/);
     assert.ok(fs.existsSync(BROKER_CLI), "broker CLI exists on disk");
     assert.ok(msg.includes(BROKER_CLI), `notice names ${BROKER_CLI}`);
-    assert.ok(msg.includes("<plugin-root>"), "notice explains the <plugin-root> placeholder");
+    assert.ok(
+      msg.includes(`replace \`<broker-cli>\` with this absolute path: \`${BROKER_CLI}\``),
+      "notice says <broker-cli> is the absolute path it prints"
+    );
+    assert.ok(!msg.includes("<plugin-root>"), "notice no longer mentions <plugin-root>");
     assert.ok(msg.includes(`node "${BROKER_CLI}" onboarding --probe`), "notice carries a quoted, ready-to-run example");
   } finally {
     for (const d of [projDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
