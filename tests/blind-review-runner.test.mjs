@@ -335,11 +335,13 @@ describe("blind-review runner: fallback to native", () => {
     });
   });
 
-  it("a missing binary still reports the size of the diff it extracted", async () => {
-    await withFixture(async ({ repo, run }) => {
+  it("a missing binary still reports the exact byte size of the diff it extracted", async () => {
+    await withFixture(async ({ repo, git, run }) => {
       const out = parseOut(run(jsonArgs(repo), { IGNIS_CLAUDE_CMD: MISSING_BINARY }));
-      const probe = parseOut(run(jsonArgs(repo), { IGNIS_CLAUDE_CMD: createEchoShim(os.tmpdir(), "unused-probe") }));
-      assert.equal(out.diffBytes, probe.diffBytes);
+      const expected = `${git(["diff", "base-ref", "HEAD"])}
+`;
+      assert.equal(out.diffBytes, Buffer.byteLength(expected));
+      assert.equal(out.diffBytes > 0, true);
     });
   });
 
