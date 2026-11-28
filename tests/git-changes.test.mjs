@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { collectChanges, gitToplevel, headSha } from "../scripts/lib/git-changes.mjs";
+import { collectChanges, gitEnv, gitToplevel, headSha } from "../scripts/lib/git-changes.mjs";
 import { initGitRepo, isolatedEnv, mkTemp, runGit } from "./helpers.mjs";
 
 const ESC = String.fromCharCode(27);
@@ -74,7 +74,6 @@ test("collectChanges: a modified tracked file and a new untracked file both appe
     assert.match(result.diff, /^diff --git a\/new\.txt b\/new\.txt$/m);
     assert.match(result.diff, /^new file mode /m);
     assert.match(result.diff, /^\+brand new$/m);
-    assert.deepEqual(result.untracked, ["new.txt"]);
     assert.equal(result.bytes, Buffer.byteLength(result.diff));
     assert.equal(runGit(dir, ["status", "--porcelain"], { env }), statusBefore);
     assert.ok(sameIndex(readIndex(dir, env), indexBefore), "the real index must be byte-identical");
@@ -143,7 +142,6 @@ test("gitToplevel finds the root from a subdirectory and collectChanges sees a c
     assert.equal(result.error, null);
     assert.match(result.diff, /^diff --git a\/sub\/deep\/a\.txt b\/sub\/deep\/a\.txt$/m);
     assert.match(result.diff, /^diff --git a\/sub\/deep\/n\.txt b\/sub\/deep\/n\.txt$/m);
-    assert.deepEqual(result.untracked, ["sub/deep/n.txt"]);
   });
 });
 
@@ -169,7 +167,6 @@ test("collectChanges works in a linked worktree and leaves both indexes untouche
       assert.match(result.diff, /^diff --git a\/linked-new\.txt b\/linked-new\.txt$/m);
       assert.match(result.diff, /^\+two$/m);
       assert.ok(!result.diff.includes("main-only.txt"));
-      assert.deepEqual(result.untracked, ["linked-new.txt"]);
       assert.ok(sameIndex(readIndex(dir, env), mainIndex), "the main worktree index must be untouched");
       assert.ok(sameIndex(readIndex(linked, env), linkedIndex), "the linked worktree index must be untouched");
       assert.equal(runGit(linked, ["status", "--porcelain"], { env }), linkedStatus);
@@ -187,13 +184,11 @@ test("a repository with no commits: headSha is unborn and added and untracked fi
     const empty = collectChanges(dir, { env });
     assert.equal(empty.error, null);
     assert.equal(empty.diff, "");
-    assert.deepEqual(empty.untracked, []);
 
     write(dir, "loose.txt", "untracked\n");
     const withoutIndex = collectChanges(dir, { env });
     assert.equal(withoutIndex.error, null);
     assert.match(withoutIndex.diff, /^diff --git a\/loose\.txt b\/loose\.txt$/m);
-    assert.deepEqual(withoutIndex.untracked, ["loose.txt"]);
     assert.ok(!fs.existsSync(path.join(dir, ".git", "index")), "the missing real index must not be created");
 
     write(dir, "added.txt", "staged\n");
@@ -205,7 +200,6 @@ test("a repository with no commits: headSha is unborn and added and untracked fi
     assert.match(result.diff, /^diff --git a\/added\.txt b\/added\.txt$/m);
     assert.match(result.diff, /^\+staged$/m);
     assert.match(result.diff, /^diff --git a\/loose\.txt b\/loose\.txt$/m);
-    assert.deepEqual(result.untracked, ["loose.txt"]);
     assert.ok(sameIndex(readIndex(dir, env), indexBefore));
     assert.equal(headSha(dir, { env }), "unborn");
   });
@@ -238,7 +232,6 @@ test("collectChanges skips a nested repository instead of listing it as untracke
     const result = collectChanges(dir, { env });
 
     assert.equal(result.error, null);
-    assert.deepEqual(result.untracked, ["plain.txt"]);
     assert.match(result.diff, /^diff --git a\/plain\.txt b\/plain\.txt$/m);
     assert.ok(!result.diff.includes("nested"));
     assert.ok(!result.diff.includes("inner.txt"));
@@ -281,7 +274,6 @@ test("collectChanges handles file names with spaces, brackets and non-ASCII char
     const result = collectChanges(dir, { env });
 
     assert.equal(result.error, null);
-    assert.deepEqual([...result.untracked].sort(), [...names].sort());
     for (const name of names) {
       assert.ok(result.diff.includes(`diff --git a/${name} b/${name}`), `${name} must appear unquoted in the diff`);
     }
@@ -319,7 +311,6 @@ test("collectChanges honours base and unified and rejects an unusable base", () 
       const bad = collectChanges(dir, { env, base });
       assert.equal(bad.error?.code, "git_failed", base);
       assert.equal(bad.diff, "");
-      assert.deepEqual(bad.untracked, []);
     }
     assert.ok(!fs.existsSync(path.join(dir, "ignis-injected.txt")));
   });
@@ -354,7 +345,6 @@ test("collectChanges with no untracked files leaves a stat-dirty real index byte
 
     assert.equal(result.error, null);
     assert.equal(result.diff, "");
-    assert.deepEqual(result.untracked, []);
     assert.ok(sameIndex(readIndex(dir, env), indexBefore), "the real index must be byte-identical");
     assert.ok(!fs.existsSync(path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"], { env }), "index.lock")));
   });
@@ -387,4 +377,13 @@ test("collectChanges keeps git's racy-clean protection: a same-size edit in a ra
     assert.equal(result.error, null);
     assert.ok(result.diff.includes("value = 2"), `expected the edit in the diff, got: ${JSON.stringify(result.diff)}`);
   });
+});
+
+test("gitEnv drops GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE and keeps the rest", () => {
+  const out = gitEnv({ GIT_DIR: "a", GIT_WORK_TREE: "b", GIT_INDEX_FILE: "c", GIT_CONFIG_GLOBAL: "d", PATH: "p" });
+  assert.deepEqual(out, { GIT_CONFIG_GLOBAL: "d", PATH: "p" });
+});
+
+test("gitEnv matches the names case-insensitively on win32", { skip: process.platform !== "win32" }, () => {
+  assert.deepEqual(gitEnv({ git_index_file: "c", Git_Dir: "a", Path: "p" }), { Path: "p" });
 });

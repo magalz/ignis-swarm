@@ -2,11 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readStdin, resolveWorkspace } from "./lib.mjs";
-import { collectChanges, gitToplevel } from "../scripts/lib/git-changes.mjs";
+import { collectChanges, gitEnv, gitToplevel } from "../scripts/lib/git-changes.mjs";
 
 const TOO_LARGE_REASON =
   "ignis-swarm stop-gate: the working diff is larger than 64 MB and could not be scanned for test shortcuts; review it manually.";
-const GIT_TARGET_ENV = /^GIT_(DIR|WORK_TREE|INDEX_FILE)$/i;
 const TEST_CALLEE = "(?:it|test|describe|context|suite|specify)";
 
 function checkDecisionIndexes(cwd) {
@@ -52,10 +51,6 @@ const BANNED_DIFF_PATTERNS = [
   { name: "Go nolint without reason", regex: /\/\/\s*nolint(?::[^\s/]+)?\s*$/ },
   { name: "Unresolved TODO/FIXME in new code", regex: /(\/\/|#|\/\*)\s*(TODO|FIXME)\b/ },
 ];
-
-function gitEnv() {
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !GIT_TARGET_ENV.test(key)));
-}
 
 function gitText(root, args, env) {
   const res = spawnSync("git", args, { cwd: root, env, encoding: "utf8", timeout: 1000, windowsHide: true });

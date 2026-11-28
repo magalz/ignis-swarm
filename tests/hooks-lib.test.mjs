@@ -327,3 +327,9 @@ for (const name of fs.readdirSync(HOOKS_DIR)) {
     assert.doesNotMatch(source, SHARED_HELPER_DEFINITION);
   });
 }
+
+test("pre-tool-use statically imports only the two hook siblings, so a crash elsewhere cannot block every tool", () => {
+  const preToolUse = fs.readFileSync(path.join(HOOKS_DIR, "pre-tool-use.mjs"), "utf8");
+  const specifiers = [...preToolUse.matchAll(/^import\b[^\n]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1]);
+  assert.deepEqual(specifiers.sort(), ["./command-rules.mjs", "./lib.mjs"]);
+});

@@ -1,15 +1,15 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
 import { gitToplevel, headSha } from "../lib/git-changes.mjs";
+
+export { renameWithRetry } from "../lib/common.mjs";
 
 export const REVIEW_STATE_TTL_MS = 10 * 60 * 1000;
 
 const STATUSES = new Set(["fallback", "reviewed", "empty"]);
-const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
-const RENAME_RETRIES = 5;
 const PRUNE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
 
 export function normalizeWorkspaceKey(dir) {
   const resolved = path.resolve(dir);
@@ -31,22 +31,6 @@ function statePathForKey(dataDir, key) {
 
 export function reviewStatePath(dataDir, root) {
   return statePathForKey(dataDir, normalizeWorkspaceKey(root));
-}
-
-function pause(ms) {
-  Atomics.wait(SLEEP_VIEW, 0, 0, ms);
-}
-
-export function renameWithRetry(from, to) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      fs.renameSync(from, to);
-      return;
-    } catch (err) {
-      if (attempt >= RENAME_RETRIES || !RETRYABLE_RENAME_CODES.has(err?.code)) throw err;
-      pause(20 + Math.floor(Math.random() * 31));
-    }
-  }
 }
 
 function removeQuietly(file) {
@@ -85,17 +69,8 @@ export function recordReviewState(dataDir, root, { status, reason = null, headSh
   const key = normalizeWorkspaceKey(root);
   const record = { version: 1, key, status, reason, headSha: sha, timestampMs: nowMs };
   const file = statePathForKey(dataDir, key);
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  try {
-    fs.writeFileSync(temp, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    renameWithRetry(temp, file);
-  } catch (err) {
-    removeQuietly(temp);
-    throw err;
-  }
-  pruneStale(dir, file);
+  writePrivateFileAtomic(file, `${JSON.stringify(record)}\n`);
+  pruneStale(path.dirname(file), file);
   return record;
 }
 
@@ -107,8 +82,7 @@ export function readReviewState(dataDir, root) {
   } catch {
     return null;
   }
-  const isRecord = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
-  return isRecord && parsed.key === key ? parsed : null;
+  return isPlainObject(parsed) && parsed.key === key ? parsed : null;
 }
 
 function satisfies(record, currentSha, nowMs) {
@@ -121,7 +95,7 @@ function satisfies(record, currentSha, nowMs) {
 export function reviewGateDecision(dataDir, dirs, { nowMs = Date.now(), env } = {}) {
   const supplied = (Array.isArray(dirs) ? dirs : []).filter((dir) => typeof dir === "string" && dir !== "");
   if (supplied.length === 0) {
-    return { allow: false, missing: [], errors: [{ dir: null, message: "no workspace supplied" }] };
+    return { allow: false, missing: [], errors: [{ dir: null, message: "no workspace supplied" }], gitRoots: 0 };
   }
   const errors = [];
   const missing = [];
@@ -152,5 +126,5 @@ export function reviewGateDecision(dataDir, dirs, { nowMs = Date.now(), env } = 
       fallback = true;
     }
   }
-  return { allow: errors.length === 0 && missing.length === 0 && fallback, missing, errors };
+  return { allow: errors.length === 0 && missing.length === 0 && fallback, missing, errors, gitRoots: roots.size };
 }

@@ -7,6 +7,8 @@ const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const BUFFER_SLACK = 1024;
 const NUL = Buffer.from([0]);
 const SLASH = 0x2f;
+const GIT_TARGET_ENV = /^GIT_(DIR|WORK_TREE|INDEX_FILE)$/;
+const GIT_TARGET_ENV_CI = /^GIT_(DIR|WORK_TREE|INDEX_FILE)$/i;
 const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"];
 
 function git(cwd, args, { env, timeoutMs, input, maxBuffer, extraEnv } = {}) {
@@ -75,6 +77,11 @@ function invalidOptions(base, unified, maxBytes) {
   return null;
 }
 
+export function gitEnv(env = process.env) {
+  const target = process.platform === "win32" ? GIT_TARGET_ENV_CI : GIT_TARGET_ENV;
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !target.test(key)));
+}
+
 export function gitToplevel(cwd, { env, timeoutMs = 10_000 } = {}) {
   const res = git(cwd, ["rev-parse", "--show-toplevel"], { env, timeoutMs });
   if (!res.error && res.status !== 0 && /not a git repository/i.test(res.stderr?.toString("utf8") ?? "")) {
@@ -96,7 +103,7 @@ export function headSha(root, { env } = {}) {
 }
 
 export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAULT_MAX_BYTES, env, timeoutMs = 30_000 } = {}) {
-  const result = { diff: "", bytes: 0, untracked: [], error: null };
+  const result = { diff: "", bytes: 0, error: null };
   const invalid = invalidOptions(base, unified, maxBytes);
   if (invalid) {
     result.error = { code: "git_failed", message: invalid };
@@ -112,7 +119,6 @@ export function collectChanges(root, { base = "HEAD", unified, maxBytes = DEFAUL
       return result;
     }
     const entries = splitNul(listed.stdout).filter((entry) => entry[entry.length - 1] !== SLASH);
-    result.untracked = entries.map((entry) => entry.toString("utf8"));
 
     let baseRev = base;
     if (base === "HEAD") {

@@ -6,6 +6,7 @@ import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
 import { brokerDataDir, brokerHome, resolveConfig } from "../scripts/broker/config.mjs";
 import { readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState, probeEnvironment } from "../scripts/broker/onboarding.mjs";
+import { isMainModule } from "../scripts/lib/common.mjs";
 import { isInteractiveUserSession, readStdin, resolveWorkspace } from "./lib.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -303,21 +304,7 @@ async function main() {
   });
 }
 
-function canonicalPath(file) {
-  const real = fs.realpathSync.native(file);
-  return process.platform === "win32" ? real.toLowerCase() : real;
-}
-
-function isMainModule() {
-  if (!process.argv[1]) return false;
-  try {
-    return canonicalPath(process.argv[1]) === canonicalPath(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
-}
-
-if (isMainModule()) {
+if (isMainModule(import.meta.url)) {
   main().catch(() => {
     killRunningChildren();
     emit({});
