@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
 import {
+  BROKER_ENTRY,
   initGitRepo,
   isolatedEnv,
   mkTemp,
@@ -474,7 +474,6 @@ test("writeOnboardingState merges defaults, lets the state override them and rou
 
 test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so its children are not orphaned", { skip: process.platform === "win32" }, async () => {
   const iso = isolatedEnv();
-  const entry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
   const childPidFile = path.join(iso.dirs.root, "child.pid");
   const daemonScript = [
     'const { spawn } = require("node:child_process");',
@@ -488,10 +487,11 @@ test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so it
     "d.unref();",
     "process.stdout.write(String(d.pid));",
   ].join("\n");
-  const launched = spawnSync(process.execPath, ["-e", launcherScript, daemonScript, childPidFile, entry], { encoding: "utf8" });
+  const launched = spawnSync(process.execPath, ["-e", launcherScript, daemonScript, childPidFile, BROKER_ENTRY], { encoding: "utf8" });
   assert.equal(launched.status, 0, launched.stderr);
   const daemonPid = Number(launched.stdout);
   let childPid = 0;
+  let cleaned = false;
   try {
     await waitUntil("the fake daemon to start its child", () => fs.existsSync(childPidFile) && fs.readFileSync(childPidFile, "utf8") !== "", 10_000);
     childPid = Number(fs.readFileSync(childPidFile, "utf8"));
@@ -499,6 +499,7 @@ test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so it
     fs.writeFileSync(path.join(iso.dirs.brokerData, "daemon.json"), JSON.stringify({ pid: daemonPid }));
 
     iso.cleanup();
+    cleaned = true;
 
     await waitUntil("the daemon and its child to be gone", () => !isPidAlive(daemonPid) && !isPidAlive(childPid), 10_000);
   } finally {
@@ -509,5 +510,6 @@ test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so it
         } catch {}
       }
     }
+    if (!cleaned) iso.cleanup();
   }
 });

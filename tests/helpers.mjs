@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 
-const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
+export const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 
 const TEST_GIT_NAME = "Ignis Test";
 const TEST_GIT_EMAIL = "ignis-test@example.invalid";
@@ -109,7 +109,8 @@ function stopLeftoverDaemons(dirs, env) {
     if (!isBrokerDaemon(pid)) continue;
     spawnSync(process.execPath, [BROKER_ENTRY, "stop"], { env, timeout: 15_000, windowsHide: true });
     if (waitForExit(pid, 3000)) continue;
-    killTree(pid);
+    // The wait above is long enough for the pid to be reused: confirm it is still the daemon.
+    if (isBrokerDaemon(pid)) killTree(pid);
     waitForExit(pid, 5000);
   }
 }
