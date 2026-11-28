@@ -56,7 +56,7 @@ node "<broker-cli>" add-http-mcp <name> <url> --auth-env <ENV_VAR>
 # Unregister a server from the broker
 node "<broker-cli>" unregister-mcp <name>
 
-# Bulk import from ~/.gemini/config/mcp_config.json; merges into servers.json (same-named servers are replaced)
+# Bulk import from ~/.gemini/config/mcp_config.json; merges into servers.json (same-named servers are replaced; re-registering resets --per-workspace and --cli-fallback)
 node "<broker-cli>" import-mcp --dry-run
 node "<broker-cli>" import-mcp
 ```

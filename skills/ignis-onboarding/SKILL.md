@@ -9,7 +9,7 @@ Run this wizard on first use (when `SessionStart` reports onboarding is pending)
 
 ## Step 0 — Find the broker CLI
 
-Every command below is `node "<broker-cli>" <command>`, where `<broker-cli>` is the absolute path to `scripts/ignis-broker.mjs`. `run-blind-review.mjs` sits in the same folder.
+Every command below is `node "<broker-cli>" <command>`, where `<broker-cli>` is the absolute path to `scripts/ignis-broker.mjs`. `run-blind-review.mjs` sits in the same folder; `<broker-cli-dir>` below means that folder.
 
 - Normal source: the `[ignis-swarm][First-Run Onboarding Required]` notice that `SessionStart` injected. It names the exact path (`node "<path>" onboarding --probe`); use that path.
 - Fallback (reconfiguration, or no notice in context): this skill's folder is `<plugin-root>/skills/ignis-onboarding/`, so the CLI is `<this SKILL.md's folder>/../../scripts/ignis-broker.mjs`. Resolve it to an absolute path.
@@ -97,7 +97,7 @@ Ask in 2 stages. Batch 1 = Q1–Q4. Batch 2 = Q5–Q6, only if Q4 = Yes.
 
 Execute the setup commands on the user's behalf based on their answers.
 
-1. **Register Managed MCPs.** `register-mcp` reads `~/.gemini/config/mcp_config.json` (or `--from <path>`), moves literal `env`/`headers` secrets into `~/.ignis-broker/.env` as `IGNIS_<SERVER>_<KEY>`, and merges into `~/.ignis-broker/servers.json` (a server with the same name is replaced). Pool a server per workspace with `--per-workspace <names>`: list the servers whose `suggestedPerWorkspace` is true in the probe, and let the user add or drop names. The flag takes a comma-separated list; a bare `--per-workspace` is ignored. Omit it when no registered server is suggested.
+1. **Register Managed MCPs.** `register-mcp` reads `~/.gemini/config/mcp_config.json` (or `--from <path>`), moves literal `env`/`headers` secrets into `~/.ignis-broker/.env` as `IGNIS_<SERVER>_<KEY>`, and merges into `~/.ignis-broker/servers.json` (a server with the same name is replaced, and re-registering resets its `--per-workspace` and `--cli-fallback` settings, so pass them again). Pool a server per workspace with `--per-workspace <names>`: list the servers whose `suggestedPerWorkspace` is true in the probe, and let the user add or drop names. The flag takes a comma-separated list; a bare `--per-workspace` is ignored. Omit it when no registered server is suggested.
    - All discovered MCPs:
      ```bash
      node "<broker-cli>" register-mcp --all --per-workspace <comma-separated-names>
@@ -124,7 +124,7 @@ Execute the setup commands on the user's behalf based on their answers.
      ```bash
      node "<broker-cli>" add-http-mcp linear https://mcp.linear.app/mcp --auth-env LINEAR_API_KEY
      ```
-     Verified against Linear's MCP docs: the server takes interactive OAuth 2.1 or `Authorization: Bearer <token>` with an OAuth token or API key. Not verified: how the Marketplace card authenticates.
+     Linear's MCP takes interactive OAuth or `Authorization: Bearer <token>` with an OAuth token or API key.
    - **ItsAPlan:** if not already in `mcp_config.json`, ask only for the Streamable HTTP URL. The token variable is fixed as `ITSAPLAN_TOKEN`:
      ```bash
      node "<broker-cli>" add-http-mcp itsaplan <url> --auth-env ITSAPLAN_TOKEN
