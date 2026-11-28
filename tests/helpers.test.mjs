@@ -472,12 +472,12 @@ test("writeOnboardingState merges defaults, lets the state override them and rou
   }
 });
 
-test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so its children are not orphaned", { skip: process.platform === "win32" }, async () => {
+test("isolatedEnv cleanup on POSIX kills the daemon and its detached MCP children, so none is orphaned", { skip: process.platform === "win32" }, async () => {
   const iso = isolatedEnv();
   const childPidFile = path.join(iso.dirs.root, "child.pid");
   const daemonScript = [
     'const { spawn } = require("node:child_process");',
-    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });',
     'require("node:fs").writeFileSync(process.argv[1], String(child.pid));',
     "setInterval(() => {}, 1000);",
   ].join("\n");
