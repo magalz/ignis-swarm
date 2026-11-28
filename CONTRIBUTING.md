@@ -30,7 +30,7 @@ Before opening a pull request, run these checks locally; each must pass:
 
 ```bash
 # 1. Run the full automated test suite
-node --test --test-timeout=60000 tests/*.test.mjs
+node --test --test-timeout=180000 tests/*.test.mjs
 
 # 2. Run strict Antigravity plugin validation (must pass with 0 errors and 0 warnings)
 agy plugin validate --strict .

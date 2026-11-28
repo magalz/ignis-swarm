@@ -14,7 +14,8 @@ scope: [.github/workflows/ci.yml]
 
 ## Context
 - Node 20 is end of life, so it gets no fixes and is not worth testing.
-- `node --test tests` (a directory argument) fails on Node 21 and later, so the suite runs through an unquoted shell glob: `node --test --test-timeout=60000 tests/*.test.mjs`.
+- `node --test tests` (a directory argument) fails on Node 21 and later, so the suite runs through an unquoted shell glob: `node --test --test-timeout=180000 tests/*.test.mjs`.
+- On Node 22, `--test-timeout` also limits each test file as a whole, not only each test. With 60000, CI on windows with Node 22 stopped `tests/blind-review-runner.test.mjs` at 60 seconds, before the file finished. The value is therefore 180000 (3 minutes), well above the 62 to 71 seconds that file takes on Node 26 locally; the job's `timeout-minutes: 15` still stops a hung run.
 - The code uses only `node:*` built-ins (for example `AbortSignal.timeout`, `Object.hasOwn`, `fs.realpathSync.native`, `node:test`, and `import.meta.dirname` in tests). No code path found relies on an API that exists only from Node 22.
 
 ## Options Considered

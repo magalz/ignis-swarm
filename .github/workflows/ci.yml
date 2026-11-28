@@ -48,14 +48,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p coverage
-          node --test --test-timeout=60000 --experimental-test-coverage \
+          node --test --test-timeout=180000 --experimental-test-coverage \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             tests/*.test.mjs
       - name: Run tests
         if: matrix.os != 'ubuntu-latest' || matrix.node != 24
         shell: bash
-        run: node --test --test-timeout=60000 tests/*.test.mjs
+        run: node --test --test-timeout=180000 tests/*.test.mjs
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

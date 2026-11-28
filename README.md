@@ -201,7 +201,7 @@ Detailed guides, schemas, CLI flags, environment variables, and troubleshooting 
 agy plugin validate --strict .
 
 # Full automated test suite (hooks, broker unit/supervisor/E2E, onboarding, blind-review runner)
-node --test --test-timeout=60000 tests/*.test.mjs
+node --test --test-timeout=180000 tests/*.test.mjs
 ```
 
 - Architecture Decision Records: [docs/adr/INDEX.md](docs/adr/INDEX.md)
