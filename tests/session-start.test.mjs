@@ -1,54 +1,64 @@
-import test from "node:test";
+import test, { after, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
-import { isolatedEnv, writeOnboardingState } from "./helpers.mjs";
+import { CHECKS_DEADLINE_MS } from "../hooks/session-start.mjs";
+import { BROKER_ENTRY as BROKER_CLI, isolatedEnv, runNode, writeOnboardingState } from "./helpers.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN_ROOT = path.resolve(__dirname, "..");
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const HOOK = path.join(PLUGIN_ROOT, "hooks", "session-start.mjs");
+const RUNNER = path.resolve(PLUGIN_ROOT, "scripts", "run-blind-review.mjs");
 
-function runHook(scriptRelPath, inputObj, extraEnv = {}) {
-  const scriptPath = path.join(PLUGIN_ROOT, scriptRelPath);
-  const res = spawnSync(process.execPath, [scriptPath], {
-    cwd: PLUGIN_ROOT,
-    input: JSON.stringify(inputObj),
-    encoding: "utf8",
-    env: { ...process.env, ...extraEnv },
-    timeout: 8000,
-    windowsHide: true,
+const ADR_HINT =
+  "[ignis-swarm] Decision indexes detected (docs/adr/INDEX.md). Check relevant ADRs/BDRs before planning or modifying architecture.";
+const FIRST_RUN = /\[ignis-swarm\]\[First-Run Onboarding Required\]/;
+
+function withIso(fn) {
+  const iso = isolatedEnv();
+  try {
+    return fn(iso);
+  } finally {
+    iso.cleanup();
+  }
+}
+
+function projectDir(iso, { markers = ["package.json"], adr = false, name = "proj" } = {}) {
+  const dir = path.join(iso.dirs.root, name);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const marker of markers) {
+    if (marker === ".git") fs.mkdirSync(path.join(dir, ".git"));
+    else fs.writeFileSync(path.join(dir, marker), "{}");
+  }
+  if (adr) {
+    fs.mkdirSync(path.join(dir, "docs", "adr"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n");
+  }
+  return dir;
+}
+
+function runHookTimed(iso, payload, extraEnv = {}, timeoutMs = 8000) {
+  const started = performance.now();
+  const res = runNode(HOOK, [], {
+    input: JSON.stringify(payload),
+    env: { ...iso.env, ...extraEnv },
+    cwd: iso.dirs.root,
+    timeoutMs,
   });
-  assert.equal(res.status, 0, `Hook ${scriptRelPath} failed: ${res.stderr}`);
-  return JSON.parse(res.stdout.trim());
+  const elapsedMs = performance.now() - started;
+  assert.equal(res.timedOut, false, "the hook timed out");
+  assert.equal(res.status, 0, res.stderr);
+  return { out: JSON.parse(res.stdout.trim()), elapsedMs };
 }
 
-function makeTempDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function runHook(iso, payload, extraEnv, timeoutMs) {
+  return runHookTimed(iso, payload, extraEnv, timeoutMs).out;
 }
 
-function writeCompletedOnboarding(dataDir, overrides = {}) {
-  const state = {
-    version: 1,
-    completed: true,
-    skipped: false,
-    completedAt: "2026-01-01T00:00:00.000Z",
-    brokerManagedServers: [],
-    tracker: { kind: "none", mcpServer: null },
-    memtrace: { enabled: false },
-    reviewRouting: {
-      strategy: "antigravity_gemini_only",
-      headlessBackend: null,
-      headlessModel: null,
-      effort: "high",
-    },
-    compaction: { transcriptThresholdKb: 550 },
-    ...overrides,
-  };
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(path.join(dataDir, "onboarding.json"), JSON.stringify(state, null, 2), "utf8");
+function sessionMessage(out) {
+  assert.equal(out.injectSteps.length, 1);
+  return out.injectSteps[0].systemMessage.systemMessage;
 }
 
 function writeShim(dir, baseName, stdoutText, exitCode = 0) {
@@ -62,9 +72,7 @@ function writeShim(dir, baseName, stdoutText, exitCode = 0) {
   return shimPath;
 }
 
-const RUNNER = path.resolve(PLUGIN_ROOT, "scripts", "run-blind-review.mjs");
-
-function routing(strategy) {
+function routingState(strategy) {
   return {
     reviewRouting: {
       strategy,
@@ -75,347 +83,272 @@ function routing(strategy) {
   };
 }
 
-test("session-start handles non-project dir, ADR index hint, and broker local config alert", () => {
-  const emptyDir = makeTempDir("ignis-empty-");
-  const dataDir = makeTempDir("ignis-onboard-");
-  writeCompletedOnboarding(dataDir);
-
-  const emptyOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: emptyDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_HOME: emptyDir, IGNIS_BROKER_DATA: dataDir }
+function headlessAlwaysNotice(backend = "claude", model = "opus") {
+  return (
+    `[ignis-swarm][Phase 4 Review Routing] strategy=headless_always (backend=${backend}, model=${model}, effort=high). ` +
+    `Mandatory: run \`node "${RUNNER}" --base <base-sha> --backend auto\` BEFORE native \`blind-edge-hunter\` (native fallback allowed only if \`fallbackToNative: true\`).`
   );
-  assert.deepEqual(emptyOut, {});
+}
 
-  const projDir = makeTempDir("ignis-proj-");
-  fs.mkdirSync(path.join(projDir, "docs", "adr"), { recursive: true });
-  fs.writeFileSync(path.join(projDir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n");
-
-  const indexOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_HOME: emptyDir, IGNIS_BROKER_DATA: dataDir }
+function antigravityFirstNotice(backend = "claude", model = "opus") {
+  return (
+    `[ignis-swarm][Phase 4 Review Routing] strategy=antigravity_first (native Gemini Pro \`blind-edge-hunter\` first; headless fallback=${backend}/${model}, effort=high). ` +
+    `If native quota runs out, run \`node "${RUNNER}" --base <base-sha> --backend auto --fallback\`.`
   );
-  assert.match(indexOut.injectSteps[0].systemMessage.systemMessage, /docs\/adr\/INDEX\.md/);
+}
 
-  const brokerPayload = JSON.stringify({
-    localConfigError: "invalid local config .agents/ignis-broker.json: expected value",
-    recentFallbacks: [],
+test("session-start emits nothing outside a project directory", () => {
+  withIso((iso) => {
+    writeOnboardingState(iso.dirs.brokerData);
+    const emptyDir = path.join(iso.dirs.root, "empty");
+    fs.mkdirSync(emptyDir);
+    assert.deepEqual(runHook(iso, { cwd: emptyDir, lastUserInput: "hello" }), {});
   });
-  const brokerShim = writeShim(projDir, "broker-warn", brokerPayload, 0);
-
-  const brokerWarnOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_CMD: brokerShim, IGNIS_BROKER_HOME: emptyDir, IGNIS_BROKER_DATA: dataDir }
-  );
-  assert.match(brokerWarnOut.injectSteps[0].systemMessage.systemMessage, /ignis-broker Alert/i);
-  assert.match(brokerWarnOut.injectSteps[0].systemMessage.systemMessage, /Global fallback config is active/i);
-
-  fs.rmSync(emptyDir, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
-  fs.rmSync(projDir, { recursive: true, force: true });
 });
 
-test("session-start triggers first-run onboarding with redacted MCP names and zero secrets", () => {
-  const projDir = makeTempDir("ignis-onboard-proj-");
-  const dataDir = makeTempDir("ignis-onboard-empty-");
-  fs.writeFileSync(path.join(projDir, "package.json"), "{}");
+test("session-start hints the ADR index of a project that has one", () => {
+  withIso((iso) => {
+    writeOnboardingState(iso.dirs.brokerData);
+    const dir = projectDir(iso, { adr: true });
+    assert.equal(sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "hello" })), ADR_HINT);
+  });
+});
 
-  const mcpConfigPath = path.join(dataDir, "mcp_config.json");
+test("session-start alerts about a broken local broker config reported by the broker CLI", () => {
+  withIso((iso) => {
+    writeOnboardingState(iso.dirs.brokerData);
+    const dir = projectDir(iso);
+    const payload = JSON.stringify({
+      localConfigError: "invalid local config .agents/ignis-broker.json: expected value",
+      recentFallbacks: [],
+    });
+    const shim = writeShim(dir, "broker-warn", payload);
+    const out = runHook(iso, { cwd: dir, lastUserInput: "hello" }, { IGNIS_BROKER_CMD: shim });
+    assert.equal(
+      sessionMessage(out),
+      "[ignis-broker Alert] Local config error detected (invalid local config .agents/ignis-broker.json: expected value). Global fallback config is active."
+    );
+  });
+});
+
+const MCP_SECRETS = { linear: "SUPER_SECRET_LINEAR_TOKEN_123", serena: "SUPER_SECRET_SERENA_KEY_456" };
+
+function firstRunProject(iso) {
+  const dir = projectDir(iso);
+  const mcpConfigPath = path.join(iso.dirs.root, "mcp_config.json");
   fs.writeFileSync(
     mcpConfigPath,
     JSON.stringify({
       mcpServers: {
-        linear: {
-          serverUrl: "https://mcp.linear.app/sse",
-          headers: { Authorization: "Bearer SUPER_SECRET_LINEAR_TOKEN_123" },
-        },
-        serena: {
-          command: "uvx",
-          args: ["serena"],
-          env: { API_KEY: "SUPER_SECRET_SERENA_KEY_456" },
-        },
+        linear: { serverUrl: "https://mcp.linear.app/sse", headers: { Authorization: `Bearer ${MCP_SECRETS.linear}` } },
+        serena: { command: "uvx", args: ["serena"], env: { API_KEY: MCP_SECRETS.serena } },
       },
     })
   );
-
-  const out = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "start work" },
-    {
-      IGNIS_BROKER_HOME: dataDir,
-      IGNIS_BROKER_DATA: dataDir,
-      IGNIS_MCP_CONFIG_PATH: mcpConfigPath,
-    }
-  );
-  const msg = out.injectSteps[0].systemMessage.systemMessage;
-  assert.match(msg, /\[ignis-swarm\]\[First-Run Onboarding Required\]/);
-  assert.match(msg, /ignis-onboarding/);
-  assert.match(msg, /linear \(http\)/);
-  assert.match(msg, /serena \(stdio\)/);
-  assert.doesNotMatch(msg, /SUPER_SECRET_LINEAR_TOKEN_123/);
-  assert.doesNotMatch(msg, /SUPER_SECRET_SERENA_KEY_456/);
-
-  const subagentNoInput = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir },
-    {
-      IGNIS_BROKER_HOME: dataDir,
-      IGNIS_BROKER_DATA: dataDir,
-      IGNIS_MCP_CONFIG_PATH: mcpConfigPath,
-    }
-  );
-  assert.deepEqual(subagentNoInput, {});
-
-  const subagentFlag = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "audit", isSubagent: true },
-    {
-      IGNIS_BROKER_HOME: dataDir,
-      IGNIS_BROKER_DATA: dataDir,
-      IGNIS_MCP_CONFIG_PATH: mcpConfigPath,
-    }
-  );
-  assert.deepEqual(subagentFlag, {});
-
-  fs.rmSync(projDir, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
-});
-
-test("session-start handles Windows shim path and cwd containing space and ampersand", { skip: process.platform !== "win32" }, () => {
-  const baseDir = makeTempDir("ignis space & dir-");
-  const projDir = path.join(baseDir, "repo & app");
-  const dataDir = path.join(baseDir, "data & state");
-  fs.mkdirSync(projDir, { recursive: true });
-  fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-  writeCompletedOnboarding(dataDir);
-
-  const brokerPayload = JSON.stringify({
-    localConfigError: "invalid local config",
-    recentFallbacks: [],
-  });
-  const shimPath = writeShim(baseDir, "broker & shim", brokerPayload, 0);
-
-  const out = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_CMD: shimPath, IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir }
-  );
-  assert.match(out.injectSteps[0].systemMessage.systemMessage, /ignis-broker Alert/i);
-
-  fs.rmSync(baseDir, { recursive: true, force: true });
-});
-
-test("session-start respects memtrace.enabled flag when onboarding is completed", () => {
-  const projDir = makeTempDir("ignis-mt-proj-");
-  const dataDir = makeTempDir("ignis-mt-data-");
-  fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-
-  const failingShim = writeShim(projDir, "memtrace-fail", "daemon stopped", 1);
-  const healthyShim = writeShim(projDir, "memtrace-ok", "memtrace daemon running", 0);
-
-  writeCompletedOnboarding(dataDir, { memtrace: { enabled: false } });
-  const disabledOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir, IGNIS_MEMTRACE_CMD: failingShim }
-  );
-  assert.deepEqual(disabledOut, {});
-
-  writeCompletedOnboarding(dataDir, { memtrace: { enabled: true } });
-  const healthyOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir, IGNIS_MEMTRACE_CMD: healthyShim }
-  );
-  assert.match(healthyOut.injectSteps[0].systemMessage.systemMessage, /\[ignis-swarm\]\[Memtrace\] Active/);
-  assert.match(healthyOut.injectSteps[0].systemMessage.systemMessage, /memtrace daemon running/);
-
-  const unhealthyOut = runHook(
-    "hooks/session-start.mjs",
-    { cwd: projDir, lastUserInput: "hello" },
-    { IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir, IGNIS_MEMTRACE_CMD: failingShim }
-  );
-  assert.match(unhealthyOut.injectSteps[0].systemMessage.systemMessage, /\[ignis-swarm\]\[Memtrace Alert\]/);
-  assert.match(unhealthyOut.injectSteps[0].systemMessage.systemMessage, /daemon stopped/);
-
-  fs.rmSync(projDir, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
-});
-
-test("session-start injects Phase 4 routing notice per strategy for interactive sessions only", () => {
-  const projDir = makeTempDir("ignis-route-proj-");
-  const homeDir = makeTempDir("ignis-route-home-");
-  const tempDirs = [projDir, homeDir];
-  try {
-    fs.mkdirSync(path.join(projDir, ".git"));
-    const msg = (strategy, extra = {}, routingOverride = null) => {
-      const dataDir = makeTempDir("ignis-route-data-");
-      tempDirs.push(dataDir);
-      writeCompletedOnboarding(dataDir, routingOverride ? { reviewRouting: routingOverride } : routing(strategy));
-      const out = runHook(
-        "hooks/session-start.mjs",
-        { cwd: projDir, lastUserInput: "hi", ...extra },
-        { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
-      );
-      return out.injectSteps?.[0]?.systemMessage?.systemMessage ?? "";
-    };
-    const hl = msg("headless_always");
-    assert.match(hl, /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always \(backend=claude, model=opus, effort=high\)/);
-    assert.ok(hl.includes(RUNNER));
-    const af = msg("antigravity_first");
-    assert.match(af, /strategy=antigravity_first/);
-    assert.match(af, /--fallback/);
-    assert.doesNotMatch(msg("antigravity_gemini_only"), /Phase 4 Review Routing/);
-    assert.doesNotMatch(msg("headless_always", { isSubagent: true }), /Phase 4 Review Routing/);
-    const unconf = msg("headless_always", {}, {
-      strategy: "headless_always",
-      headlessBackend: null,
-      headlessModel: null,
-      effort: "high",
-    });
-    assert.match(unconf, /\(backend=unconfigured, model=none, effort=high\)/);
-  } finally {
-    for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
-  }
-});
-
-const BROKER_CLI = path.resolve(PLUGIN_ROOT, "scripts", "ignis-broker.mjs");
-
-function sessionMessage(out) {
-  return out.injectSteps?.[0]?.systemMessage?.systemMessage ?? "";
+  return { dir, env: { IGNIS_MCP_CONFIG_PATH: mcpConfigPath } };
 }
 
-test("session-start shows no first-run notice after `onboarding --skip`", () => {
-  const projDir = makeTempDir("ignis-skip-proj-");
-  const homeDir = makeTempDir("ignis-skip-home-");
-  const dataDir = makeTempDir("ignis-skip-data-");
-  try {
-    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-    const env = { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir };
+test("session-start asks for first-run onboarding and lists the discovered MCP names", () => {
+  withIso((iso) => {
+    const { dir, env } = firstRunProject(iso);
+    const msg = sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "start work" }, env));
+    assert.match(msg, FIRST_RUN);
+    assert.match(msg, /Load skill `ignis-onboarding`/);
+    assert.match(msg, /Discovered MCPs \(redacted\): linear \(http\), serena \(stdio\)\./);
+  });
+});
 
-    const before = runHook("hooks/session-start.mjs", { cwd: projDir, lastUserInput: "hi" }, env);
-    assert.match(sessionMessage(before), /\[ignis-swarm\]\[First-Run Onboarding Required\]/);
+test("session-start first-run notice leaks no MCP secret", () => {
+  withIso((iso) => {
+    const { dir, env } = firstRunProject(iso);
+    const msg = sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "start work" }, env));
+    for (const secret of Object.values(MCP_SECRETS)) assert.equal(msg.includes(secret), false);
+  });
+});
 
-    const skip = spawnSync(process.execPath, [BROKER_CLI, "onboarding", "--skip"], {
-      encoding: "utf8",
-      env: { ...process.env, ...env },
-      timeout: 8000,
-      windowsHide: true,
+for (const [label, payload] of [
+  ["a payload without user input", {}],
+  ["a payload flagged isSubagent", { lastUserInput: "audit", isSubagent: true }],
+]) {
+  test(`session-start shows no first-run notice for ${label}`, () => {
+    withIso((iso) => {
+      const { dir, env } = firstRunProject(iso);
+      assert.deepEqual(runHook(iso, { cwd: dir, ...payload }, env), {});
     });
+  });
+}
+
+test("session-start first-run notice names the real broker CLI path", () => {
+  withIso((iso) => {
+    const dir = projectDir(iso);
+    const msg = sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "start" }));
+    assert.match(msg, FIRST_RUN);
+    assert.equal(fs.existsSync(BROKER_CLI), true);
+    assert.equal(msg.includes(`replace \`<broker-cli>\` with this absolute path: \`${BROKER_CLI}\``), true);
+  });
+});
+
+test("session-start first-run notice carries a quoted, ready-to-run example", () => {
+  withIso((iso) => {
+    const dir = projectDir(iso);
+    const msg = sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "start" }));
+    assert.equal(msg.includes(`Example: \`node "${BROKER_CLI}" onboarding --probe\``), true);
+  });
+});
+
+test("session-start first-run notice no longer mentions <plugin-root>", () => {
+  withIso((iso) => {
+    const dir = projectDir(iso);
+    const msg = sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "start" }));
+    assert.equal(msg.includes("<plugin-root>"), false);
+  });
+});
+
+test("session-start shows no first-run notice after `onboarding --skip`", () => {
+  withIso((iso) => {
+    const dir = projectDir(iso);
+    assert.match(sessionMessage(runHook(iso, { cwd: dir, lastUserInput: "hi" })), FIRST_RUN);
+
+    const skip = runNode(BROKER_CLI, ["onboarding", "--skip"], { env: iso.env, timeoutMs: 8000 });
     assert.equal(skip.status, 0, skip.stderr);
-    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "onboarding.json"), "utf8"));
+
+    assert.deepEqual(runHook(iso, { cwd: dir, lastUserInput: "hi" }), {});
+  });
+});
+
+test("`onboarding --skip` records skipped true and completed false", () => {
+  withIso((iso) => {
+    const skip = runNode(BROKER_CLI, ["onboarding", "--skip"], { env: iso.env, timeoutMs: 8000 });
+    assert.equal(skip.status, 0, skip.stderr);
+    const saved = JSON.parse(fs.readFileSync(path.join(iso.dirs.brokerData, "onboarding.json"), "utf8"));
     assert.equal(saved.skipped, true);
     assert.equal(saved.completed, false);
-
-    const after = runHook("hooks/session-start.mjs", { cwd: projDir, lastUserInput: "hi" }, env);
-    assert.deepEqual(after, {});
-  } finally {
-    for (const d of [projDir, homeDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
-  }
+  });
 });
 
-test("session-start decides the routing notice from reviewRouting alone, not from completed", () => {
-  const projDir = makeTempDir("ignis-rr-proj-");
-  const homeDir = makeTempDir("ignis-rr-home-");
-  const tempDirs = [projDir, homeDir];
-  try {
-    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-    const run = (state, extra = {}) => {
-      const dataDir = makeTempDir("ignis-rr-data-");
-      tempDirs.push(dataDir);
-      writeCompletedOnboarding(dataDir, state);
-      return runHook(
-        "hooks/session-start.mjs",
-        { cwd: projDir, lastUserInput: "hi", ...extra },
-        { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
-      );
-    };
-    const routingNotice = /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always/;
-
-    const pending = sessionMessage(run({ completed: false, ...routing("headless_always") }));
-    assert.match(pending, routingNotice);
-    assert.match(pending, /\[ignis-swarm\]\[First-Run Onboarding Required\]/);
-
-    const skipped = sessionMessage(run({ completed: false, skipped: true, ...routing("headless_always") }));
-    assert.match(skipped, routingNotice);
-    assert.doesNotMatch(skipped, /First-Run Onboarding Required/);
-
-    const pendingFirst = sessionMessage(run({ completed: false, ...routing("antigravity_first") }));
-    assert.match(pendingFirst, /strategy=antigravity_first/);
-
-    assert.deepEqual(run({ completed: false, ...routing("headless_always") }, { isSubagent: true }), {});
-    assert.deepEqual(run({ completed: false, skipped: true, ...routing("headless_always") }, { isSubagent: true }), {});
-  } finally {
-    for (const d of tempDirs) fs.rmSync(d, { recursive: true, force: true });
-  }
-});
-
-test("session-start omits the routing notice for antigravity_gemini_only even when completed", () => {
-  const projDir = makeTempDir("ignis-rr-gem-proj-");
-  const homeDir = makeTempDir("ignis-rr-gem-home-");
-  const dataDir = makeTempDir("ignis-rr-gem-data-");
-  try {
-    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-    writeCompletedOnboarding(dataDir, { completed: true, ...routing("antigravity_gemini_only") });
-    const out = runHook(
-      "hooks/session-start.mjs",
-      { cwd: projDir, lastUserInput: "hi" },
-      { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir }
+test("session-start handles a Windows shim path and a cwd containing a space and an ampersand", { skip: process.platform !== "win32" }, () => {
+  withIso((iso) => {
+    const dir = projectDir(iso, { name: "repo & app" });
+    const dataDir = path.join(iso.dirs.root, "data & state");
+    writeOnboardingState(dataDir);
+    const payload = JSON.stringify({ localConfigError: "invalid local config", recentFallbacks: [] });
+    const shim = writeShim(iso.dirs.root, "broker & shim", payload);
+    const out = runHook(iso, { cwd: dir, lastUserInput: "hello" }, { IGNIS_BROKER_CMD: shim, IGNIS_BROKER_DATA: dataDir });
+    assert.equal(
+      sessionMessage(out),
+      "[ignis-broker Alert] Local config error detected (invalid local config). Global fallback config is active."
     );
-    assert.doesNotMatch(sessionMessage(out), /Phase 4 Review Routing/);
-    assert.deepEqual(out, {});
-  } finally {
-    for (const d of [projDir, homeDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
-  }
+  });
 });
 
-test("session-start first-run notice names the real broker CLI path and a runnable example", () => {
-  const projDir = makeTempDir("ignis-path-proj-");
-  const dataDir = makeTempDir("ignis-path-data-");
-  try {
-    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-    const out = runHook(
-      "hooks/session-start.mjs",
-      { cwd: projDir, lastUserInput: "start" },
-      { IGNIS_BROKER_HOME: dataDir, IGNIS_BROKER_DATA: dataDir }
-    );
-    const msg = sessionMessage(out);
-    assert.match(msg, /\[ignis-swarm\]\[First-Run Onboarding Required\]/);
-    assert.ok(fs.existsSync(BROKER_CLI), "broker CLI exists on disk");
-    assert.ok(msg.includes(BROKER_CLI), `notice names ${BROKER_CLI}`);
-    assert.ok(
-      msg.includes(`replace \`<broker-cli>\` with this absolute path: \`${BROKER_CLI}\``),
-      "notice says <broker-cli> is the absolute path it prints"
-    );
-    assert.ok(!msg.includes("<plugin-root>"), "notice no longer mentions <plugin-root>");
-    assert.ok(msg.includes(`node "${BROKER_CLI}" onboarding --probe`), "notice carries a quoted, ready-to-run example");
-  } finally {
-    for (const d of [projDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
-  }
+function memtraceScenario(iso, state, exitCode, stdoutText) {
+  const dir = projectDir(iso);
+  const shim = writeShim(dir, "memtrace-shim", stdoutText, exitCode);
+  writeOnboardingState(iso.dirs.brokerData, state);
+  return runHook(iso, { cwd: dir, lastUserInput: "hello" }, { IGNIS_MEMTRACE_CMD: shim });
+}
+
+test("session-start skips the memtrace check when memtrace.enabled is false", () => {
+  withIso((iso) => {
+    assert.deepEqual(memtraceScenario(iso, { memtrace: { enabled: false } }, 1, "daemon stopped"), {});
+  });
 });
 
-test("session-start runs the memtrace check for a skipped onboarding with memtrace enabled", () => {
-  const projDir = makeTempDir("ignis-mt-skip-proj-");
-  const homeDir = makeTempDir("ignis-mt-skip-home-");
-  const dataDir = makeTempDir("ignis-mt-skip-data-");
-  try {
-    fs.writeFileSync(path.join(projDir, "package.json"), "{}");
-    const healthyShim = writeShim(projDir, "memtrace-ok", "memtrace daemon running", 0);
-    writeCompletedOnboarding(dataDir, { completed: false, skipped: true, memtrace: { enabled: true } });
-    const out = runHook(
-      "hooks/session-start.mjs",
-      { cwd: projDir, lastUserInput: "hi" },
-      { IGNIS_BROKER_HOME: homeDir, IGNIS_BROKER_DATA: dataDir, IGNIS_MEMTRACE_CMD: healthyShim }
-    );
-    const msg = sessionMessage(out);
-    assert.match(msg, /\[ignis-swarm\]\[Memtrace\] Active/);
-    assert.doesNotMatch(msg, /First-Run Onboarding Required/);
-  } finally {
-    for (const d of [projDir, homeDir, dataDir]) fs.rmSync(d, { recursive: true, force: true });
-  }
+test("session-start reports a healthy memtrace daemon when memtrace.enabled is true", () => {
+  withIso((iso) => {
+    const out = memtraceScenario(iso, { memtrace: { enabled: true } }, 0, "memtrace daemon running");
+    assert.equal(sessionMessage(out), "[ignis-swarm][Memtrace] Active (memtrace daemon running).");
+  });
 });
+
+test("session-start alerts about an unhealthy memtrace daemon when memtrace.enabled is true", () => {
+  withIso((iso) => {
+    const out = memtraceScenario(iso, { memtrace: { enabled: true } }, 1, "daemon stopped");
+    assert.equal(sessionMessage(out), "[ignis-swarm][Memtrace Alert] memtrace status failed (daemon stopped).");
+  });
+});
+
+test("session-start runs the memtrace check for a skipped onboarding with memtrace enabled, without the first-run notice", () => {
+  withIso((iso) => {
+    const out = memtraceScenario(
+      iso,
+      { completed: false, skipped: true, memtrace: { enabled: true } },
+      0,
+      "memtrace daemon running"
+    );
+    assert.equal(sessionMessage(out), "[ignis-swarm][Memtrace] Active (memtrace daemon running).");
+  });
+});
+
+function routingMessage(iso, state, payload = {}) {
+  const dir = projectDir(iso, { markers: [".git"] });
+  writeOnboardingState(iso.dirs.brokerData, state);
+  return runHook(iso, { cwd: dir, lastUserInput: "hi", ...payload });
+}
+
+for (const [strategy, expected] of [
+  ["headless_always", headlessAlwaysNotice()],
+  ["antigravity_first", antigravityFirstNotice()],
+]) {
+  test(`session-start injects the ${strategy} routing notice for an interactive session`, () => {
+    withIso((iso) => {
+      assert.equal(sessionMessage(routingMessage(iso, routingState(strategy))), expected);
+    });
+  });
+}
+
+test("session-start injects no routing notice for antigravity_gemini_only", () => {
+  withIso((iso) => {
+    assert.deepEqual(routingMessage(iso, routingState("antigravity_gemini_only")), {});
+  });
+});
+
+test("session-start injects no routing notice for a subagent", () => {
+  withIso((iso) => {
+    assert.deepEqual(routingMessage(iso, routingState("headless_always"), { isSubagent: true }), {});
+  });
+});
+
+test("session-start names the unconfigured backend when headless_always has none", () => {
+  withIso((iso) => {
+    const unconfigured = { strategy: "headless_always", headlessBackend: null, headlessModel: null, effort: "high" };
+    const out = routingMessage(iso, { reviewRouting: unconfigured });
+    assert.equal(sessionMessage(out), headlessAlwaysNotice("unconfigured", "none"));
+  });
+});
+
+test("session-start adds the routing notice to the first-run notice while onboarding is pending", () => {
+  withIso((iso) => {
+    const msg = sessionMessage(routingMessage(iso, { completed: false, ...routingState("headless_always") }));
+    assert.match(msg, FIRST_RUN);
+    assert.equal(msg.split("\n").includes(headlessAlwaysNotice()), true);
+  });
+});
+
+test("session-start injects the antigravity_first routing notice while onboarding is pending", () => {
+  withIso((iso) => {
+    const msg = sessionMessage(routingMessage(iso, { completed: false, ...routingState("antigravity_first") }));
+    assert.equal(msg.split("\n").includes(antigravityFirstNotice()), true);
+  });
+});
+
+test("session-start injects only the routing notice once onboarding is skipped", () => {
+  withIso((iso) => {
+    const out = routingMessage(iso, { completed: false, skipped: true, ...routingState("headless_always") });
+    assert.equal(sessionMessage(out), headlessAlwaysNotice());
+  });
+});
+
+for (const [label, state] of [
+  ["pending", { completed: false }],
+  ["skipped", { completed: false, skipped: true }],
+]) {
+  test(`session-start injects nothing for a subagent while onboarding is ${label}`, () => {
+    withIso((iso) => {
+      assert.deepEqual(routingMessage(iso, { ...state, ...routingState("headless_always") }, { isSubagent: true }), {});
+    });
+  });
+}
 
 function writeNodeShim(dir, baseName, { sleepMs, stdoutText, marker }) {
   const impl = path.join(dir, `${baseName}.impl.mjs`);
@@ -445,18 +378,19 @@ function writeNodeShim(dir, baseName, { sleepMs, stdoutText, marker }) {
   return shim;
 }
 
-const CHECKS_DEADLINE_MS = 3500;
 const DEADLINE_MARGIN_MS = 6000;
 const SLOW_CHECK_MS = 20_000;
+const MEMTRACE_NOTICE = "[ignis-swarm][Memtrace] Active (memtrace daemon running).";
+const MEMTRACE_TIMEOUT_NOTICE = "[ignis-swarm][Memtrace Alert] memtrace status failed (timed out after 3000 ms).";
+const BROKER_NOTICE =
+  "[ignis-broker Alert] Local config error detected (invalid local config). Global fallback config is active.";
 
 function slowChecksScenario(sleepMs) {
   const iso = isolatedEnv();
-  const projDir = path.join(iso.dirs.root, "proj");
+  const projDir = projectDir(iso, { adr: true });
   const toolsDir = path.join(iso.dirs.root, "tools");
-  fs.mkdirSync(path.join(projDir, "docs", "adr"), { recursive: true });
   fs.mkdirSync(toolsDir, { recursive: true });
-  fs.writeFileSync(path.join(projDir, "docs", "adr", "INDEX.md"), "| ID | File |\n|---|---|\n");
-  writeOnboardingState(iso.dirs.brokerData, { memtrace: { enabled: true }, ...routing("headless_always") });
+  writeOnboardingState(iso.dirs.brokerData, { memtrace: { enabled: true }, ...routingState("headless_always") });
   const markers = {
     memtrace: path.join(toolsDir, "memtrace.started"),
     broker: path.join(toolsDir, "broker.started"),
@@ -471,87 +405,93 @@ function slowChecksScenario(sleepMs) {
     stdoutText: JSON.stringify({ localConfigError: "invalid local config", recentFallbacks: [] }),
     marker: markers.broker,
   });
-  const env = { ...iso.env, IGNIS_MEMTRACE_CMD: memtraceShim, IGNIS_BROKER_CMD: brokerShim };
+  const env = { IGNIS_MEMTRACE_CMD: memtraceShim, IGNIS_BROKER_CMD: brokerShim };
   return { iso, projDir, markers, env };
 }
 
-function runHookTimed(inputObj, env) {
-  const started = performance.now();
-  const res = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, "hooks", "session-start.mjs")], {
-    cwd: PLUGIN_ROOT,
-    input: JSON.stringify(inputObj),
-    encoding: "utf8",
-    env,
-    timeout: 60_000,
-    windowsHide: true,
-  });
-  const elapsedMs = performance.now() - started;
-  assert.ifError(res.error);
-  assert.equal(res.status, 0, res.stderr);
-  return { out: JSON.parse(res.stdout.trim()), elapsedMs };
-}
+describe("session-start with slow memtrace and broker checks", () => {
+  let sc;
+  let run;
+  let beganAt;
+  let endedAt;
 
-test("session-start finishes inside its budget and keeps the ready notices when both checks are slow", () => {
-  const sc = slowChecksScenario(SLOW_CHECK_MS);
-  try {
-    const { out } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
-    const endedAt = Date.now();
-    const lateness = ["memtrace", "broker"].map((name) => {
+  before(() => {
+    sc = slowChecksScenario(SLOW_CHECK_MS);
+    beganAt = Date.now();
+    run = runHookTimed(sc.iso, { cwd: sc.projDir, lastUserInput: "hi" }, sc.env, 60_000);
+    endedAt = Date.now();
+  });
+
+  after(() => sc.iso.cleanup());
+
+  for (const name of ["memtrace", "broker"]) {
+    test(`stops waiting for the ${name} check within ${CHECKS_DEADLINE_MS} ms plus a margin`, () => {
       const startedAt = Number(fs.readFileSync(sc.markers[name], "utf8"));
-      assert.ok(startedAt > 0, `the ${name} check recorded its start`);
-      return endedAt - startedAt;
-    });
-    for (const ms of lateness) {
+      assert.ok(startedAt >= beganAt && startedAt <= endedAt, `the ${name} check recorded no start inside the run`);
+      const lateness = endedAt - startedAt;
       assert.ok(
-        ms < CHECKS_DEADLINE_MS + DEADLINE_MARGIN_MS,
-        `hook ended ${ms} ms after a check started, the deadline is ${CHECKS_DEADLINE_MS} ms plus ${DEADLINE_MARGIN_MS} ms of margin`
+        lateness < CHECKS_DEADLINE_MS + DEADLINE_MARGIN_MS,
+        `hook ended ${lateness} ms after the ${name} check started, the deadline is ${CHECKS_DEADLINE_MS} ms plus ${DEADLINE_MARGIN_MS} ms of margin`
       );
-    }
-    const msg = sessionMessage(out);
-    assert.match(msg, /\[ignis-swarm\]\[Phase 4 Review Routing\] strategy=headless_always/);
-    assert.match(msg, /docs\/adr\/INDEX\.md/);
-    assert.ok(fs.existsSync(sc.markers.memtrace), "the memtrace check ran");
-    assert.ok(fs.existsSync(sc.markers.broker), "the broker check ran");
-  } finally {
-    sc.iso.cleanup();
+    });
   }
+
+  test("keeps the ready notices, reports the memtrace timeout and says nothing about the timed-out broker check", () => {
+    assert.equal(sessionMessage(run.out), [MEMTRACE_TIMEOUT_NOTICE, headlessAlwaysNotice(), ADR_HINT].join("\n"));
+  });
 });
 
-test("session-start starts no memtrace or broker process for subagents and workers", () => {
+test("session-start starts no memtrace or broker process for a payload with a transcript but no user input", () => {
   const sc = slowChecksScenario(SLOW_CHECK_MS);
   try {
     const transcript = path.join(sc.iso.dirs.root, "transcript.jsonl");
     fs.writeFileSync(transcript, `${JSON.stringify({ type: "MODEL_RESPONSE", text: "working" })}\n`);
-    const payloads = [
-      { cwd: sc.projDir, transcriptPath: transcript },
-      { cwd: sc.projDir, lastUserInput: "audit", isSubagent: true },
-      { cwd: sc.projDir, lastUserInput: "audit", parentConversationId: "parent-1" },
-    ];
-    for (const payload of payloads) {
-      const { out, elapsedMs } = runHookTimed(payload, sc.env);
-      assert.ok(elapsedMs < SLOW_CHECK_MS / 2, `subagent hook took ${Math.round(elapsedMs)} ms for ${JSON.stringify(Object.keys(payload))}`);
-      const msg = sessionMessage(out);
-      assert.match(msg, /docs\/adr\/INDEX\.md/);
-      assert.doesNotMatch(msg, /Phase 4 Review Routing|Memtrace|ignis-broker/);
-      assert.ok(!fs.existsSync(sc.markers.memtrace), "no memtrace process for a subagent");
-      assert.ok(!fs.existsSync(sc.markers.broker), "no broker process for a subagent");
-    }
+    assertNoChecksFor(sc, { cwd: sc.projDir, transcriptPath: transcript });
   } finally {
     sc.iso.cleanup();
   }
 });
 
+for (const [label, extra] of [
+  ["isSubagent", { isSubagent: true }],
+  ["a parentConversationId", { parentConversationId: "parent-1" }],
+]) {
+  test(`session-start starts no memtrace or broker process for a payload with ${label}`, () => {
+    const sc = slowChecksScenario(SLOW_CHECK_MS);
+    try {
+      assertNoChecksFor(sc, { cwd: sc.projDir, lastUserInput: "audit", ...extra });
+    } finally {
+      sc.iso.cleanup();
+    }
+  });
+}
+
+function assertNoChecksFor(sc, payload) {
+  const { out, elapsedMs } = runHookTimed(sc.iso, payload, sc.env);
+  assert.ok(elapsedMs < SLOW_CHECK_MS / 2, `subagent hook took ${Math.round(elapsedMs)} ms`);
+  assert.equal(sessionMessage(out), ADR_HINT);
+  assert.equal(fs.existsSync(sc.markers.memtrace), false);
+  assert.equal(fs.existsSync(sc.markers.broker), false);
+}
+
 test("session-start reports both checks, in order, when they answer at once", () => {
   const sc = slowChecksScenario(0);
   try {
-    const { out, elapsedMs } = runHookTimed({ cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
+    const { out } = runHookTimed(sc.iso, { cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
+    assert.equal(
+      sessionMessage(out),
+      [MEMTRACE_NOTICE, headlessAlwaysNotice(), ADR_HINT, BROKER_NOTICE].join("\n")
+    );
+  } finally {
+    sc.iso.cleanup();
+  }
+});
+
+test("session-start returns well before the deadline when both checks answer at once", () => {
+  const sc = slowChecksScenario(0);
+  try {
+    const { elapsedMs } = runHookTimed(sc.iso, { cwd: sc.projDir, lastUserInput: "hi" }, sc.env);
     assert.ok(elapsedMs < SLOW_CHECK_MS / 2, `hook took ${Math.round(elapsedMs)} ms with instant checks`);
-    const msg = sessionMessage(out);
-    const memtrace = msg.indexOf("[ignis-swarm][Memtrace] Active (memtrace daemon running).");
-    const routingAt = msg.indexOf("[ignis-swarm][Phase 4 Review Routing]");
-    const hint = msg.indexOf("Decision indexes detected (docs/adr/INDEX.md)");
-    const broker = msg.indexOf("[ignis-broker Alert] Local config error detected (invalid local config).");
-    assert.ok(memtrace >= 0 && routingAt > memtrace && hint > routingAt && broker > hint, msg);
   } finally {
     sc.iso.cleanup();
   }
