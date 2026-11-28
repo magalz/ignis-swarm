@@ -3,12 +3,12 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
 import { defaultOnboardingState, detectCli, loadOnboardingState } from "./broker/onboarding.mjs";
 import { recordReviewState, reviewStatePath } from "./broker/review-state.mjs";
-import { collectChanges, gitToplevel, headSha } from "./lib/git-changes.mjs";
+import { isMainModule } from "./lib/common.mjs";
+import { collectChanges, gitEnv, gitToplevel, headSha } from "./lib/git-changes.mjs";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
@@ -271,7 +271,7 @@ function extractGitDiff(base, cwd) {
       changes.error.code === "too_large" ? `diff is larger than ${limit} bytes` : changes.error.message;
     return { failure: `${changes.error.code}: ${detail}`, snapshot };
   }
-  return { diff: changes.diff, snapshot };
+  return { diff: changes.diff, bytes: changes.bytes, snapshot };
 }
 
 function runSmokeTest(opts) {
@@ -323,12 +323,6 @@ export function noVerdictReason(output) {
   const snippet = output.replace(/\s+/g, " ").trim().slice(0, NO_VERDICT_DETAIL_CHARS);
   const detail = snippet ? `no Status line): ${snippet}` : "empty output)";
   return `headless reviewer returned no verdict (${detail}`;
-}
-
-function gitEnv() {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !/^GIT_(DIR|WORK_TREE)$/i.test(key))
-  );
 }
 
 function reviewStatus(result) {
@@ -437,7 +431,7 @@ export function runBlindReview(opts) {
     );
   }
   const diff = extracted.diff;
-  const diffBytes = Buffer.byteLength(diff, "utf8");
+  const diffBytes = extracted.bytes;
 
   if (diffBytes === 0) {
     return withState(
@@ -557,21 +551,7 @@ function main() {
   }
 }
 
-function canonicalPath(file) {
-  const real = fs.realpathSync.native(file);
-  return process.platform === "win32" ? real.toLowerCase() : real;
-}
-
-function isMainModule() {
-  if (!process.argv[1]) return false;
-  try {
-    return canonicalPath(process.argv[1]) === canonicalPath(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
-}
-
-const isEntrypoint = isMainModule();
+const isEntrypoint = isMainModule(import.meta.url);
 
 if (isEntrypoint) {
   try {

@@ -145,7 +145,7 @@ test("a headSha mismatch leaves the root missing", (t) => {
   const s = setup(t);
   const repo = s.repo("a");
   s.record(repo, "fallback");
-  assert.deepEqual(s.gate([repo]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([repo]), { allow: true, missing: [], errors: [], gitRoots: 1 });
 
   runGit(repo, ["commit", "--allow-empty", "-m", "second commit"], { env: s.env });
   const decision = s.gate([repo]);
@@ -160,7 +160,7 @@ test("an unborn repository is satisfied by a record with headSha 'unborn'", (t) 
   assert.equal(headSha(repo, { env: s.env }), "unborn");
   assert.equal(s.gate([repo]).allow, false);
   recordReviewState(s.dataDir, repo, { status: "fallback", headSha: "unborn", nowMs: NOW });
-  assert.deepEqual(s.gate([repo]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([repo]), { allow: true, missing: [], errors: [], gitRoots: 1 });
 });
 
 test("a record whose stored key differs from the workspace is treated as missing", (t) => {
@@ -243,18 +243,18 @@ test("a directory that is not a git repository is skipped", (t) => {
   const a = s.repo("a");
   const plain = s.plain("plain");
   s.record(a, "fallback");
-  assert.deepEqual(s.gate([plain, a]), { allow: true, missing: [], errors: [] });
-  assert.deepEqual(s.gate([a, plain]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([plain, a]), { allow: true, missing: [], errors: [], gitRoots: 1 });
+  assert.deepEqual(s.gate([a, plain]), { allow: true, missing: [], errors: [], gitRoots: 1 });
 });
 
 test("when every directory is outside git there is no fallback and the gate does not allow", (t) => {
   const s = setup(t);
-  assert.deepEqual(s.gate([s.plain("p1"), s.plain("p2")]), { allow: false, missing: [], errors: [] });
+  assert.deepEqual(s.gate([s.plain("p1"), s.plain("p2")]), { allow: false, missing: [], errors: [], gitRoots: 0 });
 });
 
 test("no usable directory is an error", (t) => {
   const s = setup(t);
-  const expected = { allow: false, missing: [], errors: [{ dir: null, message: "no workspace supplied" }] };
+  const expected = { allow: false, missing: [], errors: [{ dir: null, message: "no workspace supplied" }], gitRoots: 0 };
   assert.deepEqual(s.gate([]), expected);
   assert.deepEqual(s.gate(["", null, undefined, 7, {}]), expected);
 });
@@ -266,17 +266,17 @@ test("allow needs every root satisfied and at least one fallback", (t) => {
 
   s.record(a, "fallback");
   s.record(b, "empty");
-  assert.deepEqual(s.gate([a, b]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([a, b]), { allow: true, missing: [], errors: [], gitRoots: 2 });
 
   s.record(b, "reviewed");
-  assert.deepEqual(s.gate([a, b]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([a, b]), { allow: true, missing: [], errors: [], gitRoots: 2 });
 
   s.record(a, "reviewed");
-  assert.deepEqual(s.gate([a, b]), { allow: false, missing: [], errors: [] });
+  assert.deepEqual(s.gate([a, b]), { allow: false, missing: [], errors: [], gitRoots: 2 });
 
   s.record(a, "empty");
   s.record(b, "empty");
-  assert.deepEqual(s.gate([a, b]), { allow: false, missing: [], errors: [] });
+  assert.deepEqual(s.gate([a, b]), { allow: false, missing: [], errors: [], gitRoots: 2 });
 
   fs.rmSync(reviewStatePath(s.dataDir, b));
   s.record(a, "fallback");
@@ -324,8 +324,8 @@ test("two directories inside one repository count as one root", (t) => {
   assert.equal(unrecorded.missing.length, 1);
   assert.deepEqual(unrecorded.errors, []);
   s.record(repo, "fallback");
-  assert.deepEqual(s.gate([repo, sub]), { allow: true, missing: [], errors: [] });
-  assert.deepEqual(s.gate([sub]), { allow: true, missing: [], errors: [] });
+  assert.deepEqual(s.gate([repo, sub]), { allow: true, missing: [], errors: [], gitRoots: 1 });
+  assert.deepEqual(s.gate([sub]), { allow: true, missing: [], errors: [], gitRoots: 1 });
 });
 
 test("an invalid status or headSha throws TypeError and writes nothing", (t) => {
