@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
 import {
+  BROKER_ENTRY,
   initGitRepo,
   isolatedEnv,
   mkTemp,
@@ -468,5 +469,47 @@ test("writeOnboardingState merges defaults, lets the state override them and rou
     assert.deepEqual(loadOnboardingState(dataDir).reviewRouting, routing);
   } finally {
     rmTemp(dir);
+  }
+});
+
+test("isolatedEnv cleanup on POSIX kills the daemon and its detached MCP children, so none is orphaned", { skip: process.platform === "win32" }, async () => {
+  const iso = isolatedEnv();
+  const childPidFile = path.join(iso.dirs.root, "child.pid");
+  const daemonScript = [
+    'const { spawn } = require("node:child_process");',
+    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });',
+    'require("node:fs").writeFileSync(process.argv[1], String(child.pid));',
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  const launcherScript = [
+    'const { spawn } = require("node:child_process");',
+    "const d = spawn(process.execPath, [\"-e\", process.argv[1], process.argv[2], process.argv[3], \"daemon\"], { detached: true, stdio: \"ignore\" });",
+    "d.unref();",
+    "process.stdout.write(String(d.pid));",
+  ].join("\n");
+  const launched = spawnSync(process.execPath, ["-e", launcherScript, daemonScript, childPidFile, BROKER_ENTRY], { encoding: "utf8" });
+  assert.equal(launched.status, 0, launched.stderr);
+  const daemonPid = Number(launched.stdout);
+  let childPid = 0;
+  let cleaned = false;
+  try {
+    await waitUntil("the fake daemon to start its child", () => fs.existsSync(childPidFile) && fs.readFileSync(childPidFile, "utf8") !== "", 10_000);
+    childPid = Number(fs.readFileSync(childPidFile, "utf8"));
+    assert.ok(isPidAlive(daemonPid) && isPidAlive(childPid));
+    fs.writeFileSync(path.join(iso.dirs.brokerData, "daemon.json"), JSON.stringify({ pid: daemonPid }));
+
+    iso.cleanup();
+    cleaned = true;
+
+    await waitUntil("the daemon and its child to be gone", () => !isPidAlive(daemonPid) && !isPidAlive(childPid), 10_000);
+  } finally {
+    for (const pid of [daemonPid, childPid]) {
+      if (pid > 0 && isPidAlive(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
+    if (!cleaned) iso.cleanup();
   }
 });

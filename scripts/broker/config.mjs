@@ -364,12 +364,21 @@ function readServersFile(home) {
   } catch (err) {
     throw new Error(`invalid global config ${dest}: ${err.message}`);
   }
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(parsed)) {
+    throw new Error(`invalid servers config ${dest}: the top-level value must be an object`);
+  }
+  for (const key of ["servers", "defaults"]) {
+    if (Object.hasOwn(parsed, key) && !isObject(parsed[key])) {
+      throw new Error(`invalid servers config ${dest}: ${key} must be an object`);
+    }
+  }
   return {
     dest,
     data: {
       version: parsed.version ?? 1,
       defaults: parsed.defaults ?? {},
-      servers: parsed.servers && typeof parsed.servers === "object" ? { ...parsed.servers } : {},
+      servers: { ...parsed.servers },
     },
   };
 }

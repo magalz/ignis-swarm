@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 
-const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
+export const BROKER_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
 
 const TEST_GIT_NAME = "Ignis Test";
 const TEST_GIT_EMAIL = "ignis-test@example.invalid";
@@ -74,14 +74,43 @@ function comparablePath(text) {
 
 const OWN_ENTRIES = [...new Set([BROKER_ENTRY, fs.realpathSync.native(BROKER_ENTRY)].map(comparablePath))];
 
+// The broker spawns each stdio MCP child detached, so every child leads its own
+// process group. Collect the whole tree first: once the daemon dies its children
+// are re-parented and the link to them is lost.
+function descendantsOf(pid) {
+  const res = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 10_000 });
+  const children = new Map();
+  for (const line of (res.stdout ?? "").split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (!Number.isInteger(child) || !Number.isInteger(parent)) continue;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(child);
+  }
+  const found = [];
+  const queue = [pid];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
 function killTree(pid) {
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 20_000, windowsHide: true });
     return;
   }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {}
+  for (const target of [pid, ...descendantsOf(pid)]) {
+    try {
+      process.kill(-target, "SIGKILL");
+      continue;
+    } catch {}
+    try {
+      process.kill(target, "SIGKILL");
+    } catch {}
+  }
 }
 
 /**
@@ -103,12 +132,14 @@ function stopLeftoverDaemons(dirs, env) {
     if (!isBrokerDaemon(pid)) continue;
     spawnSync(process.execPath, [BROKER_ENTRY, "stop"], { env, timeout: 15_000, windowsHide: true });
     if (waitForExit(pid, 3000)) continue;
-    killTree(pid);
+    // The wait above is long enough for the pid to be reused: confirm it is still the daemon.
+    if (isBrokerDaemon(pid)) killTree(pid);
     waitForExit(pid, 5000);
   }
 }
 
-function removeTree(root) {
+/** Remove `root` recursively with retries; a folder that stays busy (EPERM on Windows) only warns, it never throws. */
+export function removeTree(root) {
   try {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 });
   } catch (err) {

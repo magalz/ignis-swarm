@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { McpStdioAdapter, killProcessTree } from "../scripts/broker/adapters.mjs";
-import { mkTemp as makeTemp } from "./helpers.mjs";
+import { mkTemp as makeTemp, removeTree } from "./helpers.mjs";
 
 const tempDirs = [];
 function mkTemp(prefix) {
@@ -14,7 +14,7 @@ function mkTemp(prefix) {
 }
 
 after(() => {
-  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  for (const dir of tempDirs) removeTree(dir);
 });
 
 const brokerHome = mkTemp("ignis-proto-home-");

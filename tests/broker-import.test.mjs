@@ -335,3 +335,59 @@ test("writeDotenvSecrets never reuses a leftover temp file or its mode", { skip:
   assert.equal(fs.readFileSync(envPath, "utf8"), `IGNIS_S_K="${value}"\n`);
   assert.deepEqual(fs.readdirSync(home).filter((f) => f.endsWith(".tmp") && f !== path.basename(leftover)), []);
 });
+
+const WRONG_SHAPES = {
+  "a top-level array": (marker) => JSON.stringify([marker]),
+  "a top-level string": (marker) => JSON.stringify(marker),
+  "a top-level null": () => "null",
+  "servers as an array": (marker) => JSON.stringify({ servers: [marker] }),
+  "servers as a string": (marker) => JSON.stringify({ servers: marker }),
+  "servers as null": () => JSON.stringify({ servers: null }),
+  "defaults as an array": (marker) => JSON.stringify({ defaults: [marker], servers: {} }),
+  "defaults as a string": (marker) => JSON.stringify({ defaults: marker, servers: {} }),
+};
+
+for (const cmd of ["register-mcp", "import-mcp"]) {
+  const argsFor = (source) =>
+    cmd === "register-mcp" ? ["register-mcp", "--all", "--from", source] : ["import-mcp", "--from", source];
+
+  for (const [label, build] of Object.entries(WRONG_SHAPES)) {
+    test(`${cmd} rejects a servers.json with ${label} and writes nothing`, (t) => {
+      const { iso, source, serversPath, envPath, broker, writeSource } = secretSetup(t);
+      fs.mkdirSync(iso.dirs.brokerHome, { recursive: true });
+      const marker = rnd("filecontent");
+      const existing = build(marker);
+      fs.writeFileSync(serversPath, existing);
+      const literal = rnd("new");
+      writeSource({ s: { ...stdioEntry, env: { K: literal } } });
+      const res = broker(argsFor(source));
+      assert.notEqual(res.status, 0);
+      assert.ok(res.stderr.includes(`invalid servers config ${serversPath}: `), res.stderr);
+      for (const text of [marker, literal]) {
+        assert.equal(res.stdout.includes(text) || res.stderr.includes(text), false);
+      }
+      assert.equal(fs.readFileSync(serversPath, "utf8"), existing);
+      assert.equal(fs.existsSync(envPath), false);
+    });
+  }
+
+  for (const [label, value] of [["CR", "a\rb"], ["LF", "a\nb"], ["CRLF", "a\r\nb"]]) {
+    for (const field of ["env", "headers"]) {
+      test(`${cmd} rejects a literal ${field} value with ${label} and writes nothing`, (t) => {
+        const { source, serversPath, envPath, broker, writeSource } = secretSetup(t);
+        const prefix = rnd("lit");
+        const entry =
+          field === "env"
+            ? { ...stdioEntry, env: { K: prefix + value } }
+            : { url: "https://example.com/mcp", headers: { Authorization: prefix + value } };
+        writeSource({ s: entry });
+        const res = broker(argsFor(source));
+        assert.notEqual(res.status, 0);
+        assert.match(res.stderr, /line break/);
+        assert.equal(res.stdout.includes(prefix) || res.stderr.includes(prefix), false);
+        assert.equal(fs.existsSync(serversPath), false);
+        assert.equal(fs.existsSync(envPath), false);
+      });
+    }
+  }
+}
