@@ -27,7 +27,7 @@ node "<broker-cli>" call <server> <tool> --args '{"key":"value"}'
 ```
 
 ## 2. Config Precedence & Failover Signals
-- Local `.agents/ignis-broker.json` (discovered walking up to `.git`) takes precedence over global `~/.ignis-broker/servers.json`, but only after the user trusts that exact file: `node "<broker-cli>" trust --cwd <dir>`. Editing the file voids the trust. An agent running `trust` always gets a user prompt.
+- Local `.agents/ignis-broker.json` (discovered walking up to `.git`) takes precedence over global `~/.ignis-broker/servers.json`, but only after the user trusts that exact file: `node "<broker-cli>" trust --cwd <dir>`. Editing the file voids the trust (`trust --list` then shows it as `changed`; the other states are `trusted` and `missing`). An agent running `trust` always gets a user prompt.
 - In the global config, secrets referenced as `${VAR_NAME}` in `env` or `headers` are expanded inside the broker from `~/.ignis-broker/.env` or broker process environment. A local config is never expanded: `${VAR}` stays literal.
 - Diagnostics and errors are masked: configured secrets and every own-env value of 4+ characters are redacted.
 - If a local config or local backend fails, the broker automatically falls back to the global definition and attaches `_meta`:

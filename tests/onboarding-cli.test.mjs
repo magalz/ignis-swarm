@@ -375,6 +375,15 @@ function withoutStamp(state) {
   return rest;
 }
 
+test("onboarding --save and --reset write the state file atomically, leaving no temp file", () => {
+  withIso((iso) => {
+    onbJson(iso, ["--save", JSON.stringify(SAMPLE_STATE)]);
+    onbJson(iso, ["--reset"]);
+    assert.deepEqual(fs.readdirSync(iso.dirs.brokerData).filter((n) => n.endsWith(".tmp")), []);
+    assert.equal(onbJson(iso, ["--get"]).completed, false);
+  });
+});
+
 test("onboarding --save sets completed true and persists it", () => {
   withIso((iso) => {
     const saved = onbJson(iso, ["--save", JSON.stringify(SAMPLE_STATE)]);
@@ -600,8 +609,9 @@ test("onboarding --probe redacts the env and headers of local config servers", (
     assert.equal(res.stdout.includes(LOCAL_SECRET), false);
     const local = JSON.parse(res.stdout).localBrokerConfig;
     assert.deepEqual(local.servers.map((s) => s.name).sort(), ["local", "remote"]);
-    assert.deepEqual(local.servers.find((s) => s.name === "local").env, { API_TOKEN: "***" });
-    assert.deepEqual(local.servers.find((s) => s.name === "remote").headers, { Authorization: "***" });
+    assert.deepEqual(local.servers.find((s) => s.name === "local").env, { API_TOKEN: "***REDACTED***" });
+    assert.deepEqual(local.servers.find((s) => s.name === "remote").headers, { Authorization: "***REDACTED***" });
+    assert.equal(local.servers.find((s) => s.name === "remote").url, "https://mcp.example.test/mcp");
   });
 });
 

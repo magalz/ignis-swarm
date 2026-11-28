@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { renameWithRetry } from "./review-state.mjs";
+import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
 
 const STORE_FILE = "trusted-local-configs.json";
 
@@ -139,7 +139,7 @@ export function parseJsonSafely(text) {
 
 function parseObject(bytes) {
   const parsed = parseJsonSafely(bytes.toString("utf8"));
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error("top level must be a JSON object");
   }
   return parsed;
@@ -158,7 +158,7 @@ function loadStore(dataDir, { strict }) {
   try {
     const parsed = parseJsonSafely(raw);
     const configs = parsed?.configs;
-    if (!configs || typeof configs !== "object" || Array.isArray(configs)) {
+    if (!isPlainObject(configs)) {
       throw new Error("missing configs object");
     }
     return { ...configs };
@@ -169,20 +169,14 @@ function loadStore(dataDir, { strict }) {
 }
 
 function saveStore(dataDir, configs) {
-  const storePath = trustStorePath(dataDir);
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const temp = `${storePath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  try {
-    fs.writeFileSync(temp, `${JSON.stringify({ version: 1, configs }, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    renameWithRetry(temp, storePath);
-  } catch (err) {
-    fs.rmSync(temp, { force: true });
-    throw err;
-  }
+  writePrivateFileAtomic(trustStorePath(dataDir), `${JSON.stringify({ version: 1, configs }, null, 2)}
+`);
+}
+
+export function trustStatus(entry, bytes) {
+  if (bytes === null) return "missing";
+  if (!entry || typeof entry.sha256 !== "string") return "untrusted";
+  return entry.sha256 === sha256Of(bytes) ? "trusted" : "changed";
 }
 
 export function trustLocalConfig(dataDir, file, { nowMs = Date.now() } = {}) {
@@ -214,7 +208,18 @@ export function listTrustedLocalConfigs(dataDir) {
   const configs = loadStore(dataDir, { strict: false });
   return Object.keys(configs)
     .sort()
-    .map((p) => ({ path: p, sha256: configs[p]?.sha256, trustedAt: configs[p]?.trustedAt }));
+    .map((p) => {
+      let bytes = null;
+      try {
+        bytes = fs.readFileSync(p);
+      } catch {}
+      return {
+        path: p,
+        sha256: configs[p]?.sha256,
+        trustedAt: configs[p]?.trustedAt,
+        status: trustStatus(configs[p], bytes),
+      };
+    });
 }
 
 export function readTrustedLocalConfig(dataDir, file) {
@@ -228,11 +233,6 @@ export function readTrustedLocalConfig(dataDir, file) {
   } catch (err) {
     return { path: key, error: err };
   }
-  const sha256 = sha256Of(bytes);
   const entry = loadStore(dataDir, { strict: false })[key];
-  let status = "untrusted";
-  if (entry && typeof entry.sha256 === "string") {
-    status = entry.sha256 === sha256 ? "trusted" : "changed";
-  }
-  return { path: key, sha256, parsed, status };
+  return { path: key, sha256: sha256Of(bytes), parsed, status: trustStatus(entry, bytes) };
 }

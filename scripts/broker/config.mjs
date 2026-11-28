@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
 import { parseJsonSafely, readTrustedLocalConfig } from "./trust.mjs";
 
 export const BROKER_VERSION = "1.1.0";
@@ -300,6 +300,27 @@ export function redactServerConfig(cfg) {
   };
 }
 
+export function describeServers(parsed) {
+  const servers = isPlainObject(parsed?.servers) ? parsed.servers : {};
+  return Object.entries(servers).map(([name, value]) => {
+    const raw = isPlainObject(value) ? value : {};
+    const redacted = redactServerConfig(raw);
+    const summary = {
+      name,
+      type: raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio"),
+      enabled: raw.enabled !== false,
+    };
+    if (typeof raw.command === "string") {
+      summary.command = raw.command;
+      summary.args = Array.isArray(raw.args) ? raw.args.map(String) : [];
+    }
+    if (typeof raw.url === "string") summary.url = redacted.url;
+    if (isPlainObject(raw.env)) summary.env = redacted.env;
+    if (isPlainObject(raw.headers)) summary.headers = redacted.headers;
+    return summary;
+  });
+}
+
 const BROKER_SELF_NAMES = new Set(["ignis-broker", "broker", "ignis-swarm_broker"]);
 
 export function importMcpConfig(fromPath, onlyServers = null) {
@@ -364,12 +385,11 @@ function readServersFile(home) {
   } catch (err) {
     throw new Error(`invalid global config ${dest}: ${err.message}`);
   }
-  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-  if (!isObject(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error(`invalid servers config ${dest}: the top-level value must be an object`);
   }
   for (const key of ["servers", "defaults"]) {
-    if (Object.hasOwn(parsed, key) && !isObject(parsed[key])) {
+    if (Object.hasOwn(parsed, key) && !isPlainObject(parsed[key])) {
       throw new Error(`invalid servers config ${dest}: ${key} must be an object`);
     }
   }
@@ -545,16 +565,15 @@ export function writeDotenvSecrets(home, secrets) {
     return rendered(key, secrets.get(key));
   });
   for (const [key, value] of pending) updated.push(rendered(key, value));
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  const tmp = path.join(home, `.env.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
-  try {
-    fs.writeFileSync(tmp, updated.join(eol) + eol, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    fs.renameSync(tmp, envPath);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
+  writePrivateFileAtomic(envPath, updated.join(eol) + eol);
   return [...secrets.keys()];
+}
+
+export function storeImportedServers(home, servers, mergeOptions) {
+  const ext = prepareSecrets(home, servers);
+  const wrote = writeDotenvSecrets(home, ext.secrets);
+  const merged = mergeServersConfig(home, ext.servers, mergeOptions);
+  return { wrote, merged };
 }
 
 export function addHttpServer(home, { name, url, authEnv, headerName }) {

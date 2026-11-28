@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,17 +6,16 @@ import { postToDaemon, runMcpBridge } from "./broker/bridge.mjs";
 import {
   BROKER_VERSION,
   addHttpServer,
+  describeServers,
   brokerDataDir,
   brokerHome,
   discoverLocalConfig,
   discoverMcpConfig,
   importMcpConfig,
-  mergeServersConfig,
-  prepareSecrets,
   redactServerConfig,
   removeServer,
-  writeDotenvSecrets,
   resolveRepoRoot,
+  storeImportedServers,
 } from "./broker/config.mjs";
 import { ensureDaemon, stopDaemon } from "./broker/lifecycle.mjs";
 import {
@@ -28,7 +26,6 @@ import {
   parseOnboardingInput,
   saveOnboardingInput,
   skipOnboarding,
-  summarizeServers,
 } from "./broker/onboarding.mjs";
 import { runDaemon } from "./broker/server.mjs";
 import {
@@ -87,25 +84,15 @@ function parseFlags(argv) {
   return { positional, flags };
 }
 
-function trustState(entry) {
-  let bytes;
-  try {
-    bytes = fs.readFileSync(entry.path);
-  } catch {
-    return "missing";
-  }
-  return crypto.createHash("sha256").update(bytes).digest("hex") === entry.sha256 ? "ok" : "changed";
-}
-
 function cmdTrust({ flags, dataDir, asJson }) {
   const say = (value, lines) => console.log(asJson ? JSON.stringify(value, null, 2) : lines.join("\n"));
   if (flags.list) {
-    const entries = listTrustedLocalConfigs(dataDir).map((e) => ({ ...e, state: trustState(e) }));
+    const entries = listTrustedLocalConfigs(dataDir);
     say(
       { entries },
       entries.length === 0
         ? ["no trusted local broker configs"]
-        : entries.map((e) => `${e.path}  ${String(e.sha256).slice(0, 12)}  ${e.trustedAt}  ${e.state}`)
+        : entries.map((e) => `${e.path}  ${String(e.sha256).slice(0, 12)}  ${e.trustedAt}  ${e.status}`)
     );
     return;
   }
@@ -125,14 +112,14 @@ function cmdTrust({ flags, dataDir, asJson }) {
   }
   const read = readTrustedLocalConfig(dataDir, file);
   if (read.error) throw new Error(read.error.message);
-  const servers = summarizeServers(read.parsed);
+  const servers = describeServers(read.parsed);
   const { sha256 } = trustLocalConfig(dataDir, file);
   const lines = [`config: ${file}`, `sha256: ${sha256}`, "servers:"];
   for (const s of servers) {
     const target = s.url ?? [s.command, ...(s.args ?? [])].join(" ");
     lines.push(`  - ${s.name} [${s.type}, ${s.enabled ? "enabled" : "disabled"}] ${target}`);
-    if (s.env) lines.push(`      env: ${Object.keys(s.env).map((k) => `${k}=***`).join(" ")}`);
-    if (s.headers) lines.push(`      headers: ${Object.keys(s.headers).map((k) => `${k}=***`).join(" ")}`);
+    if (s.env) lines.push(`      env: ${Object.entries(s.env).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+    if (s.headers) lines.push(`      headers: ${Object.entries(s.headers).map(([k, v]) => `${k}=${v}`).join(" ")}`);
   }
   lines.push("trusted");
   say({ path: file, sha256, servers, trusted: true }, lines);
@@ -273,9 +260,7 @@ function cmdImportMcp({ home, flags }) {
     return;
   }
 
-  const ext = prepareSecrets(home, imported.servers);
-  const wrote = writeDotenvSecrets(home, ext.secrets);
-  const merged = mergeServersConfig(home, ext.servers);
+  const { wrote, merged } = storeImportedServers(home, imported.servers);
   console.log(`Imported ${entries.length} server(s) into ${merged.dest}:`);
   for (const [name, cfg] of entries) {
     const tags = [];
@@ -331,9 +316,7 @@ function cmdRegisterMcp({ home, flags, asJson }) {
       }
     }
   }
-  const ext = prepareSecrets(home, imported.servers);
-  const wrote = writeDotenvSecrets(home, ext.secrets);
-  const merged = mergeServersConfig(home, ext.servers, {
+  const { wrote, merged } = storeImportedServers(home, imported.servers, {
     perWorkspaceSet,
     cliFallbackMap,
   });
@@ -460,7 +443,7 @@ async function main() {
     console.log(
       [
         `ignis-broker ${BROKER_VERSION} — resilient local MCP broker daemon`,
-        "Commands: trust [--cwd <dir>] [--revoke | --list] [--json] | list | describe | call | status | restart | stop | daemon | mcp-bridge | import-mcp | discover-mcp | register-mcp | add-http-mcp | unregister-mcp | onboarding",
+        "Commands: trust [--cwd <dir>] [--revoke [--file <path>] | --list] [--json] | list | describe | call | status | restart | stop | daemon | mcp-bridge | import-mcp | discover-mcp | register-mcp | add-http-mcp | unregister-mcp | onboarding",
       ].join("\n")
     );
     return;
