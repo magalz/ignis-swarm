@@ -6,7 +6,7 @@ import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
-import { isolatedEnv, waitUntil } from "./helpers.mjs";
+import { isolatedEnv, waitUntil, writeMockStdioServer } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_ENTRY = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
@@ -53,24 +53,7 @@ test("e2e CLI lazy-starts daemon, imports MCPs with summary list, and mcp-bridge
       iso.cleanup();
     }
   });
-  const mockScript = path.join(home, "mock_e2e.mjs");
-  fs.writeFileSync(
-    mockScript,
-    `
-import readline from "node:readline";
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === "initialize") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } }) + "\\n");
-  } else if (msg.method === "tools/list") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", description: "Return pong.", inputSchema: { type: "object" } }] } }) + "\\n");
-  } else if (msg.method === "tools/call") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "pong-node-e2e" }], isError: false } }) + "\\n");
-  }
-});
-`
-  );
+  const mockScript = writeMockStdioServer(home, { label: "pong-node-e2e", banner: false });
 
   const srcMcp = path.join(home, "mcp_config.json");
   fs.writeFileSync(
@@ -110,13 +93,25 @@ rl.on("line", (line) => {
     windowsHide: true,
   });
 
-  t.after(() => bridge.kill());
   const rl = readline.createInterface({ input: bridge.stdout });
-  const nextLine = () =>
+  const bridgeExited = new Promise((resolve) => bridge.once("exit", resolve));
+  t.after(async () => {
+    rl.close();
+    bridge.stdin.destroy();
+    bridge.kill();
+    await Promise.race([bridgeExited, new Promise((r) => setTimeout(r, 10_000))]);
+  });
+
+  // The next reply line, or an error when the bridge exits or WAIT_MS passes. The timer is
+  // ref'd and cleared on settle, so a silent bridge fails the test instead of hanging it.
+  const nextLine = (label) =>
     new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("no bridge reply in time")), WAIT_MS);
+      const timer = setTimeout(() => reject(new Error(`no bridge reply in ${WAIT_MS} ms: ${label}`)), WAIT_MS);
+      const onExit = () => reject(new Error(`the bridge exited while waiting for: ${label}`));
+      bridge.once("exit", onExit);
       rl.once("line", (line) => {
         clearTimeout(timer);
+        bridge.off("exit", onExit);
         resolve(JSON.parse(line));
       });
     });
@@ -124,18 +119,18 @@ rl.on("line", (line) => {
   bridge.stdin.write(
     `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1.0" } } })}\n`
   );
-  const initResp = await nextLine();
+  const initResp = await nextLine("initialize");
   assert.equal(initResp.result.serverInfo.name, "ignis-broker");
 
   bridge.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
-  const listResp = await nextLine();
+  const listResp = await nextLine("tools/list");
   assert.equal(listResp.result.tools.length, 4);
 
   bridge.stdin.write(
-    `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "ping", arguments: {} } } })}\n`
+    `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "echo", arguments: {} } } })}\n`
   );
-  const call1 = await nextLine();
-  assert.equal(call1.result.content[0].text, "pong-node-e2e");
+  const call1 = await nextLine("the first broker_call");
+  assert.match(call1.result.content[0].text, /^pong-node-e2e:/);
 
   const stopRes = spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
     encoding: "utf8",
@@ -147,15 +142,15 @@ rl.on("line", (line) => {
   await waitUntil("the killed daemon to exit", () => !isPidAlive(stJson.pid));
 
   bridge.stdin.write(
-    `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "ping", arguments: {} } } })}\n`
+    `${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "broker_call", arguments: { server: "demo", tool: "echo", arguments: {} } } })}\n`
   );
-  const call2 = await nextLine();
-  assert.equal(call2.result.content[0].text, "pong-node-e2e");
+  const call2 = await nextLine("the broker_call after the daemon stop");
+  assert.match(call2.result.content[0].text, /^pong-node-e2e:/);
 
   bridge.stdin.write("null\n");
   bridge.stdin.write("42\n");
   bridge.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 5, method: "ping" })}\n`);
-  const pingAfterNull = await nextLine();
+  const pingAfterNull = await nextLine("ping after null and number lines");
   assert.equal(pingAfterNull.id, 5);
 
   const listFlagsRes = spawnSync(
@@ -165,11 +160,11 @@ rl.on("line", (line) => {
   );
   assert.equal(listFlagsRes.status, 0, listFlagsRes.stderr);
   const listFlagsJson = JSON.parse(listFlagsRes.stdout);
-  assert.equal(listFlagsJson.tools[0].name, "ping");
+  assert.equal(listFlagsJson.tools[0].name, "echo");
 
   const callFlagsRes = spawnSync(
     process.execPath,
-    [BROKER_ENTRY, "call", "--full", "demo", "ping", "--max-bytes=1024"],
+    [BROKER_ENTRY, "call", "--full", "demo", "echo", "--max-bytes=1024"],
     { encoding: "utf8", env, timeout: CLI_TIMEOUT_MS, windowsHide: true }
   );
   assert.equal(callFlagsRes.status, 0, callFlagsRes.stderr);
@@ -183,10 +178,10 @@ rl.on("line", (line) => {
       Authorization: `Bearer ${daemonInfo.token}`,
     },
     body: "{malformed-json",
+    signal: AbortSignal.timeout(WAIT_MS),
   });
   assert.equal(badJsonResp.status, 400);
 
   bridge.stdin.end();
-  rl.close();
-  await new Promise((r) => bridge.once("exit", r));
+  await waitUntil("the bridge to exit after stdin closed", () => bridge.exitCode !== null || bridge.signalCode !== null);
 });
