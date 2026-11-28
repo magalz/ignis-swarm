@@ -163,7 +163,7 @@ How the broker behaves:
 - **`import-mcp` merges** into `~/.ignis-broker/servers.json` and keeps servers registered earlier (a server with the same name is replaced). Literal env/header secrets move to `~/.ignis-broker/.env` as `IGNIS_<SERVER>_<KEY>`; the import is rejected if a generated variable name collides with another server's variable or a value contains a line break.
 - **Working directory.** A stdio server without a `cwd` starts in the broker data directory (the daemon's working directory); a `perWorkspace` server without one starts in the workspace's repository root.
 - **Lifecycle.** `stop` waits for the daemon and fails, naming its pid, if it survives. An explicit `restart` stops busy servers at once. A config change lets in-flight calls finish first. The daemon exits after `idleTimeoutSecs` (default 900) without traffic.
-- **Errors mask known secrets.** In errors the broker returns, including fallback errors, expanded `${VAR}` values, header values, URL credentials and query values, and every stdio `env` value are replaced with `***` when they are 4 or more characters long. `import-mcp` and `discover-mcp` print redacted configs.
+- **Errors mask known secrets.** In errors the broker returns, including fallback errors, expanded `${VAR}` values, header values, URL credentials and query values, and every stdio `env` value are replaced with `***` when they are 4 or more characters long. `import-mcp --dry-run` prints redacted configs; `discover-mcp` prints only server names and flags.
 
 ### Automatic Lifecycle Hooks (`hooks.json`)
 | Hook | What it does automatically |
