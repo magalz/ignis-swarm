@@ -6,7 +6,7 @@ Thank you for your interest in contributing to **`ignis-swarm`**! This project i
 
 ## Development Prerequisites
 
-- **Node.js `>= 20`** (no `npm install` needed — zero external dependencies)
+- **Node.js `>= 22`** (no `npm install` needed — zero external dependencies)
 - **Git**
 - **Google Antigravity CLI (`agy`)** for `agy plugin validate --strict .`
 
@@ -26,17 +26,17 @@ Thank you for your interest in contributing to **`ignis-swarm`**! This project i
 
 ## Local Verification Checklist
 
-Before opening a pull request, run all checks locally and ensure they exit `0`:
+Before opening a pull request, run these checks locally; each must pass:
 
 ```bash
 # 1. Run the full automated test suite
-node --test tests/*.test.mjs
+node --test --test-timeout=180000 tests/*.test.mjs
 
 # 2. Run strict Antigravity plugin validation (must pass with 0 errors and 0 warnings)
 agy plugin validate --strict .
 
-# 3. Verify zero narrative inline comments in hooks/ and scripts/
-rg -n "(^|\s)//" hooks scripts
+# 3. Verify zero narrative inline comments in hooks/ and scripts/ (fails if any are found)
+node .github/scripts/check-comments.mjs hooks scripts
 ```
 
 If you added or changed an architectural decision:
@@ -55,7 +55,7 @@ If you added or changed an architectural decision:
    - Exact test & validation commands run (and observed results).
    - Linked issue number (if applicable).
 
-All PRs to `main` require passing CI checks (`ubuntu-latest` and `windows-latest`), resolved review threads, and maintainer approval.
+All PRs to `main` require passing CI checks (Node 22 and 24 on `ubuntu-latest` and `windows-latest`, plus Node 24 on `macos-latest`), resolved review threads, and maintainer approval.
 
 ---
 

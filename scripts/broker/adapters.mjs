@@ -1,8 +1,8 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { BROKER_VERSION } from "./config.mjs";
+import { BROKER_VERSION, safeUrl } from "./config.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const STDERR_RING_LIMIT = 200;
@@ -163,27 +163,125 @@ export class BrokerError extends Error {
   }
 }
 
-export function killProcessTree(pid) {
-  if (!pid) return;
+const KILL_GRACE_MS = 1500;
+const KILL_TIMEOUT_MS = 4000;
+
+function signalTree(pid, signal) {
   try {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-        timeout: 4000,
-      });
-    } else {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        process.kill(pid, "SIGTERM");
-      }
-    }
+    process.kill(-pid, signal);
+    return true;
   } catch {}
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export class McpStdioAdapter {
-  constructor({ command, args, env, cwd, startupTimeoutMs, requestTimeoutMs }) {
+export function killProcessTree(pid) {
+  if (!pid) return Promise.resolve();
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      try {
+        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+          timeout: KILL_TIMEOUT_MS,
+        });
+        killer.on("error", () => resolve());
+        killer.on("exit", () => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+  if (!signalTree(pid, "SIGTERM")) return Promise.resolve();
+  return new Promise((resolve) => {
+    const deadline = Date.now() + KILL_GRACE_MS;
+    const poll = setInterval(() => {
+      if (!signalTree(pid, 0)) {
+        clearInterval(poll);
+        resolve();
+      } else if (Date.now() >= deadline) {
+        clearInterval(poll);
+        signalTree(pid, "SIGKILL");
+        resolve();
+      }
+    }, 50);
+  });
+}
+
+const MIN_SECRET_LENGTH = 4;
+
+function secretCandidates(config) {
+  const found = [];
+  const add = (v) => {
+    if (typeof v === "string" && v.length >= MIN_SECRET_LENGTH) found.push(v);
+  };
+  for (const v of config?.secretValues || []) add(v);
+  for (const v of Object.values(config?.env || {})) add(v);
+  for (const v of Object.values(config?.headers || {})) {
+    add(v);
+    const m = /^\s*\S+\s+(\S.*)$/.exec(String(v));
+    if (m) add(m[1].trim());
+  }
+  if (typeof config?.url === "string") {
+    try {
+      const u = new URL(config.url);
+      add(u.username);
+      add(u.password);
+      for (const [, v] of u.searchParams) add(v);
+      for (const pair of u.search.replace(/^\?/, "").split("&")) {
+        const eq = pair.indexOf("=");
+        if (eq >= 0) add(pair.slice(eq + 1));
+      }
+    } catch {}
+  }
+  return [...new Set(found)].sort((a, b) => b.length - a.length);
+}
+
+export function redactSecrets(text, config) {
+  let out = String(text ?? "");
+  for (const secret of secretCandidates(config)) out = out.split(secret).join("***");
+  return out;
+}
+
+class McpAdapterBase {
+  _err(kind, message) {
+    return new BrokerError(kind, redactSecrets(message, this.redactConfig));
+  }
+
+  async listTools() {
+    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
+    const tools = Array.isArray(res?.tools) ? res.tools : [];
+    return tools
+      .filter((t) => t && typeof t.name === "string")
+      .map((t) => ({
+        name: t.name,
+        description: typeof t.description === "string" ? t.description : "",
+        inputSchema: t.inputSchema || { type: "object", properties: {} },
+        ...(t.annotations ? { annotations: t.annotations } : {}),
+      }));
+  }
+
+  async callTool(tool, args) {
+    const res = await this._request(
+      "tools/call",
+      { name: tool, arguments: args && typeof args === "object" ? args : {} },
+      this.requestTimeoutMs
+    );
+    return {
+      content: Array.isArray(res?.content) ? res.content : [],
+      isError: Boolean(res?.isError),
+    };
+  }
+}
+
+export class McpStdioAdapter extends McpAdapterBase {
+  constructor({ command, args, env, cwd, startupTimeoutMs, requestTimeoutMs, redact }) {
+    super();
+    this.redactConfig = redact || null;
     this.command = command;
     this.args = args || [];
     this.env = env || {};
@@ -216,13 +314,17 @@ export class McpStdioAdapter {
         ...resolved.options,
       });
     } catch (err) {
-      throw new BrokerError("startup", `failed spawning \`${this.command}\`: ${err.message}`);
+      throw this._err("startup", `failed spawning \`${this.command}\`: ${err.message}`);
     }
 
     this.alive = true;
 
     this.proc.on("error", (err) => {
-      this._failAll(new BrokerError("startup", `spawn error for \`${this.command}\`: ${err.message}`));
+      this._failAll(this._err("startup", `spawn error for \`${this.command}\`: ${err.message}`));
+    });
+
+    this.proc.stdin?.on("error", (err) => {
+      this._failAll(this._err("transport", `stdin error: ${err.message}`));
     });
 
     this.proc.on("exit", (code, signal) => {
@@ -230,7 +332,7 @@ export class McpStdioAdapter {
       const msg = tail
         ? `stdio child exited (code=${code}, signal=${signal}); stderr: ${tail}`
         : `stdio child exited (code=${code}, signal=${signal})`;
-      this._failAll(new BrokerError("transport", msg));
+      this._failAll(this._err("transport", msg));
     });
 
     if (this.proc.stderr) {
@@ -252,13 +354,24 @@ export class McpStdioAdapter {
         } catch {
           return;
         }
+        if (!msg || typeof msg !== "object") return;
+        if ("method" in msg) {
+          if (msg.id !== undefined && msg.id !== null) {
+            this._write(
+              msg.method === "ping"
+                ? { jsonrpc: "2.0", id: msg.id, result: {} }
+                : { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }
+            );
+          }
+          return;
+        }
         if (typeof msg.id === "number" && this.pending.has(msg.id)) {
           const entry = this.pending.get(msg.id);
           this.pending.delete(msg.id);
           clearTimeout(entry.timer);
           if (msg.error) {
             entry.reject(
-              new BrokerError("tool_execution", msg.error.message || "MCP JSON-RPC error")
+              this._err("tool_execution", msg.error.message || "MCP JSON-RPC error")
             );
           } else {
             entry.resolve(msg.result ?? null);
@@ -266,7 +379,7 @@ export class McpStdioAdapter {
         }
       });
       outRl.on("close", () => {
-        this._failAll(new BrokerError("transport", "stdio child stdout closed (EOF)"));
+        this._failAll(this._err("transport", "stdio child stdout closed (EOF)"));
       });
     }
 
@@ -283,7 +396,7 @@ export class McpStdioAdapter {
       this._notify("notifications/initialized", {});
     } catch (err) {
       await this.shutdown();
-      throw new BrokerError("startup", `MCP initialize failed: ${err.message}`);
+      throw this._err("startup", `MCP initialize failed: ${err.message}`);
     }
   }
 
@@ -296,61 +409,48 @@ export class McpStdioAdapter {
     this.pending.clear();
   }
 
-  _notify(method, params) {
-    if (!this.proc?.stdin || !this.alive) return;
+  _write(message, callback) {
+    const stdin = this.proc?.stdin;
+    if (!stdin || !this.alive || stdin.destroyed || !stdin.writable) {
+      callback?.(new Error("stdin is not writable"));
+      return;
+    }
     try {
-      this.proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
-    } catch {}
+      stdin.write(`${JSON.stringify(message)}\n`, callback);
+    } catch (err) {
+      callback?.(err);
+    }
+  }
+
+  _notify(method, params) {
+    this._write({ jsonrpc: "2.0", method, params });
   }
 
   _request(method, params, timeoutMs) {
     return new Promise((resolve, reject) => {
       if (!this.alive || !this.proc?.stdin) {
-        reject(new BrokerError("transport", "stdio child is not alive"));
+        reject(this._err("transport", "stdio child is not alive"));
         return;
       }
       const id = this.nextId++;
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
-          reject(new BrokerError("timeout", `timeout after ${timeoutMs}ms`));
+          if (method !== "initialize") {
+            this._notify("notifications/cancelled", { requestId: id, reason: "timeout" });
+          }
+          reject(this._err("timeout", `timeout after ${timeoutMs}ms`));
         }
       }, timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
-      const payload = `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
-      this.proc.stdin.write(payload, (err) => {
+      this._write({ jsonrpc: "2.0", id, method, params }, (err) => {
         if (err && this.pending.delete(id)) {
           clearTimeout(timer);
           this.alive = false;
-          reject(new BrokerError("transport", `stdin write error: ${err.message}`));
+          reject(this._err("transport", `stdin write error: ${err.message}`));
         }
       });
     });
-  }
-
-  async listTools() {
-    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
-    const tools = Array.isArray(res?.tools) ? res.tools : [];
-    return tools
-      .filter((t) => t && typeof t.name === "string")
-      .map((t) => ({
-        name: t.name,
-        description: typeof t.description === "string" ? t.description : "",
-        inputSchema: t.inputSchema || { type: "object", properties: {} },
-        ...(t.annotations ? { annotations: t.annotations } : {}),
-      }));
-  }
-
-  async callTool(tool, args) {
-    const res = await this._request(
-      "tools/call",
-      { name: tool, arguments: args && typeof args === "object" ? args : {} },
-      this.requestTimeoutMs
-    );
-    return {
-      content: Array.isArray(res?.content) ? res.content : [],
-      isError: Boolean(res?.isError),
-    };
   }
 
   async isAlive() {
@@ -363,12 +463,8 @@ export class McpStdioAdapter {
     try {
       this.proc?.stdin?.end();
     } catch {}
-    if (pid) killProcessTree(pid);
     this.proc = null;
-  }
-
-  lastStderr() {
-    return this.stderrRing.length > 0 ? this.stderrRing.join("\n") : null;
+    if (pid) await killProcessTree(pid);
   }
 }
 
@@ -414,8 +510,10 @@ function parseSseJsonRpc(body, expectedId) {
   );
 }
 
-export class McpHttpAdapter {
-  constructor({ url, headers, startupTimeoutMs, requestTimeoutMs }) {
+export class McpHttpAdapter extends McpAdapterBase {
+  constructor({ url, headers, startupTimeoutMs, requestTimeoutMs, redact }) {
+    super();
+    this.redactConfig = redact || { url, headers };
     this.url = url;
     this.headers = headers || {};
     this.startupTimeoutMs = startupTimeoutMs;
@@ -440,7 +538,7 @@ export class McpHttpAdapter {
       await adapter._notify("notifications/initialized", {}, adapter.startupTimeoutMs);
     } catch (err) {
       adapter.alive = false;
-      throw new BrokerError("startup", `HTTP MCP initialize failed: ${err.message}`);
+      throw adapter._err("startup", `HTTP MCP initialize failed: ${err.message}`);
     }
     return adapter;
   }
@@ -481,10 +579,13 @@ export class McpHttpAdapter {
       });
     } catch (err) {
       if (err?.name === "TimeoutError" || err?.name === "AbortError") {
-        throw new BrokerError("timeout", `timeout after ${timeoutMs}ms`);
+        if (method !== "initialize") {
+          void this._notify("notifications/cancelled", { requestId: id, reason: "timeout" }, 5000);
+        }
+        throw this._err("timeout", `timeout after ${timeoutMs}ms`);
       }
       this.alive = false;
-      throw new BrokerError("transport", `HTTP request failed: ${err.message}`);
+      throw this._err("transport", `HTTP request failed: ${err.message}`);
     }
 
     const sid = resp.headers.get("mcp-session-id");
@@ -493,11 +594,11 @@ export class McpHttpAdapter {
     if (resp.status === 404 || resp.status >= 500) {
       this.alive = false;
       const body = await resp.text().catch(() => "");
-      throw new BrokerError("transport", `HTTP ${resp.status} from ${this.url}: ${body.slice(0, 240)}`);
+      throw this._err("transport", `HTTP ${resp.status} from ${safeUrl(this.url)}: ${body.slice(0, 240)}`);
     }
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      throw new BrokerError("protocol", `HTTP ${resp.status} from ${this.url}: ${body.slice(0, 240)}`);
+      throw this._err("protocol", `HTTP ${resp.status} from ${safeUrl(this.url)}: ${body.slice(0, 240)}`);
     }
 
     const ct = (resp.headers.get("content-type") || "").toLowerCase();
@@ -505,34 +606,9 @@ export class McpHttpAdapter {
     const msg = ct.includes("text/event-stream") ? parseSseJsonRpc(text, id) : JSON.parse(text);
 
     if (msg.error) {
-      throw new BrokerError("tool_execution", msg.error.message || "MCP HTTP JSON-RPC error");
+      throw this._err("tool_execution", msg.error.message || "MCP HTTP JSON-RPC error");
     }
     return msg.result ?? null;
-  }
-
-  async listTools() {
-    const res = await this._request("tools/list", {}, this.requestTimeoutMs);
-    const tools = Array.isArray(res?.tools) ? res.tools : [];
-    return tools
-      .filter((t) => t && typeof t.name === "string")
-      .map((t) => ({
-        name: t.name,
-        description: typeof t.description === "string" ? t.description : "",
-        inputSchema: t.inputSchema || { type: "object", properties: {} },
-        ...(t.annotations ? { annotations: t.annotations } : {}),
-      }));
-  }
-
-  async callTool(tool, args) {
-    const res = await this._request(
-      "tools/call",
-      { name: tool, arguments: args && typeof args === "object" ? args : {} },
-      this.requestTimeoutMs
-    );
-    return {
-      content: Array.isArray(res?.content) ? res.content : [],
-      isError: Boolean(res?.isError),
-    };
   }
 
   async isAlive() {
@@ -542,44 +618,34 @@ export class McpHttpAdapter {
   async shutdown() {
     this.alive = false;
   }
-
-  lastStderr() {
-    return null;
-  }
 }
+
+const MEMTRACE_COMMANDS = [
+  { sub: "find", tools: ["find_symbol", "find_code", "find"], keys: ["query", "symbol", "name", "pattern"] },
+  { sub: "callers", tools: ["callers", "get_callers"], keys: ["symbol", "name", "target", "query"] },
+  { sub: "callees", tools: ["callees", "get_callees"], keys: ["symbol", "name", "target", "query"] },
+  { sub: "impact", tools: ["get_impact", "impact"], keys: ["target", "symbol", "name", "query"] },
+];
 
 function buildMemtraceArgs(tool, args) {
   const safeArgs = args && typeof args === "object" ? args : {};
-  let cliArgs = null;
+  const entry = MEMTRACE_COMMANDS.find((c) => c.tools.includes(tool));
+  if (!entry) return null;
 
-  if (tool === "find_symbol" || tool === "find_code" || tool === "find") {
-    const query = safeArgs.query ?? safeArgs.symbol ?? safeArgs.name ?? safeArgs.pattern;
-    if (typeof query === "string" && query.trim()) {
-      cliArgs = ["find", query];
-    }
-  } else if (tool === "callers" || tool === "get_callers") {
-    const symbol = safeArgs.symbol ?? safeArgs.name ?? safeArgs.target ?? safeArgs.query;
-    if (typeof symbol === "string" && symbol.trim()) {
-      cliArgs = ["callers", symbol];
-    }
-  } else if (tool === "callees" || tool === "get_callees") {
-    const symbol = safeArgs.symbol ?? safeArgs.name ?? safeArgs.target ?? safeArgs.query;
-    if (typeof symbol === "string" && symbol.trim()) {
-      cliArgs = ["callees", symbol];
-    }
-  } else if (tool === "get_impact" || tool === "impact") {
-    const target = safeArgs.target ?? safeArgs.symbol ?? safeArgs.name ?? safeArgs.query;
-    if (typeof target === "string" && target.trim()) {
-      cliArgs = ["impact", target];
+  let value;
+  for (const key of entry.keys) {
+    if (safeArgs[key] != null) {
+      value = safeArgs[key];
+      break;
     }
   }
+  if (typeof value !== "string" || !value.trim()) return null;
+  if (value.trimStart().startsWith("-") || /[%!]|\\$/.test(value)) return null;
 
-  if (!cliArgs) return null;
-
+  const cliArgs = [entry.sub, value];
   if (typeof safeArgs.limit === "number" && Number.isFinite(safeArgs.limit)) {
     cliArgs.push("--limit", String(safeArgs.limit));
   }
-
   return cliArgs;
 }
 
@@ -622,7 +688,7 @@ export async function tryCliFallback(kind, tool, args, cwd, timeoutMs = 30_000) 
     const timer =
       typeof timeoutMs === "number" && timeoutMs > 0
         ? setTimeout(() => {
-            killProcessTree(proc.pid);
+            void killProcessTree(proc.pid);
             finish(reject, new BrokerError("timeout", `CLI fallback timeout after ${timeoutMs}ms`));
           }, timeoutMs)
         : null;
@@ -651,7 +717,7 @@ export async function tryCliFallback(kind, tool, args, cwd, timeoutMs = 30_000) 
           content: [{ type: "text", text: stdout }],
           isError: false,
         });
-      } else if (code === 1) {
+      } else if (code === 1 && !stderr.trim()) {
         finish(resolve, {
           content: [{ type: "text", text: stdout || "No results found." }],
           isError: false,

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { resolvePlatformCommand } from "./broker/adapters.mjs";
 import { brokerDataDir, brokerHome } from "./broker/config.mjs";
-import {
-  defaultOnboardingState,
-  detectCli,
-  loadOnboardingState,
-  recordBlindReviewState,
-} from "./broker/onboarding.mjs";
+import { defaultOnboardingState, detectCli, loadOnboardingState } from "./broker/onboarding.mjs";
+import { recordReviewState, reviewStatePath } from "./broker/review-state.mjs";
+import { isMainModule } from "./lib/common.mjs";
+import { collectChanges, gitEnv, gitToplevel, headSha } from "./lib/git-changes.mjs";
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_SMOKE_TIMEOUT_MS = 45_000;
+const DEFAULT_MAX_DIFF_BYTES = 20 * 1024 * 1024;
+const MERGE_BASE_TIMEOUT_MS = 10_000;
+const DIFF_TIMEOUT_MS = 30_000;
+const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SMOKE_PROMPT = "Reply with the exact word: OK";
 const BLIND_REVIEW_PROMPT = [
   "You are an independent blind code reviewer.",
@@ -20,7 +23,13 @@ const BLIND_REVIEW_PROMPT = [
   "Identify correctness bugs, edge cases, security vulnerabilities, race conditions, and contract violations.",
   "Do not assume external context or invent requirements not visible in the diff.",
   "Report concrete findings with file paths and line references, or state clearly if no issues are found.",
+  "End your answer with exactly one final line, either Status: PASS or Status: ISSUES.",
+  "Use Status: PASS when you found no HIGH or MEDIUM issues, otherwise use Status: ISSUES.",
 ].join(" ");
+const VERDICT_LINE =
+  /^[ \t]*(?:>[ \t]*|[-*+][ \t]+)*[*_`]*[ \t]*Status[ \t]*[*_`]*[ \t]*:[ \t*_`]*(PASS|ISSUES)(?![A-Za-z0-9])(.*)$/i;
+const VERDICT_TEMPLATE_TAIL = /^[\s*_`]*[|/]|\b(?:PASS|ISSUES)\b/;
+const NO_VERDICT_DETAIL_CHARS = 200;
 
 const VALID_BACKENDS = new Set(["auto", "native", "claude", "codex"]);
 
@@ -75,7 +84,7 @@ export function parseArgs(argv) {
   return opts;
 }
 
-export function buildClaudeArgs(prompt, model, effort) {
+export function buildClaudeArgs(prompt, model, effort, mcpConfigPath) {
   return [
     "-p",
     prompt,
@@ -85,27 +94,33 @@ export function buildClaudeArgs(prompt, model, effort) {
     effort || "high",
     "--permission-mode",
     "dontAsk",
-    "--allowedTools",
-    "Read",
-    "Grep",
-    "Glob",
+    "--tools",
+    "",
+    "--setting-sources",
+    "",
+    "--disable-slash-commands",
     "--strict-mcp-config",
     "--mcp-config",
-    '{"mcpServers":{}}',
+    mcpConfigPath,
     "--no-session-persistence",
   ];
 }
 
 export function buildCodexArgs(model) {
   return [
-    ...(model ? ["-m", model] : []),
     "exec",
+    ...(model ? ["-m", model] : []),
     "--sandbox",
     "read-only",
     "-c",
-    'approval_policy="never"',
+    "approval_policy=never",
     "-",
   ];
+}
+
+function maxDiffBytes() {
+  const configured = Number(process.env.IGNIS_REVIEW_MAX_DIFF_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_DIFF_BYTES;
 }
 
 function resolveCommand(backend) {
@@ -144,7 +159,12 @@ function invokeCli(cmd, args, { cwd, input, timeoutMs }) {
     resolvedCmd = detected.path || cmd;
   }
 
-  const resolved = resolvePlatformCommand(resolvedCmd, args, process.env);
+  let resolved;
+  try {
+    resolved = resolvePlatformCommand(resolvedCmd, args, process.env);
+  } catch (err) {
+    return { error: err, status: null, stdout: "", stderr: "" };
+  }
   return spawnSync(resolved.command, resolved.args, {
     cwd,
     input,
@@ -155,6 +175,55 @@ function invokeCli(cmd, args, { cwd, input, timeoutMs }) {
   });
 }
 
+function invokeBackend(backend, prompt, model, effort, invokeOptions) {
+  const cmd = resolveCommand(backend);
+  if (backend === "codex") {
+    return invokeCli(cmd, buildCodexArgs(model), invokeOptions);
+  }
+  let configDir = null;
+  try {
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), "ignis-mcp-"));
+    const configPath = path.join(configDir, "mcp-config.json");
+    fs.writeFileSync(configPath, EMPTY_MCP_CONFIG, "utf8");
+    return invokeCli(cmd, buildClaudeArgs(prompt, model, effort, configPath), invokeOptions);
+  } catch (err) {
+    return { error: err, status: null, stdout: "", stderr: "" };
+  } finally {
+    if (configDir) {
+      try {
+        fs.rmSync(configDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+}
+
+function isDirectory(dir) {
+  try {
+    return fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function openRepo(cwd, env) {
+  if (!isDirectory(cwd)) {
+    throw new Error(`--cwd is not a directory: ${cwd}`);
+  }
+  const top = gitToplevel(cwd, { env });
+  if (top.notGit) {
+    throw new Error(`${cwd} is not inside a git repository`);
+  }
+  if (top.error) {
+    const code = top.error.code === "ENOENT" ? "git_failed" : top.error.code;
+    return { error: { code, message: top.error.message } };
+  }
+  try {
+    return { root: top.root, headSha: headSha(top.root, { env }) };
+  } catch (err) {
+    return { error: { code: "git_failed", message: err.message } };
+  }
+}
+
 function extractGitDiff(base, cwd) {
   const trimmedBase = typeof base === "string" ? base.trim() : "";
   if (!trimmedBase) {
@@ -163,48 +232,56 @@ function extractGitDiff(base, cwd) {
   if (trimmedBase.startsWith("-")) {
     throw new Error("--base must not start with '-'");
   }
-  const mergeBaseRes = spawnSync("git", ["merge-base", trimmedBase, "HEAD"], {
-    cwd,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (mergeBaseRes.error) {
-    throw new Error(`git merge-base failed: ${mergeBaseRes.error.message}`);
+  const env = gitEnv();
+  const repo = openRepo(cwd, env);
+  if (repo.error) {
+    return { failure: `${repo.error.code}: ${repo.error.message}`, snapshot: { error: repo.error.message } };
   }
-  const mergeBase = (mergeBaseRes.stdout || "").trim();
-  if (mergeBaseRes.status !== 0 || !mergeBase) {
-    const detail = (mergeBaseRes.stderr || "").trim() || `exit ${mergeBaseRes.status}`;
-    throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
+  const snapshot = { root: repo.root, headSha: repo.headSha };
+
+  let diffBase = "HEAD";
+  if (snapshot.headSha !== "unborn") {
+    const mergeBaseRes = spawnSync("git", ["merge-base", trimmedBase, snapshot.headSha], {
+      cwd: snapshot.root,
+      env,
+      encoding: "utf8",
+      timeout: MERGE_BASE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    if (mergeBaseRes.error) {
+      const code = mergeBaseRes.error.code === "ETIMEDOUT" ? "timeout" : "git_failed";
+      return { failure: `${code}: git merge-base: ${mergeBaseRes.error.message}`, snapshot };
+    }
+    diffBase = (mergeBaseRes.stdout || "").trim();
+    if (mergeBaseRes.status !== 0 || !diffBase) {
+      const detail = (mergeBaseRes.stderr || "").trim() || `exit ${mergeBaseRes.status}`;
+      throw new Error(`git merge-base failed for "${trimmedBase}": ${detail}`);
+    }
   }
 
-  const res = spawnSync("git", ["diff", mergeBase, "--"], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    windowsHide: true,
+  const limit = maxDiffBytes();
+  const changes = collectChanges(snapshot.root, {
+    base: diffBase,
+    maxBytes: limit,
+    env,
+    timeoutMs: DIFF_TIMEOUT_MS,
   });
-  if (res.error) {
-    throw new Error(`git diff failed: ${res.error.message}`);
+  if (changes.error) {
+    const detail =
+      changes.error.code === "too_large" ? `diff is larger than ${limit} bytes` : changes.error.message;
+    return { failure: `${changes.error.code}: ${detail}`, snapshot };
   }
-  if (res.status !== 0) {
-    throw new Error(`git diff failed (exit ${res.status}): ${(res.stderr || "").trim()}`);
-  }
-  return res.stdout || "";
+  return { diff: changes.diff, bytes: changes.bytes, snapshot };
 }
 
 function runSmokeTest(opts) {
   if (opts.backend !== "claude" && opts.backend !== "codex") {
     throw new Error("--smoke-test requires --backend claude|codex");
   }
-  const cmd = resolveCommand(opts.backend);
   const effectiveModel = opts.backend === "claude" ? opts.model || "opus" : opts.model || null;
-  const args =
-    opts.backend === "claude"
-      ? buildClaudeArgs(SMOKE_PROMPT, effectiveModel, opts.effort || "high")
-      : buildCodexArgs(effectiveModel);
   const input = opts.backend === "codex" ? SMOKE_PROMPT : "";
 
-  const res = invokeCli(cmd, args, {
+  const res = invokeBackend(opts.backend, SMOKE_PROMPT, effectiveModel, opts.effort || "high", {
     cwd: opts.cwd,
     input,
     timeoutMs: opts.timeoutMs,
@@ -233,35 +310,51 @@ function runSmokeTest(opts) {
   };
 }
 
-function resolveWorkspaceRoot(cwd) {
-  const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  const top = (res.stdout || "").trim();
-  if (!res.error && res.status === 0 && top) {
-    return top;
+export function parseVerdict(output) {
+  let verdict = null;
+  for (const line of output.split(/\r?\n/)) {
+    const match = VERDICT_LINE.exec(line);
+    if (match && !VERDICT_TEMPLATE_TAIL.test(match[2])) verdict = match[1].toUpperCase();
   }
-  return cwd;
+  return verdict;
 }
 
-function persistState(cwd, fallbackToNative, reason) {
+export function noVerdictReason(output) {
+  const snippet = output.replace(/\s+/g, " ").trim().slice(0, NO_VERDICT_DETAIL_CHARS);
+  const detail = snippet ? `no Status line): ${snippet}` : "empty output)";
+  return `headless reviewer returned no verdict (${detail}`;
+}
+
+function reviewStatus(result) {
+  if (result.fallbackToNative === true) return "fallback";
+  return result.diffBytes === 0 ? "empty" : "reviewed";
+}
+
+function persistState(snapshot, result) {
+  if (snapshot.error) return snapshot.error;
   try {
-    recordBlindReviewState(brokerDataDir(brokerHome()), resolveWorkspaceRoot(cwd), {
-      fallbackToNative,
-      reason,
+    const status = reviewStatus(result);
+    recordReviewState(brokerDataDir(brokerHome()), snapshot.root, {
+      status,
+      reason: status === "fallback" ? result.reason || null : null,
+      headSha: snapshot.headSha,
     });
-  } catch {
-    return;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
   }
 }
 
-function withState(cwd, result, persist = true) {
-  if (persist) {
-    persistState(cwd, result.fallbackToNative === true, result.fallbackToNative ? result.reason || null : null);
-  }
-  return result;
+function stateHintPath(cwd) {
+  const dataDir = brokerDataDir(brokerHome());
+  const top = gitToplevel(cwd, { env: gitEnv() });
+  return top.root ? reviewStatePath(dataDir, top.root) : path.dirname(reviewStatePath(dataDir, cwd));
+}
+
+function withState(snapshot, result, persist = true) {
+  if (!persist) return result;
+  const stateError = persistState(snapshot, result);
+  return stateError === null ? result : { ...result, stateError };
 }
 
 export function runBlindReview(opts) {
@@ -324,12 +417,25 @@ export function runBlindReview(opts) {
     throw new Error("--base <git-ref> is required");
   }
 
-  const diff = extractGitDiff(opts.base, opts.cwd);
-  const diffBytes = Buffer.byteLength(diff, "utf8");
+  const extracted = extractGitDiff(opts.base, opts.cwd);
+  if (extracted.failure) {
+    return withState(
+      extracted.snapshot,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: `diff extraction failed: ${extracted.failure}`,
+        base: opts.base,
+      },
+      shouldPersist
+    );
+  }
+  const diff = extracted.diff;
+  const diffBytes = extracted.bytes;
 
   if (diffBytes === 0) {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: false,
         fallbackToNative: false,
@@ -346,7 +452,7 @@ export function runBlindReview(opts) {
 
   if (targetBackend !== "claude" && targetBackend !== "codex") {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -358,16 +464,11 @@ export function runBlindReview(opts) {
     );
   }
 
-  const cmd = resolveCommand(targetBackend);
   const resolvedModel = targetBackend === "claude" ? effectiveModel || "opus" : effectiveModel || null;
-  const args =
-    targetBackend === "claude"
-      ? buildClaudeArgs(BLIND_REVIEW_PROMPT, resolvedModel, effectiveEffort)
-      : buildCodexArgs(resolvedModel);
   const stdinPayload =
     targetBackend === "claude" ? diff : `${BLIND_REVIEW_PROMPT}\n\n${diff}`;
 
-  const res = invokeCli(cmd, args, {
+  const res = invokeBackend(targetBackend, BLIND_REVIEW_PROMPT, resolvedModel, effectiveEffort, {
     cwd: opts.cwd,
     input: stdinPayload,
     timeoutMs: opts.timeoutMs,
@@ -375,7 +476,7 @@ export function runBlindReview(opts) {
 
   if (res.error) {
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -390,7 +491,7 @@ export function runBlindReview(opts) {
   if (res.status !== 0) {
     const detail = ((res.stderr || "").trim() || (res.stdout || "").trim()).slice(0, 400);
     return withState(
-      opts.cwd,
+      extracted.snapshot,
       {
         useNative: true,
         fallbackToNative: true,
@@ -402,8 +503,24 @@ export function runBlindReview(opts) {
     );
   }
 
+  const output = res.stdout || "";
+  const verdict = parseVerdict(output);
+  if (verdict === null) {
+    return withState(
+      extracted.snapshot,
+      {
+        useNative: true,
+        fallbackToNative: true,
+        reason: noVerdictReason(output),
+        base: opts.base,
+        diffBytes,
+      },
+      shouldPersist
+    );
+  }
+
   return withState(
-    opts.cwd,
+    extracted.snapshot,
     {
       useNative: false,
       fallbackToNative: false,
@@ -411,7 +528,8 @@ export function runBlindReview(opts) {
       model: resolvedModel,
       base: opts.base,
       diffBytes,
-      output: res.stdout || "",
+      verdict,
+      output,
       stderr: res.stderr || "",
     },
     shouldPersist
@@ -426,10 +544,14 @@ function main() {
   } else {
     process.stdout.write(result.output || "");
   }
+  if (result.stateError) {
+    process.stderr.write(
+      `review state could not be recorded at ${stateHintPath(opts.cwd)}: ${result.stateError}\n`
+    );
+  }
 }
 
-const isEntrypoint =
-  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isEntrypoint = isMainModule(import.meta.url);
 
 if (isEntrypoint) {
   try {

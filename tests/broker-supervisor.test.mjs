@@ -2,55 +2,76 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { McpHttpAdapter, tryCliFallback } from "../scripts/broker/adapters.mjs";
 import { isDaemonVersionAcceptable } from "../scripts/broker/lifecycle.mjs";
 import { Supervisor } from "../scripts/broker/supervisor.mjs";
+import { trustLocalConfig } from "../scripts/broker/trust.mjs";
+import { mkTemp, writeMockStdioServer } from "./helpers.mjs";
 
-function mkTemp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+const WAIT_MS = 30_000;
+
+// Await `promise` for at most `ms`. The timer is ref'd and cleared on settle, so a stuck
+// promise fails the test with a clear error instead of hanging the run.
+function within(promise, label, ms = WAIT_MS) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms waiting for ${label}`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
-function writeMockStdioServer(dir, name, label, crashFirst) {
-  const script = path.join(dir, `${name}.mjs`);
-  const marker = path.join(dir, `${name}.crashed`);
-  fs.writeFileSync(
-    script,
-    `
-import fs from "node:fs";
-import readline from "node:readline";
-process.stdout.write("non-json startup banner\\n");
-const marker = ${JSON.stringify(marker)};
-const crashFirst = ${crashFirst ? "true" : "false"};
-const label = ${JSON.stringify(label)};
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === "initialize") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } }) + "\\n");
-  } else if (msg.method === "tools/list") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", description: "Ping tool. Extra detail.", inputSchema: { type: "object" } }] } }) + "\\n");
-  } else if (msg.method === "tools/call") {
-    if (crashFirst && !fs.existsSync(marker)) {
-      fs.writeFileSync(marker, "1");
-      process.exit(1);
-    }
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: label + ":" + process.cwd() }], isError: false } }) + "\\n");
-  }
-});
-`
+// A temp dir removed by t.after, so it goes away when an assertion fails too.
+// A stdio child holds its cwd on Windows, so tests shut the supervisor down in finally first.
+function mk(t, prefix) {
+  const dir = mkTemp(prefix);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 }));
+  return dir;
+}
+
+// Set (or delete, with undefined) an environment variable until the test ends.
+function setEnv(t, name, value) {
+  const prev = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  t.after(() => {
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
+  });
+}
+
+// Listen on a free loopback port; t.after drops open connections and closes the server.
+async function listen(t, handler) {
+  const server = http.createServer(handler);
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      })
   );
-  return script;
+  await within(
+    new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    }),
+    "the test http server to listen"
+  );
+  return { server, port: server.address().port };
 }
 
-test("supervisor retries after crash and fails over local to global with metadata", async () => {
-  const home = mkTemp("ignis-sup-home-");
-  const repo = mkTemp("ignis-sup-repo-");
+// Stop a supervisor; runs in finally, before the temp dirs it works in are removed.
+function stop(sup) {
+  return within(sup.shutdown(), "the supervisor to shut down");
+}
+
+test("supervisor retries after crash and fails over local to global with metadata", async (t) => {
+  const home = mk(t, "ignis-sup-home-");
+  const repo = mk(t, "ignis-sup-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
   fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
 
-  const flaky = writeMockStdioServer(home, "flaky", "global-ok", true);
+  const flaky = writeMockStdioServer(home, { label: "global-ok", crashOnFirstCallMarker: path.join(home, "flaky.crashed") });
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -72,33 +93,34 @@ test("supervisor retries after crash and fails over local to global with metadat
     })
   );
 
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
   const sup = new Supervisor(home, home, 0);
-  const res = await sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo });
+  try {
+    const res = await within(sup.call({ server: "demo", tool: "echo", arguments: {}, cwd: repo }), "the failover call");
 
-  assert.equal(res.meta.source, "global");
-  assert.equal(res.meta.fallbackFrom, "local");
-  assert.ok(res.meta.localError);
-  assert.equal(res.meta.retried, true);
-  assert.ok(res.content[0].text.startsWith("global-ok:"));
+    assert.equal(res.meta.source, "global");
+    assert.equal(res.meta.fallbackFrom, "local");
+    assert.ok(res.meta.localError);
+    assert.equal(res.meta.retried, true);
+    assert.ok(res.content[0].text.startsWith("global-ok:"));
 
-  const st = await sup.status({ cwd: repo });
-  assert.equal(st.recentFallbacks.length, 1);
-  assert.equal(st.recentFallbacks[0].from, "local");
-  assert.equal(st.recentFallbacks[0].to, "global");
-
-  await sup.shutdown();
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(repo, { recursive: true, force: true });
+    const st = await within(sup.status({ cwd: repo }), "supervisor status");
+    assert.equal(st.recentFallbacks.length, 1);
+    assert.equal(st.recentFallbacks[0].from, "local");
+    assert.equal(st.recentFallbacks[0].to, "global");
+  } finally {
+    await stop(sup);
+  }
 });
 
-test("supervisor isolates per-workspace pool and evicts LRU", async () => {
-  const home = mkTemp("ignis-pool-home-");
-  const repoA = mkTemp("ignis-pool-a-");
-  const repoB = mkTemp("ignis-pool-b-");
+test("supervisor isolates per-workspace pool and evicts LRU", async (t) => {
+  const home = mk(t, "ignis-pool-home-");
+  const repoA = mk(t, "ignis-pool-a-");
+  const repoB = mk(t, "ignis-pool-b-");
   fs.mkdirSync(path.join(repoA, ".git"), { recursive: true });
   fs.mkdirSync(path.join(repoB, ".git"), { recursive: true });
 
-  const script = writeMockStdioServer(home, "ws", "ws", false);
+  const script = writeMockStdioServer(home, { label: "ws" });
   fs.writeFileSync(
     path.join(home, "servers.json"),
     JSON.stringify({
@@ -111,28 +133,27 @@ test("supervisor isolates per-workspace pool and evicts LRU", async () => {
   );
 
   const sup = new Supervisor(home, home, 0);
-  const outA = await sup.call({ server: "scoped", tool: "ping", arguments: {}, cwd: repoA });
-  assert.ok(outA.content[0].text.includes(path.basename(repoA)));
+  try {
+    const outA = await within(sup.call({ server: "scoped", tool: "echo", arguments: {}, cwd: repoA }), "the call in workspace A");
+    assert.ok(outA.content[0].text.includes(path.basename(repoA)));
 
-  const outB = await sup.call({ server: "scoped", tool: "ping", arguments: {}, cwd: repoB });
-  assert.ok(outB.content[0].text.includes(path.basename(repoB)));
+    const outB = await within(sup.call({ server: "scoped", tool: "echo", arguments: {}, cwd: repoB }), "the call in workspace B");
+    assert.ok(outB.content[0].text.includes(path.basename(repoB)));
 
-  const st = await sup.status({});
-  assert.equal(st.pool.length, 1);
+    const st = await within(sup.status({}), "supervisor status");
+    assert.equal(st.pool.length, 1);
 
-  const listed = await sup.list({ server: "scoped", filter: "pin", cwd: repoB });
-  assert.equal(listed.tools.length, 1);
-  assert.equal(listed.tools[0].summary, "Ping tool");
-
-  await sup.shutdown();
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(repoA, { recursive: true, force: true });
-  fs.rmSync(repoB, { recursive: true, force: true });
+    const listed = await within(sup.list({ server: "scoped", filter: "cho", cwd: repoB }), "the tool list");
+    assert.equal(listed.tools.length, 1);
+    assert.equal(listed.tools[0].summary, "Echo the label and cwd");
+  } finally {
+    await stop(sup);
+  }
 });
 
-test("http adapter parses JSON and SSE responses and signals transport error on 404", async () => {
+test("http adapter parses JSON and SSE responses and signals transport error on 404", async (t) => {
   let expireNext = false;
-  const server = http.createServer((req, res) => {
+  const { port } = await listen(t, (req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
@@ -166,28 +187,27 @@ test("http adapter parses JSON and SSE responses and signals transport error on 
     });
   });
 
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const { port } = server.address();
 
-  const adapter = await McpHttpAdapter.connect({
-    url: `http://127.0.0.1:${port}/mcp`,
-    headers: {},
-    startupTimeoutMs: 5000,
-    requestTimeoutMs: 5000,
-  });
+  const adapter = await within(
+    McpHttpAdapter.connect({
+      url: `http://127.0.0.1:${port}/mcp`,
+      headers: {},
+      startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
+    }),
+    "the http adapter to connect"
+  );
 
-  const tools = await adapter.listTools();
+  const tools = await within(adapter.listTools(), "tools/list");
   assert.equal(tools.length, 1);
   assert.equal(tools[0].name, "echo");
 
-  const out = await adapter.callTool("echo", {});
+  const out = await within(adapter.callTool("echo", {}), "tools/call");
   assert.equal(out.content[0].text, "ok");
 
   expireNext = true;
-  await assert.rejects(() => adapter.callTool("echo", {}), (err) => err.kind === "transport");
-  assert.equal(await adapter.isAlive(), false);
-
-  await new Promise((r) => server.close(r));
+  await assert.rejects(() => within(adapter.callTool("echo", {}), "the expired-session call"), (err) => err.kind === "transport");
+  assert.equal(await within(adapter.isAlive(), "isAlive"), false);
 });
 
 function writeFakeMemtraceShim(dir) {
@@ -210,14 +230,13 @@ process.stdout.write("memtrace:" + args.join("|"));
   return shPath;
 }
 
-test("supervisor degrades to opt-in memtrace CLI fallback when MCP fails", async () => {
-  const home = mkTemp("ignis-cli-fb-home-");
-  const repo = mkTemp("ignis-cli-fb-repo-");
+test("supervisor degrades to opt-in memtrace CLI fallback when MCP fails", async (t) => {
+  const home = mk(t, "ignis-cli-fb-home-");
+  const repo = mk(t, "ignis-cli-fb-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
 
   const shim = writeFakeMemtraceShim(home);
-  const prevCmd = process.env.IGNIS_MEMTRACE_CMD;
-  process.env.IGNIS_MEMTRACE_CMD = shim;
+  setEnv(t, "IGNIS_MEMTRACE_CMD", shim);
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -236,12 +255,15 @@ test("supervisor degrades to opt-in memtrace CLI fallback when MCP fails", async
 
   const sup = new Supervisor(home, home, 0);
   try {
-    const res = await sup.call({
-      server: "memtrace",
-      tool: "find_symbol",
-      arguments: { query: "Supervisor", limit: 5 },
-      cwd: repo,
-    });
+    const res = await within(
+      sup.call({
+        server: "memtrace",
+        tool: "find_symbol",
+        arguments: { query: "Supervisor", limit: 5 },
+        cwd: repo,
+      }),
+      "the CLI-fallback call"
+    );
 
     assert.equal(res.isError, false);
     assert.equal(res.meta.source, "cli_fallback");
@@ -250,26 +272,21 @@ test("supervisor degrades to opt-in memtrace CLI fallback when MCP fails", async
     assert.equal(res.meta.retried, true);
     assert.equal(res.content[0].text, "memtrace:find|Supervisor|--limit|5");
 
-    const st = await sup.status({ cwd: repo });
+    const st = await within(sup.status({ cwd: repo }), "supervisor status");
     assert.equal(st.recentFallbacks.length, 1);
     assert.equal(st.recentFallbacks[0].to, "cli_fallback");
   } finally {
-    if (prevCmd === undefined) delete process.env.IGNIS_MEMTRACE_CMD;
-    else process.env.IGNIS_MEMTRACE_CMD = prevCmd;
-    await sup.shutdown();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(repo, { recursive: true, force: true });
+    await stop(sup);
   }
 });
 
-test("supervisor does not invoke CLI fallback when cliFallback is not configured", async () => {
-  const home = mkTemp("ignis-no-fb-home-");
-  const repo = mkTemp("ignis-no-fb-repo-");
+test("supervisor does not invoke CLI fallback when cliFallback is not configured", async (t) => {
+  const home = mk(t, "ignis-no-fb-home-");
+  const repo = mk(t, "ignis-no-fb-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
 
   const shim = writeFakeMemtraceShim(home);
-  const prevCmd = process.env.IGNIS_MEMTRACE_CMD;
-  process.env.IGNIS_MEMTRACE_CMD = shim;
+  setEnv(t, "IGNIS_MEMTRACE_CMD", shim);
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -289,34 +306,32 @@ test("supervisor does not invoke CLI fallback when cliFallback is not configured
   try {
     await assert.rejects(
       () =>
-        sup.call({
-          server: "memtrace",
-          tool: "find_symbol",
-          arguments: { query: "Supervisor" },
-          cwd: repo,
-        }),
+        within(
+          sup.call({
+            server: "memtrace",
+            tool: "find_symbol",
+            arguments: { query: "Supervisor" },
+            cwd: repo,
+          }),
+          "the failing call"
+        ),
       (err) => err.kind === "startup" || err.kind === "transport"
     );
   } finally {
-    if (prevCmd === undefined) delete process.env.IGNIS_MEMTRACE_CMD;
-    else process.env.IGNIS_MEMTRACE_CMD = prevCmd;
-    await sup.shutdown();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(repo, { recursive: true, force: true });
+    await stop(sup);
   }
 });
 
-test("unsupported tool returns null from tryCliFallback and propagates MCP error", async () => {
-  const direct = await tryCliFallback("memtrace", "get_evolution", { symbol: "Foo" }, undefined, 5000);
+test("unsupported tool returns null from tryCliFallback and propagates MCP error", async (t) => {
+  const direct = await within(tryCliFallback("memtrace", "get_evolution", { symbol: "Foo" }, undefined, 5000), "tryCliFallback");
   assert.equal(direct, null);
 
-  const home = mkTemp("ignis-unsup-fb-home-");
-  const repo = mkTemp("ignis-unsup-fb-repo-");
+  const home = mk(t, "ignis-unsup-fb-home-");
+  const repo = mk(t, "ignis-unsup-fb-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
 
   const shim = writeFakeMemtraceShim(home);
-  const prevCmd = process.env.IGNIS_MEMTRACE_CMD;
-  process.env.IGNIS_MEMTRACE_CMD = shim;
+  setEnv(t, "IGNIS_MEMTRACE_CMD", shim);
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -337,30 +352,29 @@ test("unsupported tool returns null from tryCliFallback and propagates MCP error
   try {
     await assert.rejects(
       () =>
-        sup.call({
-          server: "memtrace",
-          tool: "get_evolution",
-          arguments: { symbol: "Foo" },
-          cwd: repo,
-        }),
+        within(
+          sup.call({
+            server: "memtrace",
+            tool: "get_evolution",
+            arguments: { symbol: "Foo" },
+            cwd: repo,
+          }),
+          "the failing call"
+        ),
       (err) => err.kind === "startup" || err.kind === "transport"
     );
   } finally {
-    if (prevCmd === undefined) delete process.env.IGNIS_MEMTRACE_CMD;
-    else process.env.IGNIS_MEMTRACE_CMD = prevCmd;
-    await sup.shutdown();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(repo, { recursive: true, force: true });
+    await stop(sup);
   }
 });
 
-test("stdio adapter and CLI fallback resolve bare Windows .cmd shims on PATH", { skip: process.platform !== "win32" }, async () => {
-  const home = mkTemp("ignis-win-cmd-home-");
-  const binDir = mkTemp("ignis-win-cmd-bin-");
-  const repo = mkTemp("ignis-win-cmd-repo-");
+test("stdio adapter and CLI fallback resolve bare Windows .cmd shims on PATH", { skip: process.platform !== "win32" }, async (t) => {
+  const home = mk(t, "ignis-win-cmd-home-");
+  const binDir = mk(t, "ignis-win-cmd-bin-");
+  const repo = mk(t, "ignis-win-cmd-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
 
-  const mcpScript = writeMockStdioServer(binDir, "bare-srv", "cmd-shim-ok", false);
+  const mcpScript = writeMockStdioServer(binDir, { label: "cmd-shim-ok" });
   fs.writeFileSync(path.join(binDir, "bare-mcp"), "#!/bin/sh\necho wrong-posix-shim\n");
   fs.writeFileSync(
     path.join(binDir, "bare-mcp.cmd"),
@@ -375,10 +389,8 @@ test("stdio adapter and CLI fallback resolve bare Windows .cmd shims on PATH", {
     `@echo off\r\n"${process.execPath}" "${cliScript}" %*\r\n`
   );
 
-  const prevPath = process.env.PATH;
-  const prevCmd = process.env.IGNIS_MEMTRACE_CMD;
-  process.env.PATH = `${binDir}${path.delimiter}${prevPath || ""}`;
-  process.env.IGNIS_MEMTRACE_CMD = "bare-memtrace";
+  setEnv(t, "PATH", `${binDir}${path.delimiter}${process.env.PATH || ""}`);
+  setEnv(t, "IGNIS_MEMTRACE_CMD", "bare-memtrace");
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -392,21 +404,15 @@ test("stdio adapter and CLI fallback resolve bare Windows .cmd shims on PATH", {
 
   const sup = new Supervisor(home, home, 0);
   try {
-    const mcpRes = await sup.call({ server: "bare", tool: "ping", arguments: {}, cwd: repo });
+    const mcpRes = await within(sup.call({ server: "bare", tool: "echo", arguments: {}, cwd: repo }), "the bare .cmd call");
     assert.equal(mcpRes.isError, false);
     assert.ok(mcpRes.content[0].text.startsWith("cmd-shim-ok:"));
 
-    const cliRes = await tryCliFallback("memtrace", "find_symbol", { query: "Foo" }, repo, 5000);
+    const cliRes = await within(tryCliFallback("memtrace", "find_symbol", { query: "Foo" }, repo, 5000), "the CLI fallback");
     assert.equal(cliRes.isError, false);
     assert.equal(cliRes.content[0].text, "bare-cli:find|Foo");
   } finally {
-    process.env.PATH = prevPath;
-    if (prevCmd === undefined) delete process.env.IGNIS_MEMTRACE_CMD;
-    else process.env.IGNIS_MEMTRACE_CMD = prevCmd;
-    await sup.shutdown();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(binDir, { recursive: true, force: true });
-    fs.rmSync(repo, { recursive: true, force: true });
+    await stop(sup);
   }
 });
 
@@ -420,79 +426,48 @@ test("isDaemonVersionAcceptable lets older bridges reuse newer same-major daemon
   assert.equal(isDaemonVersionAcceptable(null, "1.1.1"), false);
 });
 
-test("tryCliFallback neutralizes quote and metacharacter injection on Windows Node and batch .cmd shims", { skip: process.platform !== "win32" }, async () => {
-  const dir = mkTemp("ignis-cmd-inject-");
-  const prevCmd = process.env.IGNIS_MEMTRACE_CMD;
+test("tryCliFallback neutralizes quote and metacharacter injection on Windows Node and batch .cmd shims", { skip: process.platform !== "win32" }, async (t) => {
+  const dir = mk(t, "ignis-cmd-inject-");
+  setEnv(t, "IGNIS_MEMTRACE_CMD", undefined);
   const marker = path.join(dir, "injected.txt");
   const payload = `x" & echo INJECTED_CLI > "${marker}" & "`;
 
-  try {
-    const cliScript = path.join(dir, "node-cli.mjs");
-    fs.writeFileSync(cliScript, 'process.stdout.write("node:" + process.argv.slice(2).join("|"));\n');
-    const nodeCmd = path.join(dir, "node-memtrace.cmd");
-    fs.writeFileSync(nodeCmd, `@echo off\r\n"${process.execPath}" "${cliScript}" %*\r\n`);
+  const cliScript = path.join(dir, "node-cli.mjs");
+  fs.writeFileSync(cliScript, 'process.stdout.write("node:" + process.argv.slice(2).join("|"));\n');
+  const nodeCmd = path.join(dir, "node-memtrace.cmd");
+  fs.writeFileSync(nodeCmd, `@echo off\r\n"${process.execPath}" "${cliScript}" %*\r\n`);
 
-    process.env.IGNIS_MEMTRACE_CMD = nodeCmd;
-    const nodeRes = await tryCliFallback("memtrace", "find_symbol", { query: payload }, dir, 5000);
-    assert.equal(nodeRes.isError, false);
-    assert.equal(nodeRes.content[0].text, `node:find|${payload}`);
-    assert.equal(fs.existsSync(marker), false);
+  process.env.IGNIS_MEMTRACE_CMD = nodeCmd;
+  const nodeRes = await within(tryCliFallback("memtrace", "find_symbol", { query: payload }, dir, 5000), "the node .cmd fallback");
+  assert.equal(nodeRes.isError, false);
+  assert.equal(nodeRes.content[0].text, `node:find|${payload}`);
+  assert.equal(fs.existsSync(marker), false);
 
-    const batchCmd = path.join(dir, "batch-memtrace.cmd");
-    fs.writeFileSync(batchCmd, "@echo off\r\necho batch:%*\r\n");
-    process.env.IGNIS_MEMTRACE_CMD = batchCmd;
+  const batchCmd = path.join(dir, "batch-memtrace.cmd");
+  fs.writeFileSync(batchCmd, "@echo off\r\necho batch:%*\r\n");
+  process.env.IGNIS_MEMTRACE_CMD = batchCmd;
 
-    await assert.rejects(
-      () => tryCliFallback("memtrace", "find_symbol", { query: payload }, dir, 5000),
-      (err) => err.kind === "protocol"
-    );
-    assert.equal(fs.existsSync(marker), false);
+  await assert.rejects(
+    () => within(tryCliFallback("memtrace", "find_symbol", { query: payload }, dir, 5000), "the batch .cmd fallback"),
+    (err) => err.kind === "protocol"
+  );
+  assert.equal(fs.existsSync(marker), false);
 
-    await assert.rejects(
-      () => tryCliFallback("memtrace", "find_symbol", { query: "abc\r\necho pwned" }, dir, 5000),
-      (err) => err.kind === "protocol"
-    );
-  } finally {
-    if (prevCmd === undefined) delete process.env.IGNIS_MEMTRACE_CMD;
-    else process.env.IGNIS_MEMTRACE_CMD = prevCmd;
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  await assert.rejects(
+    () => within(tryCliFallback("memtrace", "find_symbol", { query: "abc\r\necho pwned" }, dir, 5000), "the newline fallback"),
+    (err) => err.kind === "protocol"
+  );
 });
 
-test("supervisor deduplicates concurrent cold starts and invalidates pool on servers.json edits", async () => {
-  const home = mkTemp("ignis-conc-home-");
-  const repo = mkTemp("ignis-conc-repo-");
+test("supervisor deduplicates concurrent cold starts and invalidates pool on servers.json edits", async (t) => {
+  const home = mk(t, "ignis-conc-home-");
+  const repo = mk(t, "ignis-conc-repo-");
   fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
   fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
 
   const pidLog = path.join(home, "pids.log");
-  const scriptV1 = path.join(home, "srv-v1.mjs");
-  const scriptV2 = path.join(home, "srv-v2.mjs");
-
-  for (const [scriptPath, label] of [
-    [scriptV1, "v1"],
-    [scriptV2, "v2"],
-  ]) {
-    fs.writeFileSync(
-      scriptPath,
-      `
-import fs from "node:fs";
-import readline from "node:readline";
-fs.appendFileSync(${JSON.stringify(pidLog)}, String(process.pid) + "\\n");
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === "initialize") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } }) + "\\n");
-  } else if (msg.method === "tools/list") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object" } }] } }) + "\\n");
-  } else if (msg.method === "tools/call") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: ${JSON.stringify(label)} }], isError: false } }) + "\\n");
-  }
-});
-`
-    );
-  }
+  const scriptV1 = writeMockStdioServer(home, { label: "v1", banner: false, logPidFile: pidLog });
+  const scriptV2 = writeMockStdioServer(home, { label: "v2", banner: false, logPidFile: pidLog });
 
   fs.writeFileSync(
     path.join(home, "servers.json"),
@@ -506,13 +481,16 @@ rl.on("line", (line) => {
 
   const sup = new Supervisor(home, home, 0);
   try {
-    const results = await Promise.all([
-      sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo }),
-      sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo }),
-      sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo }),
-    ]);
+    const results = await within(
+      Promise.all([
+        sup.call({ server: "demo", tool: "echo", arguments: {}, cwd: repo }),
+        sup.call({ server: "demo", tool: "echo", arguments: {}, cwd: repo }),
+        sup.call({ server: "demo", tool: "echo", arguments: {}, cwd: repo }),
+      ]),
+      "the concurrent cold-start calls"
+    );
     for (const r of results) {
-      assert.equal(r.content[0].text, "v1");
+      assert.ok(r.content[0].text.startsWith("v1:"), r.content[0].text);
     }
     const spawnedPids = fs.readFileSync(pidLog, "utf8").trim().split(/\r?\n/);
     assert.equal(spawnedPids.length, 1);
@@ -526,22 +504,20 @@ rl.on("line", (line) => {
         },
       })
     );
-    const v2Res = await sup.call({ server: "demo", tool: "ping", arguments: {}, cwd: repo });
-    assert.equal(v2Res.content[0].text, "v2");
+    const v2Res = await within(sup.call({ server: "demo", tool: "echo", arguments: {}, cwd: repo }), "the call after the servers.json edit");
+    assert.ok(v2Res.content[0].text.startsWith("v2:"), v2Res.content[0].text);
 
     fs.writeFileSync(path.join(repo, ".agents", "ignis-broker.json"), "{ invalid-local");
-    const listRes = await sup.list({ cwd: repo });
+    const listRes = await within(sup.list({ cwd: repo }), "the list with a broken local config");
     assert.ok(listRes.localConfigError);
   } finally {
-    await sup.shutdown();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(repo, { recursive: true, force: true });
+    await stop(sup);
   }
 });
 
-test("http adapter parses multi-line SSE frames and rejects notification-only SSE streams", async () => {
+test("http adapter parses multi-line SSE frames and rejects notification-only SSE streams", async (t) => {
   let mode = "multiline";
-  const server = http.createServer((req, res) => {
+  const { port } = await listen(t, (req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
@@ -577,24 +553,68 @@ test("http adapter parses multi-line SSE frames and rejects notification-only SS
     });
   });
 
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const { port } = server.address();
-  try {
-    const adapter = await McpHttpAdapter.connect({
+  const adapter = await within(
+    McpHttpAdapter.connect({
       url: `http://127.0.0.1:${port}/mcp`,
       headers: {},
       startupTimeoutMs: 5000,
       requestTimeoutMs: 5000,
-    });
-    const okRes = await adapter.callTool("echo", {});
-    assert.equal(okRes.content[0].text, "multi-ok");
+    }),
+    "the http adapter to connect"
+  );
+  const okRes = await within(adapter.callTool("echo", {}), "the multi-line SSE call");
+  assert.equal(okRes.content[0].text, "multi-ok");
 
-    mode = "notif-only";
-    await assert.rejects(
-      () => adapter.callTool("echo", {}),
-      (err) => err.kind === "protocol"
-    );
+  mode = "notif-only";
+  await assert.rejects(
+    () => within(adapter.callTool("echo", {}), "the notification-only SSE call"),
+    (err) => err.kind === "protocol"
+  );
+});
+
+test("supervisor sends a local http entry's ${VAR} headers and url literally, never the dotenv secret", async (t) => {
+  const home = mk(t, "ignis-lit-home-");
+  const repo = mk(t, "ignis-lit-repo-");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(repo, ".agents"), { recursive: true });
+  const secret = ["sec", "ret", String(process.pid)].join("-");
+  fs.writeFileSync(path.join(home, ".env"), `SECRET_X=${secret}\n`);
+  fs.writeFileSync(path.join(home, "servers.json"), JSON.stringify({ version: 1, servers: {} }));
+
+  const seen = [];
+  const { port } = await listen(t, (req, res) => {
+    seen.push({ auth: req.headers.authorization, url: req.url });
+    res.writeHead(500);
+    res.end("boom");
+  });
+  fs.writeFileSync(
+    path.join(repo, ".agents", "ignis-broker.json"),
+    JSON.stringify({
+      version: 1,
+      servers: {
+        sink: {
+          transport: "http",
+          url: `http://127.0.0.1:${port}/mcp?k=\${SECRET_X}`,
+          headers: { Authorization: "Bearer ${SECRET_X}" },
+          startupTimeoutMs: 3000,
+          requestTimeoutMs: 3000,
+        },
+      },
+    })
+  );
+  trustLocalConfig(home, path.join(repo, ".agents", "ignis-broker.json"));
+
+  const sup = new Supervisor(home, home, 0);
+  try {
+    await assert.rejects(() => within(sup.call({ server: "sink", tool: "x", arguments: {}, cwd: repo }), "the call to the failing sink"));
   } finally {
-    await new Promise((r) => server.close(r));
+    await stop(sup);
+  }
+
+  assert.ok(seen.length > 0);
+  for (const hit of seen) {
+    assert.equal(hit.auth, "Bearer ${SECRET_X}");
+    assert.ok(!String(hit.auth).includes(secret));
+    assert.ok(!hit.url.includes(secret));
   }
 });

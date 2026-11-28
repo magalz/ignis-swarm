@@ -26,7 +26,7 @@ function sliceUtf8Bytes(str, maxBytes) {
 
 function writeSpillFile(spillDir, text) {
   try {
-    fs.mkdirSync(spillDir, { recursive: true });
+    fs.mkdirSync(spillDir, { recursive: true, mode: 0o700 });
     const ts = Math.floor(Date.now() / 1000);
     const shortId = crypto.randomBytes(4).toString("hex");
     const filePath = path.join(spillDir, `${ts}-${shortId}.txt`);

@@ -1,22 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { resolvePlatformCommand } from "../scripts/broker/adapters.mjs";
 import { brokerDataDir, brokerHome, resolveConfig } from "../scripts/broker/config.mjs";
 import { readDaemonInfo } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState, probeEnvironment } from "../scripts/broker/onboarding.mjs";
+import { isMainModule } from "../scripts/lib/common.mjs";
+import { isInteractiveUserSession, readStdin, resolveWorkspace } from "./lib.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function readStdin() {
-  try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
+export const CHECKS_DEADLINE_MS = 3500;
+const MEMTRACE_TIMEOUT_MS = 3000;
+const BROKER_TIMEOUT_MS = 2500;
+const MAX_CHILD_OUTPUT = 1024 * 1024;
+
+const runningChildren = new Set();
 
 function isProjectWorkspace(dir) {
   if (!dir || !fs.existsSync(dir)) return false;
@@ -24,15 +24,7 @@ function isProjectWorkspace(dir) {
   return markers.some((m) => fs.existsSync(path.join(dir, m)));
 }
 
-function resolveWorkspace(payload) {
-  if (payload.cwd && fs.existsSync(payload.cwd)) return payload.cwd;
-  if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-    return payload.workspacePaths[0];
-  }
-  return "";
-}
-
-function checkDecisionIndexes(cwd) {
+function findDecisionIndexHint(cwd) {
   const found = [];
   if (fs.existsSync(path.join(cwd, "docs", "adr", "INDEX.md"))) found.push("docs/adr/INDEX.md");
   if (fs.existsSync(path.join(cwd, "docs", "bdr", "INDEX.md"))) found.push("docs/bdr/INDEX.md");
@@ -40,33 +32,67 @@ function checkDecisionIndexes(cwd) {
   return `[ignis-swarm] Decision indexes detected (${found.join(", ")}). Check relevant ADRs/BDRs before planning or modifying architecture.`;
 }
 
-function isInteractiveUserSession(payload) {
-  if (
-    payload.isSubagent === true ||
-    payload.subagent === true ||
-    Boolean(payload.parentConversationId)
-  ) {
-    return false;
+function killChild(child) {
+  if (process.platform === "win32" && child.pid) {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      timeout: 1000,
+      windowsHide: true,
+    });
   }
-  if (typeof payload.lastUserInput === "string" && payload.lastUserInput.trim().length > 0) {
-    return true;
-  }
-  if (typeof payload.transcriptPath === "string" && payload.transcriptPath.trim()) {
+  child.kill();
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
+function killRunningChildren() {
+  for (const child of runningChildren) killChild(child);
+  runningChildren.clear();
+}
+
+function runCommand(resolved, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
     try {
-      const fd = fs.openSync(payload.transcriptPath, "r");
-      try {
-        const buf = Buffer.alloc(4096);
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-        const head = buf.subarray(0, bytesRead).toString("utf8");
-        if (/"type"\s*:\s*"USER_INPUT"/.test(head)) {
-          return true;
-        }
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch {}
-  }
-  return false;
+      child = spawn(resolved.command, resolved.args, {
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        ...resolved.options,
+      });
+    } catch (error) {
+      resolve({ error, status: null, stdout: "", stderr: "" });
+      return;
+    }
+    runningChildren.add(child);
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (error, status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      runningChildren.delete(child);
+      resolve({ error, status, stdout, stderr });
+    };
+    const timer = setTimeout(() => {
+      killChild(child);
+      finish(new Error(`timed out after ${timeoutMs} ms`), null);
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < MAX_CHILD_OUTPUT) stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_CHILD_OUTPUT) stderr += chunk;
+    });
+    child.on("error", (error) => finish(error, null));
+    child.on("close", (status) => finish(null, status));
+  });
 }
 
 async function checkBrokerWarning(cwd, home, dataDir) {
@@ -86,13 +112,7 @@ async function checkBrokerWarning(cwd, home, dataDir) {
     } catch {
       return null;
     }
-    const res = spawnSync(resolved.command, resolved.args, {
-      cwd,
-      encoding: "utf8",
-      timeout: 2500,
-      windowsHide: true,
-      ...resolved.options,
-    });
+    const res = await runCommand(resolved, cwd, BROKER_TIMEOUT_MS);
     if (res.error || res.status !== 0 || !res.stdout) {
       return null;
     }
@@ -153,8 +173,12 @@ function buildOnboardingNotice(home, dataDir) {
     .map(([name, info]) => `${name}=${info.available ? "yes" : "no"}`)
     .join(", ");
 
+  const brokerCli = path.resolve(PLUGIN_ROOT, "scripts", "ignis-broker.mjs");
+
   return (
     `[ignis-swarm][First-Run Onboarding Required] Load skill \`ignis-onboarding\` before starting the user's request (or let the user skip). ` +
+    `In that skill, every command is \`node "<broker-cli>" <command>\`: replace \`<broker-cli>\` with this absolute path: \`${brokerCli}\`. ` +
+    `Example: \`node "${brokerCli}" onboarding --probe\`. ` +
     `Discovered MCPs (redacted): ${mcpSummary}. Local CLIs: ${cliSummary}. ` +
     `(Main interactive session only — subagents and /swarm workers must ignore this.)`
   );
@@ -181,7 +205,7 @@ function buildReviewRoutingNotice(routing) {
   );
 }
 
-function checkMemtraceStatus(cwd) {
+async function checkMemtraceStatus(cwd) {
   const cmd = (process.env.IGNIS_MEMTRACE_CMD || "").trim() || "memtrace";
   let resolved;
   try {
@@ -189,13 +213,7 @@ function checkMemtraceStatus(cwd) {
   } catch (err) {
     return `[ignis-swarm][Memtrace Alert] memtrace status failed (${err.message}).`;
   }
-  const res = spawnSync(resolved.command, resolved.args, {
-    cwd,
-    encoding: "utf8",
-    timeout: 3000,
-    windowsHide: true,
-    ...resolved.options,
-  });
+  const res = await runCommand(resolved, cwd, MEMTRACE_TIMEOUT_MS);
 
   if (res.error || res.status !== 0) {
     const detail = (res.stderr || res.stdout || res.error?.message || `exit ${res.status}`)
@@ -213,18 +231,33 @@ function checkMemtraceStatus(cwd) {
   return `[ignis-swarm][Memtrace] Active (${summary}).`;
 }
 
+async function settleBefore(tasks, deadlineAt) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    await Promise.race([Promise.all(tasks), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function emit(result) {
+  process.stdout.write(JSON.stringify(result), () => process.exit(0));
+}
+
 async function main() {
   const payload = readStdin();
   const cwd = resolveWorkspace(payload);
 
   if (!isProjectWorkspace(cwd)) {
-    process.stdout.write(JSON.stringify({}));
+    emit({});
     return;
   }
 
   const home = brokerHome();
   const dataDir = brokerDataDir(home);
-  const messages = [];
 
   let onboarding = null;
   try {
@@ -233,40 +266,47 @@ async function main() {
     onboarding = null;
   }
 
-  if (!onboarding || onboarding.completed !== true) {
-    if (isInteractiveUserSession(payload)) {
-      try {
-        messages.push(buildOnboardingNotice(home, dataDir));
-      } catch {}
+  const interactive = isInteractiveUserSession(payload);
+  const onboardingDone = onboarding?.completed === true || onboarding?.skipped === true;
+
+  const deadlineAt = Date.now() + CHECKS_DEADLINE_MS;
+  const results = { memtrace: null, broker: null };
+  const checks = [];
+  const track = (slot, check) => check.then((notice) => { results[slot] = notice; }, () => {});
+  if (interactive) {
+    if (onboardingDone && onboarding.memtrace?.enabled === true) {
+      checks.push(track("memtrace", checkMemtraceStatus(cwd)));
     }
-  } else {
-    if (onboarding.memtrace?.enabled === true) {
-      messages.push(checkMemtraceStatus(cwd));
-    }
-    if (isInteractiveUserSession(payload)) {
-      const notice = buildReviewRoutingNotice(onboarding.reviewRouting);
-      if (notice) messages.push(notice);
-    }
+    checks.push(track("broker", checkBrokerWarning(cwd, home, dataDir)));
   }
 
-  const indexHint = checkDecisionIndexes(cwd);
-  if (indexHint) messages.push(indexHint);
+  let onboardingNotice = null;
+  if (!onboardingDone && interactive) {
+    try {
+      onboardingNotice = buildOnboardingNotice(home, dataDir);
+    } catch {}
+  }
+  const routingNotice = interactive ? buildReviewRoutingNotice(onboarding?.reviewRouting) : null;
+  const indexHint = findDecisionIndexHint(cwd);
 
-  const brokerNotice = await checkBrokerWarning(cwd, home, dataDir);
-  if (brokerNotice) messages.push(brokerNotice);
+  await settleBefore(checks, deadlineAt);
+  const { memtrace, broker } = results;
+  killRunningChildren();
 
+  const messages = [onboardingNotice, memtrace, routingNotice, indexHint, broker].filter(Boolean);
   if (messages.length === 0) {
-    process.stdout.write(JSON.stringify({}));
+    emit({});
     return;
   }
 
-  process.stdout.write(
-    JSON.stringify({
-      injectSteps: [{ systemMessage: { systemMessage: messages.join("\n") } }],
-    })
-  );
+  emit({
+    injectSteps: [{ systemMessage: { systemMessage: messages.join("\n") } }],
+  });
 }
 
-main().catch(() => {
-  process.stdout.write(JSON.stringify({}));
-});
+if (isMainModule(import.meta.url)) {
+  main().catch(() => {
+    killRunningChildren();
+    emit({});
+  });
+}

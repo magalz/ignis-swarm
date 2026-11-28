@@ -1,0 +1,726 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { evaluateCommand } from "../hooks/command-rules.mjs";
+import { isolatedEnv, runNode } from "./helpers.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PLUGIN_ROOT = path.resolve(__dirname, "..");
+const HOOK_TIMEOUT_MS = 60_000;
+
+function runHook(scriptRelPath, inputObj) {
+  const iso = isolatedEnv();
+  try {
+    const res = runNode(path.join(PLUGIN_ROOT, scriptRelPath), [], {
+      cwd: PLUGIN_ROOT,
+      input: JSON.stringify(inputObj),
+      env: iso.env,
+      timeoutMs: HOOK_TIMEOUT_MS,
+    });
+    assert.equal(res.timedOut, false, `Hook ${scriptRelPath} timed out`);
+    assert.equal(res.status, 0, `Hook ${scriptRelPath} failed: ${res.stderr}`);
+    return JSON.parse(res.stdout.trim());
+  } finally {
+    iso.cleanup();
+  }
+}
+
+const NO_VERIFY = "`--no-verify` bypasses";
+const HOOKS_PATH = "overriding core.hooksPath bypasses";
+const FORCE_MAIN = "force-pushing to main/master is forbidden";
+const RESET_HARD = "`git reset --hard` destroys";
+const FORCE_PUSH = "confirmation before any force push";
+const CLEAN_FORCE = "before `git clean -f`";
+const DELETE_ROOT = "destructive root/home deletion";
+const TRUST = "before trusting a repository-local broker config";
+const DELETE_MAIN = "Blocked by ignis-swarm: deleting main/master on a remote is forbidden.";
+const MIRROR = "before `git push --mirror`";
+
+const ROWS = [
+  ["git commit -n -m x", "deny", NO_VERIFY],
+  ["git commit -nm x", "deny", NO_VERIFY],
+  ["git commit -anm x", "deny", NO_VERIFY],
+  ["git commit -an", "deny", NO_VERIFY],
+  ["git commit --no-verify -m x", "deny", NO_VERIFY],
+  ['git commit -m "wip" --no-verify', "deny", NO_VERIFY],
+  ["git commit -m wip --no-verify", "deny", NO_VERIFY],
+  ["git commit --no-veri -m x", "deny", NO_VERIFY],
+  ['git commit "--no-verify" -m x', "deny", NO_VERIFY],
+  ["git commit -m x \\\n--no-verify", "deny", NO_VERIFY],
+  ["git commit -m x \\\r\n--no-verify", "deny", NO_VERIFY],
+  ["git push --no-verify origin feat/a", "deny", NO_VERIFY],
+  ["git merge --no-verify feat/a", "deny", NO_VERIFY],
+  ["git rebase --no-verify main", "deny", NO_VERIFY],
+  ["git cherry-pick --no-verify abc123", "deny", NO_VERIFY],
+  ["git -C /repo commit --no-verify -m x", "deny", NO_VERIFY],
+  ["git commit -am x", null],
+  ["git commit -m x -- -n", null],
+  ["git push -n origin feat/a", null],
+  ["git merge --no-verify-signatures feat/a", null],
+  ["git commit -m \"don't use --no-verify\"", null],
+  ['git commit -m "- fix the bug in main"', null],
+  ["HUSKY=0 git commit -m x", null],
+  ["grep -- --no-verify README.md", null],
+
+  ["git -c core.hooksPath=/dev/null commit -m x", "deny", HOOKS_PATH],
+  ["git -c core.hookspath=/dev/null commit -m x", "deny", HOOKS_PATH],
+  ["git --config-env=core.hooksPath=HOOKS push origin feat/a", "deny", HOOKS_PATH],
+  ["git --config-env core.hooksPath=HOOKS merge feat/a", "deny", HOOKS_PATH],
+  ["git -c core.hooksPath=/dev/null rebase main", "deny", HOOKS_PATH],
+  ["git -c core.hooksPath=/dev/null cherry-pick abc123", "deny", HOOKS_PATH],
+  ["git -c core.hooksPath=/dev/null status", null],
+  ["git -c core.editor=true commit -m x", null],
+
+  ["git push origin +main", "deny", FORCE_MAIN],
+  ["git push -f origin HEAD:main", "deny", FORCE_MAIN],
+  ["git push origin main --force", "deny", FORCE_MAIN],
+  ["git push --force origin main", "deny", FORCE_MAIN],
+  ["git push -fu origin main", "deny", FORCE_MAIN],
+  ["git push -uf origin main", "deny", FORCE_MAIN],
+  ["git push -f origin master", "deny", FORCE_MAIN],
+  ["git push -f origin HEAD:refs/heads/main", "deny", FORCE_MAIN],
+  ["git push origin +HEAD:refs/heads/master", "deny", FORCE_MAIN],
+  ['git push -f origin "main"', "deny", FORCE_MAIN],
+  ["git -C /repo push --force origin main", "deny", FORCE_MAIN],
+  ["echo ok && git push -f origin main", "deny", FORCE_MAIN],
+  ["git push --force --force-with-lease origin main", "deny", FORCE_MAIN],
+  ["git push --force-with-lease origin main", "force_ask", FORCE_PUSH],
+  ["git push --force-with-lease=main:abc origin main", "force_ask", FORCE_PUSH],
+  ["git push --force-if-includes origin main", "force_ask", FORCE_PUSH],
+  ["git push --force origin feature/main-fix", "force_ask", FORCE_PUSH],
+  ["git push --force-with-lease origin feat/a", "force_ask", FORCE_PUSH],
+  ["git push origin +feat/a", "force_ask", FORCE_PUSH],
+  ["git push -f", "force_ask", FORCE_PUSH],
+  ["git push -f origin", "force_ask", FORCE_PUSH],
+  ["git push origin main", null],
+  ["git push origin feature/main-fix", null],
+  ["git push -u origin feat/a", null],
+  ["git push origin main:feature", null],
+
+  ["git reset --hard HEAD~1", "deny", RESET_HARD],
+  ["git  reset   --hard", "deny", RESET_HARD],
+  ["git -C /repo reset --hard origin/main", "deny", RESET_HARD],
+  ["git --no-pager reset --hard", "deny", RESET_HARD],
+  ["git -p reset --hard", "deny", RESET_HARD],
+  ["git --git-dir=/x/.git --work-tree=/x reset --hard", "deny", RESET_HARD],
+  ["git --git-dir /x/.git reset --hard", "deny", RESET_HARD],
+  ["git reset --har", "deny", RESET_HARD],
+  ['git reset "--hard"', "deny", RESET_HARD],
+  ['"git" reset --hard', "deny", RESET_HARD],
+  ["git reset --ha\\rd", "deny", RESET_HARD],
+  ["git.exe reset --hard", "deny", RESET_HARD],
+  ['& "C:\\Program Files\\Git\\cmd\\git.exe" reset --hard', "deny", RESET_HARD],
+  ["sudo git reset --hard", "deny", RESET_HARD],
+  ["sudo -u root git reset --hard", "deny", RESET_HARD],
+  ["command git reset --hard", "deny", RESET_HARD],
+  ["exec git reset --hard", "deny", RESET_HARD],
+  ["env GIT_TRACE=1 git reset --hard", "deny", RESET_HARD],
+  ["FOO=1 BAR=2 git reset --hard", "deny", RESET_HARD],
+  ["git status; git reset --hard", "deny", RESET_HARD],
+  ["git status || git reset --hard", "deny", RESET_HARD],
+  ["git status | git reset --hard", "deny", RESET_HARD],
+  ["git status\ngit reset --hard", "deny", RESET_HARD],
+  ["git status\r\ngit reset --hard", "deny", RESET_HARD],
+  ["echo x & git reset --hard", "deny", RESET_HARD],
+  ["(git reset --hard)", "deny", RESET_HARD],
+  ["echo $(git reset --hard)", "deny", RESET_HARD],
+  ["if true; then git reset --hard; fi", "deny", RESET_HARD],
+  ['bash -c "git reset --hard"', "deny", RESET_HARD],
+  ["bash -lc 'git reset --hard'", "deny", RESET_HARD],
+  ['/bin/bash -c "git push -f origin main"', "deny", FORCE_MAIN],
+  ["sh -c 'echo ok && git reset --hard'", "deny", RESET_HARD],
+  ['bash -c "echo \\"x\\" && git reset --hard"', "deny", RESET_HARD],
+  ['sudo bash -c "git reset --hard"', "deny", RESET_HARD],
+  ['pwsh -Command "git reset --hard"', "deny", RESET_HARD],
+  ['pwsh -NoProfile -Command "git reset --hard"', "deny", RESET_HARD],
+  ['powershell.exe -NoProfile -c "git reset --hard"', "deny", RESET_HARD],
+  ["pwsh -Command git reset --hard", "deny", RESET_HARD],
+  ['cmd /c "git reset --hard"', "deny", RESET_HARD],
+  ["cmd /c git reset --hard", "deny", RESET_HARD],
+  ['cmd.exe /k "git reset --hard"', "deny", RESET_HARD],
+  ['git -C "C:\\repo\\" reset --hard', "deny", RESET_HARD],
+  ["echo \\'; git reset --hard; echo \\'", "deny", RESET_HARD],
+  ["echo it\\'s fine", null],
+  ["git reset --soft HEAD~1", null],
+  ["git reset HEAD file.txt", null],
+  ['echo "git reset --hard"', null],
+  ["echo 'git reset --hard'", null],
+  ['bash -c "echo git reset --hard"', null],
+  ['pwsh -Command "echo git reset --hard"', null],
+  ["git log --grep=force", null],
+  ["git log --grep=--hard", null],
+  ["git status", null],
+  ["git", null],
+
+  ["git clean -fdx", "force_ask", CLEAN_FORCE],
+  ["git clean -d -f", "force_ask", CLEAN_FORCE],
+  ["git clean --force -d", "force_ask", CLEAN_FORCE],
+  ["git clean -fd", "force_ask", CLEAN_FORCE],
+  ["git clean --f", "force_ask", CLEAN_FORCE],
+  ["git -C /repo clean -df", "force_ask", CLEAN_FORCE],
+  ["git clean -n", null],
+  ["git clean -nd", null],
+
+  ["rm -rf /", "deny", DELETE_ROOT],
+  ["rm -fr /", "deny", DELETE_ROOT],
+  ["rm -r -f /", "deny", DELETE_ROOT],
+  ["rm -rf E:\\ && echo done", "deny", DELETE_ROOT],
+  ["echo ok; rm -rf /", "deny", DELETE_ROOT],
+  ["sudo rm -rf /", "deny", DELETE_ROOT],
+  ['bash -c "rm -rf /"', "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -Force -Recurse C:\\", "deny", DELETE_ROOT],
+  ["rm -rf ./build", null],
+  ['echo "rm -rf /"', null],
+  ['echo "Remove-Item -Recurse -Force C:\\"', null],
+
+  ["rm -r /", "deny", DELETE_ROOT],
+  ["rm -R /", "deny", DELETE_ROOT],
+  ["rm --recursive /", "deny", DELETE_ROOT],
+  ["rm --recursive --force /", "deny", DELETE_ROOT],
+  ["rm -rvf /", "deny", DELETE_ROOT],
+  ["rm -Rf /", "deny", DELETE_ROOT],
+  ["rm -rf -- /", "deny", DELETE_ROOT],
+  ["rm -rf --no-preserve-root /", "deny", DELETE_ROOT],
+  ["rm -rf / --no-preserve-root", "deny", DELETE_ROOT],
+  ["rm -rf build /", "deny", DELETE_ROOT],
+  ["rm -rf /*", "deny", DELETE_ROOT],
+  ['rm -rf "/"', "deny", DELETE_ROOT],
+  ["rm -rf '/'", "deny", DELETE_ROOT],
+  ["rm -rf ~", "deny", DELETE_ROOT],
+  ["rm -rf ~/", "deny", DELETE_ROOT],
+  ["rm -rf ~/*", "deny", DELETE_ROOT],
+  ["rm -fR ~", "deny", DELETE_ROOT],
+  ["rm -rf $HOME", "deny", DELETE_ROOT],
+  ["rm -rf ${HOME}", "deny", DELETE_ROOT],
+  ['rm -rf "$HOME"', "deny", DELETE_ROOT],
+  ["rm -rf $HOME/", "deny", DELETE_ROOT],
+  ['rm -rf "$HOME"/*', "deny", DELETE_ROOT],
+  ["rm -rf *", "deny", DELETE_ROOT],
+  ["rm -rf C:", "deny", DELETE_ROOT],
+  ["rm -rf C:/", "deny", DELETE_ROOT],
+  ["rm -rf C:\\", "deny", DELETE_ROOT],
+  ["rm -rf C:\\*", "deny", DELETE_ROOT],
+  ["/bin/rm -rf /", "deny", DELETE_ROOT],
+  ["sudo rm -rf ~", "deny", DELETE_ROOT],
+  ["env FOO=1 rm -r $HOME", "deny", DELETE_ROOT],
+  ["echo x | xargs rm -rf /", "deny", DELETE_ROOT],
+  ["find . -exec rm -rf ~ \\;", "deny", DELETE_ROOT],
+  ['bash -c "rm -rf $HOME"', "deny", DELETE_ROOT],
+  ['pwsh -Command "rm -rf ~"', "deny", DELETE_ROOT],
+  ["cd /tmp && rm -rf /", "deny", DELETE_ROOT],
+  ["rm /", "deny", DELETE_ROOT],
+
+  ["rm -rf node_modules", null],
+  ["rm -rf ~/project/tmp", null],
+  ['rm -rf "$HOME/.cache/foo"', null],
+  ["rm -rf $HOME/.cache", null],
+  ["rm -rf /tmp/x", null],
+  ["rm -rf C:\\Users\\x\\build", null],
+  ["rm -rf *.o", null],
+  ["rm -rf ./*", null],
+  ["rm -f *", null],
+  ["rm -f ./file.txt", null],
+  ["rm file.txt", null],
+  ["rm -rfz /tmp/x", null],
+  ["rm -rf -- -x", null],
+  ["rm -rf ~/{Downloads,tmp}", null],
+  ['rm -rf "$HOME"/{a,b}', null],
+  ['rm -rf "$(mktemp -d)/"', null],
+  ['rm -rf "$(pwd)"/*', null],
+  ["rm -rf $(pwd)/build", null],
+  ["rm -rf ./build && echo /", null],
+  ["echo rm -rf ~", null],
+  ["ls /", null],
+
+  ["Remove-Item -Recurse C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -r C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -rec -Force C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse:$true C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Path C:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -Path C:\\ -Recurse", "deny", DELETE_ROOT],
+  ["Remove-Item -Path:C:\\ -Recurse", "deny", DELETE_ROOT],
+  ["Remove-Item -LiteralPath C:\\ -Recurse", "deny", DELETE_ROOT],
+  ["Remove-Item -lp C:\\ -r", "deny", DELETE_ROOT],
+  ["Remove-Item -PSPath C:\\ -Recurse", "deny", DELETE_ROOT],
+  ['Remove-Item -Recurse -Force -Path "C:\\"', "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force C:\\*", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force C:", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force C:/", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force /", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force ~", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force $HOME", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force $env:USERPROFILE", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force $env:HOME", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force $HOME\\*", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force *", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force -Path C:\\,D:\\", "deny", DELETE_ROOT],
+  ["Remove-Item -Include *.tmp -Recurse -Force C:\\", "deny", DELETE_ROOT],
+  ["remove-item -recurse -force c:\\", "deny", DELETE_ROOT],
+  ["ri -r -fo C:\\", "deny", DELETE_ROOT],
+  ["del -Recurse C:\\", "deny", DELETE_ROOT],
+  ["erase -Recurse /", "deny", DELETE_ROOT],
+  ["rmdir -Recurse ~", "deny", DELETE_ROOT],
+  ["rd -r $HOME", "deny", DELETE_ROOT],
+  ["Remove-Item C:\\ -Force", "deny", DELETE_ROOT],
+  ["Remove-Item / -Force", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse:$false C:\\", "deny", DELETE_ROOT],
+  ["Get-Item x | Remove-Item -Recurse -Force C:\\", "deny", DELETE_ROOT],
+  ['pwsh -Command "Remove-Item -Recurse -Force ~"', "deny", DELETE_ROOT],
+  ["if ($x) { Remove-Item -Recurse -Force C:\\ }", "deny", DELETE_ROOT],
+  ["Remove-Item -Recurse -Force .\\dist", null],
+  ["Remove-Item -Recurse -Force .\\dist\\*", null],
+  ["Remove-Item -Path .\\dist -Recurse", null],
+  ["Remove-Item -PSPath .\\dist -Recurse", null],
+  ["Remove-Item -LiteralPath $HOME\\.cache -Recurse", null],
+  ["Remove-Item -Recurse -Force ~\\.cache", null],
+  ["Remove-Item -Recurse -Include * .\\dist", null],
+  ["Remove-Item -Recurse -Exclude * .\\dist", null],
+  ["Remove-Item -Recurse -Filter * .\\dist", null],
+  ["Remove-Item -Recurse -Credential $c -Stream x .\\dist", null],
+  ["Remove-Item -Recurse:$false $HOME", null],
+  ["Remove-Item -Force .\\file.txt", null],
+  ["Remove-Item -Recurse -Force C:\\Users\\x\\build", null],
+  ["Remove-Item * -Force", null],
+  ["Remove-Item -Recurse", null],
+  ["Remove-Item -Path", null],
+  ["Get-ChildItem C:\\", null],
+
+  ["del /s C:\\*", "deny", DELETE_ROOT],
+  ["del /s /q C:\\*", "deny", DELETE_ROOT],
+  ["del /s/q C:\\*", "deny", DELETE_ROOT],
+  ["del /s /q C:\\*.*", "deny", DELETE_ROOT],
+  ["del /S /Q C:\\", "deny", DELETE_ROOT],
+  ["erase /s C:\\*", "deny", DELETE_ROOT],
+  ["rd /s /q C:\\", "deny", DELETE_ROOT],
+  ["rmdir /s /q C:\\", "deny", DELETE_ROOT],
+  ["rd /s /q C:", "deny", DELETE_ROOT],
+  ["rd /s /q %USERPROFILE%", "deny", DELETE_ROOT],
+  ["rmdir /S /Q %USERPROFILE%\\", "deny", DELETE_ROOT],
+  ["rd /q /s C:\\", "deny", DELETE_ROOT],
+  ["rd C:\\ /s /q", "deny", DELETE_ROOT],
+  ['cmd /c "rd /s /q C:\\"', "deny", DELETE_ROOT],
+  ["cmd /c rd /s /q C:\\", "deny", DELETE_ROOT],
+  ["echo ok & rd /s /q C:\\", "deny", DELETE_ROOT],
+  ["rd /s /q build", null],
+  ["rd /s /q C:\\Users\\x\\build", null],
+  ["rmdir /s /q %USERPROFILE%\\.cache", null],
+  ["rd /s /q %TEMP%\\x", null],
+  ["del /s *.tmp", null],
+  ["del /s /q build\\*", null],
+  ["del /q C:\\x\\*", null],
+  ["del *.tmp", null],
+  ["rd build", null],
+  ["rd /s", null],
+
+  ["node scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ['node "C:\\p\\scripts\\ignis-broker.mjs" trust --list', "force_ask", TRUST],
+  ["node scripts/ignis-broker.mjs trust --revoke abc", "force_ask", TRUST],
+  ["node ./ignis-broker.mjs trust", "force_ask", TRUST],
+  ["node.exe scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ["node --no-warnings scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ["FOO=1 node scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ["sudo node scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ['bash -c "node scripts/ignis-broker.mjs trust"', "force_ask", TRUST],
+  ["cd x && node scripts/ignis-broker.mjs trust", "force_ask", TRUST],
+  ['node "$(pwd)/scripts/ignis-broker.mjs" trust', "force_ask", TRUST],
+  ['node "$(pwd)/scripts/ignis-broker.mjs" trust --list', "force_ask", TRUST],
+  ['node "$(git rev-parse --show-toplevel)/scripts/ignis-broker.mjs" trust', "force_ask", TRUST],
+  ['node "`pwd`/scripts/ignis-broker.mjs" trust', "force_ask", TRUST],
+  ['node "$ROOT/scripts/ignis-broker.mjs" trust', "force_ask", TRUST],
+  ["node scripts/ignis-broker.mjs trust; rm -rf /", "deny", DELETE_ROOT],
+  ["node scripts/ignis-broker.mjs status", null],
+  ['node "$(pwd)/scripts/ignis-broker.mjs" status', null],
+  ["node scripts/ignis-broker.mjs list trust", null],
+  ["node scripts/ignis-broker.mjs", null],
+  ["node scripts/other.mjs trust", null],
+  ["node trust", null],
+  ["echo node scripts/ignis-broker.mjs trust", null],
+  ["cat scripts/ignis-broker.mjs trust", null],
+
+  ["bash -c -- 'git reset --hard'", "deny", RESET_HARD],
+  ['sh -c -- "git push -f origin main"', "deny", FORCE_MAIN],
+  ["bash -c -x 'git reset --hard'", "deny", RESET_HARD],
+  ["bash -lc -- 'git reset --hard'", "deny", RESET_HARD],
+  ["pwsh -Command -- git reset --hard", "deny", RESET_HARD],
+  ["bash -c -- 'echo hello'", null],
+
+  ["echo `git reset --hard`", "deny", RESET_HARD],
+  ["`git reset --hard`", "deny", RESET_HARD],
+  ["echo ok; `git push -f origin main`", "deny", FORCE_MAIN],
+  ['echo "`git reset --hard`"', "deny", RESET_HARD],
+  ["echo `echo ok` `git reset --hard`", "deny", RESET_HARD],
+  ["echo `\ngit reset --hard\n`", "deny", RESET_HARD],
+  ["git commit -m 'docs: `npm test`'", null],
+  ["echo `date`", null],
+  ['Write-Output "Step 1`n"; git push --force origin main', "deny", FORCE_MAIN],
+  ['Write-Host "a`n"; git reset --hard; Write-Host "b`n"', "deny", RESET_HARD],
+  ['Write-Host "a`t"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host "done`n"', null],
+  ['Write-Host "a`n"; Write-Host "git reset --hard"', null],
+  ['Write-Host `"x; git reset --hard', "deny", RESET_HARD],
+  ["Write-Host `'x; git push -f origin main", "deny", FORCE_MAIN],
+  ['Write-Host "a`"b"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host `"a`"; git reset --hard', "deny", RESET_HARD],
+  ['Write-Host `"git reset --hard`"', null],
+  ['Write-Host `"x`"; git status', null],
+  ['cd "C:\\Users\\x"', null],
+  ['& "C:\\Program Files\\Git\\cmd\\git.exe" status', null],
+
+  ["git reset --hard&>out", "deny", RESET_HARD],
+  ["git reset --hard&>>out", "deny", RESET_HARD],
+  ["git reset --hard>out", "deny", RESET_HARD],
+  ["git reset --hard 2>&1", "deny", RESET_HARD],
+  ["git reset --hard >out 2>&1", "deny", RESET_HARD],
+  ["git push -f origin main&>out", "deny", FORCE_MAIN],
+  ["git commit -n&>out", "deny", NO_VERIFY],
+  ["git status&>out", null],
+  ["git status 2>&1", null],
+
+  ['git commit -m"init"', null],
+  ["git commit -minit", null],
+  ["git commit -mdone", null],
+  ["git commit -mn", null],
+  ["git commit -amn", null],
+  ["git commit -Fn", null],
+  ["git commit -tn", null],
+  ["git commit -Cn HEAD", null],
+  ['git commit -m"fix bug" -n', "deny", NO_VERIFY],
+  ["git commit -nminit", "deny", NO_VERIFY],
+  ['git commit -nm"fix bug"', "deny", NO_VERIFY],
+  ["git clean -efoo", null],
+  ["git clean -fe x", "force_ask", CLEAN_FORCE],
+  ["git clean -e x -n", null],
+  ["git push -o ci.skip origin feat", null],
+  ["git push -oforce origin feat", null],
+  ["git push -fo ci.skip origin main", "deny", FORCE_MAIN],
+  ["git push -o ci.skip -f origin main", "deny", FORCE_MAIN],
+
+  ["timeout 5 git reset --hard", "deny", RESET_HARD],
+  ["timeout 5s git push -f origin main", "deny", FORCE_MAIN],
+  ["timeout -s KILL 5 git reset --hard", "deny", RESET_HARD],
+  ["timeout -k 2 10 git reset --hard", "deny", RESET_HARD],
+  ["timeout --signal KILL 5 git reset --hard", "deny", RESET_HARD],
+  ["timeout 5 npm test", null],
+  ["nice git reset --hard", "deny", RESET_HARD],
+  ["nice -n 10 git push -f origin main", "deny", FORCE_MAIN],
+  ["nice -10 git reset --hard", "deny", RESET_HARD],
+  ["nohup git reset --hard", "deny", RESET_HARD],
+  ["doas git reset --hard", "deny", RESET_HARD],
+  ["doas -u root git reset --hard", "deny", RESET_HARD],
+  ["xargs git reset --hard", "deny", RESET_HARD],
+  ["echo x | xargs -I{} git reset --hard", "deny", RESET_HARD],
+  ["echo x | xargs -I {} git reset --hard", "deny", RESET_HARD],
+  ["echo x | xargs -n 1 -P 4 git push -f origin main", "deny", FORCE_MAIN],
+  ["xargs -0 sh -c 'git reset --hard'", "deny", RESET_HARD],
+  ["watch -n 5 git reset --hard", "deny", RESET_HARD],
+  ["stdbuf -oL git reset --hard", "deny", RESET_HARD],
+  ["stdbuf -o L git reset --hard", "deny", RESET_HARD],
+  ["find . -name x -exec git reset --hard \\;", "deny", RESET_HARD],
+  ["find . -name x -exec git reset --hard ';'", "deny", RESET_HARD],
+  ["find . -execdir git reset --hard {} +", "deny", RESET_HARD],
+  ["find . -ok git push -f origin main \\;", "deny", FORCE_MAIN],
+  ["find . -exec rm -rf / \\;", "deny", DELETE_ROOT],
+  ["find . -exec sh -c 'git reset --hard' \\;", "deny", RESET_HARD],
+  ["find . -exec echo hi \\; -exec git reset --hard \\;", "deny", RESET_HARD],
+  ["find . \\( -name a -o -name b \\) -exec git reset --hard \\;", "deny", RESET_HARD],
+  ["find . -exec echo hi \\; -exec git status \\;", null],
+  ["find . -name x -exec echo {} \\;", null],
+  ["find . -name x -print", null],
+  ["xargs echo", null],
+  ["watch -n 5 date", null],
+
+  ['echo "$(git reset --hard)"', "deny", RESET_HARD],
+  ['echo "it\'s $(git reset --hard)"', "deny", RESET_HARD],
+  ['echo "$(echo "$(git reset --hard)")"', "deny", RESET_HARD],
+  ['echo "x $(echo ok) $(git push -f origin main) y"', "deny", FORCE_MAIN],
+  ["git commit $(echo x) --no-verify", "deny", NO_VERIFY],
+  ['echo "$(git status)"', null],
+  ["echo '$(git reset --hard)'", null],
+  ['git commit -m "$(cat <<\'EOF\'\nfix: avoid git reset --hard in docs\nEOF\n)"', null],
+  ['git commit -m "$(cat <<\'EOF\'\ngit reset --hard is dangerous\nEOF\n)"', null],
+  ['git commit -m "$(cat <<\'EOF\'\nfix: don\'t touch it (see #12)\nEOF\n)"', null],
+  ['git commit -m "$(cat <<EOF\ngit reset --hard in docs\nEOF\n)"', null],
+  ['git commit -m "$(cat <<-EOF\n\tgit reset --hard in docs\n\tEOF\n)"', null],
+  ['git commit -m "$(cat <<"EOF"\ngit push -f origin main\nEOF\n)"', null],
+  ['git commit -m "$(cat <<\'EOF\'\nwip\nEOF\n)" --no-verify', "deny", NO_VERIFY],
+  ["cat <<EOF\ngit push -f origin main\nEOF", null],
+  ["cat <<'EOF'\ngit push -f origin main\nEOF", null],
+  ['cat <<"EOF"\ngit push -f origin main\nEOF', null],
+  ["cat <<-EOF\n\tgit push -f origin main\n\tEOF", null],
+  ["cat << 'EOF'\ngit reset --hard\nEOF", null],
+  ["cat <<EOF\r\ngit reset --hard\r\nEOF\r\n", null],
+  ["cat <<A <<B\none\nA\ngit reset --hard\nB", null],
+  ["cat <<EOF\nx\nEOF\ngit reset --hard", "deny", RESET_HARD],
+  ["cat <<EOF && git reset --hard\nx\nEOF", "deny", RESET_HARD],
+  ["cat <<EOF\ngit reset --hard", "deny", RESET_HARD],
+  ["echo $((1<<2))\ngit reset --hard", "deny", RESET_HARD],
+  ["cat <<EOF\n$(git reset --hard)\nEOF", "deny", RESET_HARD],
+  ["cat <<'EOF'\n$(git reset --hard)\nEOF", null],
+
+  ["echo 'git reset --hard' | bash", "deny", RESET_HARD],
+  ["echo 'hello' | bash", null],
+  ["echo git reset --hard | sh", "deny", RESET_HARD],
+  ['printf "%s\\n" "git push -f origin main" | sh', "deny", FORCE_MAIN],
+  ["echo 'git reset --hard' | zsh -s", "deny", RESET_HARD],
+  ["echo 'git reset --hard' | tee x | sh", "deny", RESET_HARD],
+  ["echo 'git reset --hard' | pwsh", "deny", RESET_HARD],
+  ["echo 'git reset --hard' | pwsh -NoProfile", "deny", RESET_HARD],
+  ['echo "git reset --hard" | cmd', "deny", RESET_HARD],
+  ["echo 'git reset --hard' | bash -c 'echo ok'", null],
+  ["echo 'git reset --hard' | pwsh -File x.ps1", null],
+  ['echo "git reset --hard" | cmd /c echo ok', null],
+  ["echo 'git reset --hard' | cat", null],
+  ["echo 'git reset --hard' > notes.txt", null],
+  ["echo 'git reset --hard'; bash", null],
+  ["echo 'git reset --hard' && bash", null],
+  ["echo 'a' | cat | bash", null],
+  ["iex 'git reset --hard'", "deny", RESET_HARD],
+  ['Invoke-Expression "git reset --hard"', "deny", RESET_HARD],
+  ["Invoke-Expression -Command 'git reset --hard'", "deny", RESET_HARD],
+  ["'git reset --hard' | iex", "deny", RESET_HARD],
+  ["iex 'echo ok'", null],
+  ["bash <<< 'git push -f origin main'", "deny", FORCE_MAIN],
+  ['bash <<< "git reset --hard"', "deny", RESET_HARD],
+  ["bash <<< 'echo ok'", null],
+  ["cat <<< 'git reset --hard'", null],
+  ["bash <<'EOF'\ngit reset --hard\nEOF", "deny", RESET_HARD],
+  ["bash <<'EOF'\necho ok\nEOF", null],
+  ["cat <<EOF | bash\ngit reset --hard\nEOF", "deny", RESET_HARD],
+
+  ["git push --mirror", "force_ask", MIRROR],
+  ["git push --mirror origin", "force_ask", MIRROR],
+  ["git push origin --mirror", "force_ask", MIRROR],
+  ["git push origin --delete main", "deny", DELETE_MAIN],
+  ["git push --delete origin main", "deny", DELETE_MAIN],
+  ["git push origin -d master", "deny", DELETE_MAIN],
+  ["git push origin :main", "deny", DELETE_MAIN],
+  ["git push origin :refs/heads/master", "deny", DELETE_MAIN],
+  ["git push origin --delete feature/x", null],
+  ["git push origin -d feature/x", null],
+  ["git push origin :feature/x", null],
+  ["git push origin --delete main-fix", null],
+
+  ["Get-ChildItem | ForEach-Object { git reset --hard }", "deny", RESET_HARD],
+  ["& {git reset --hard}", "deny", RESET_HARD],
+  ["& { git reset --hard}", "deny", RESET_HARD],
+  ["Get-ChildItem | % {git reset --hard}", "deny", RESET_HARD],
+  ["ForEach-Object -Process {git -C $_.FullName reset --hard}", "deny", RESET_HARD],
+  ["if ($x) {git push -f origin main}", "deny", FORCE_MAIN],
+  ["foreach ($d in $dirs) { Push-Location $d; git reset --hard}", "deny", RESET_HARD],
+  ["function Reset-All {git reset --hard}", "deny", RESET_HARD],
+  ['pwsh -Command "& {git reset --hard}"', "deny", RESET_HARD],
+  ["$sb={git reset --hard}; & $sb", "deny", RESET_HARD],
+  ["Get-ChildItem | ForEach-Object{ git reset --hard }", "deny", RESET_HARD],
+  ["git log @{u}..HEAD", null],
+  ["echo {a,b}", null],
+  ["$h = @{a=1; b=2}", null],
+  ["xargs -I {} git -C {} status", null],
+  ["1..3 | ForEach-Object { git push --force origin main }", "deny", FORCE_MAIN],
+  ["try { git reset --hard } catch { }", "deny", RESET_HARD],
+  ["Invoke-Command { git reset --hard }", "deny", RESET_HARD],
+  [". { git reset --hard }", "deny", RESET_HARD],
+  ["$sb = { git reset --hard }; & $sb", "deny", RESET_HARD],
+  ['powershell -c "Get-ChildItem | % { git reset --hard }"', "deny", RESET_HARD],
+  ["if ($x) { git status } else { git reset --hard }", "deny", RESET_HARD],
+  ["{ git reset --hard; }", "deny", RESET_HARD],
+  ["{ git reset --hard;}", "deny", RESET_HARD],
+  ["f() { git push -f origin main; }", "deny", FORCE_MAIN],
+  ["git submodule foreach git reset --hard", "deny", RESET_HARD],
+  ["git submodule foreach --recursive git reset --hard", "deny", RESET_HARD],
+  ["git submodule foreach -q 'git reset --hard'", "deny", RESET_HARD],
+  ["git submodule foreach --quiet --recursive git push -f origin main", "deny", FORCE_MAIN],
+  ["git submodule --quiet foreach git commit -n -m x", "deny", NO_VERIFY],
+  ['git -C /repo submodule foreach "git reset --hard"', "deny", RESET_HARD],
+  ["git submodule foreach 'git clean -fdx'", "force_ask", CLEAN_FORCE],
+  ["git submodule foreach --recursive git clean -fd", "force_ask", CLEAN_FORCE],
+  ["git submodule foreach git status", null],
+  ["git submodule foreach 'echo reset --hard'", null],
+  ["git submodule update --init --recursive", null],
+  ["git reset HEAD@{1}", null],
+  ["git rev-parse @{u}", null],
+  ["find . -name '*.tmp' -exec rm {} +", null],
+  ["echo ${var}", null],
+  ["$h = @{ a = 1 }", null],
+  ["git log --format=%H -n 1", null],
+  ["Get-ChildItem | ForEach-Object { Write-Host $_.Name }", null],
+
+  ['git commit -m "Block \\`git push --force origin main\\`"', null],
+  ['gh pr create --body "Stops \\`git reset --hard\\` from running"', null],
+  ["cat <<EOF > a.md\nRun \\`git reset --hard\\` never\nEOF", null],
+  ["cat <<EOF > a.md\nRun `git reset --hard` never\nEOF", "deny", RESET_HARD],
+  ["git commit -m x ^\n--no-verify", "deny", NO_VERIFY],
+  ["git commit -m x `\n--no-verify", "deny", NO_VERIFY],
+  ["git reset ^\n--hard", "deny", RESET_HARD],
+  ["find . -type d -exec git -C {} reset --hard \\;", "deny", RESET_HARD],
+  ["find . -name .git -execdir git -C {} push -f origin main \\;", "deny", FORCE_MAIN],
+  ["xargs -I{} git -C {} reset --hard", "deny", RESET_HARD],
+  ["git -C {} reset --hard", "deny", RESET_HARD],
+  ['sh -c "echo \\`git reset --hard\\`"', "deny", RESET_HARD],
+  ['bash -c "x=\\$(git reset --hard)"', "deny", RESET_HARD],
+  ['bash -c "echo \\$(git push -f origin main)"', "deny", FORCE_MAIN],
+
+  ["npm test", null],
+  ["", null],
+  ["   ", null],
+];
+
+for (const [command, decision, reason] of ROWS) {
+  test(`evaluateCommand ${JSON.stringify(command)} is ${decision}`, () => {
+    const result = evaluateCommand(command);
+    if (decision === null) {
+      assert.equal(result, null);
+      return;
+    }
+    assert.ok(result, `expected ${decision}, got null`);
+    assert.equal(result.decision, decision);
+    assert.ok(
+      result.reason.includes(reason),
+      `reason ${JSON.stringify(result.reason)} should include ${JSON.stringify(reason)}`,
+    );
+  });
+}
+
+for (const [label, input] of [["undefined", undefined], ["null", null], ["a number", 42], ["an object", {}], ["an array", []]]) {
+  test(`evaluateCommand ignores ${label} as input`, () => {
+    assert.equal(evaluateCommand(input), null);
+  });
+}
+
+const MALFORMED = [
+    'echo "git reset --hard',
+    "echo 'git reset --hard",
+    "git reset --hard \\",
+    "git commit -m x \\",
+    ";;",
+    "| git status",
+    "&&",
+    "git -C",
+    "git -c",
+    "git --config-env",
+    "git push -f origin",
+    "bash -c",
+    "pwsh -Command",
+    "cmd /c",
+    "sudo",
+    "sudo -u",
+    "()",
+    "$(",
+    "\n\n",
+    "rm",
+    "rm -",
+    "rm -rf",
+    "rm --",
+    "Remove-Item -",
+    "Remove-Item -Path",
+    "Remove-Item -Recurse:",
+    "Remove-Item -Path:",
+    "rd /s",
+    "del /",
+    "node scripts/ignis-broker.mjs",
+    "node ignis-broker.mjs trust",
+    "rm -rf ~/{",
+    "rm -rf $(",
+];
+
+for (const command of MALFORMED) {
+  test(`evaluateCommand does not throw on malformed ${JSON.stringify(command)}`, () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = evaluateCommand(command);
+    });
+    assert.ok(
+      result === null || result.decision === "deny" || result.decision === "force_ask",
+      `bad result ${JSON.stringify(result)}`,
+    );
+  });
+}
+
+for (const [command, decision] of [
+  ["git clean -fd && git reset --hard", "deny"],
+  ["git reset --hard && git clean -fd", "deny"],
+  ["npm test && git clean -fd", "force_ask"],
+  ["git push -f origin feat/a ; git push -f origin main", "deny"],
+]) {
+  test(`evaluateCommand returns ${decision} as the strongest verdict of ${JSON.stringify(command)}`, () => {
+    assert.equal(evaluateCommand(command).decision, decision);
+  });
+}
+
+for (const command of ["git push origin --delete main", "git push origin -d master", "git push origin :main"]) {
+  test(`evaluateCommand denies ${JSON.stringify(command)} with the exact reason`, () => {
+    assert.deepEqual(evaluateCommand(command), { decision: "deny", reason: DELETE_MAIN });
+  });
+}
+
+function nestShell(command, depth) {
+  let nested = command;
+  for (let level = 0; level < depth; level += 1) {
+    nested = `sh -c "${nested.replace(/[\\"]/g, "\\$&")}"`;
+  }
+  return nested;
+}
+
+test("evaluateCommand asks before analysing deeply nested shell wrappers", () => {
+  const result = evaluateCommand(nestShell("git status", 12));
+  assert.equal(result.decision, "force_ask");
+  assert.match(result.reason, /deeply nested shell wrappers/);
+});
+
+test("evaluateCommand still denies a blocked command inside shallow shell wrappers", () => {
+  assert.equal(evaluateCommand(nestShell("git reset --hard", 3)).decision, "deny");
+});
+
+test("evaluateCommand asks before analysing an oversized command line", () => {
+  const result = evaluateCommand("a ".repeat(2_500_000));
+  assert.equal(result.decision, "force_ask");
+  assert.match(result.reason, /oversized command line/);
+});
+
+function runCommand(commandLine) {
+  return runHook("hooks/pre-tool-use.mjs", {
+    toolCall: { name: "run_command", args: { CommandLine: commandLine } },
+  });
+}
+
+for (const command of [
+  'git commit -m "wip" --no-verify',
+  "git push --force origin main",
+  "git reset --hard HEAD~1",
+  "git -C /repo reset --hard origin/main",
+  "git commit -nm x",
+  "git -c core.hooksPath=/dev/null commit -m x",
+  "rm -fr /",
+  "rm -r -f /",
+  "rm -rf E:\\ && echo done",
+  "Remove-Item -Force -Recurse C:\\",
+  "rm -rf ~",
+  "Remove-Item -Recurse -Force $HOME",
+  "rd /s /q C:\\",
+]) {
+  test(`pre-tool-use denies ${JSON.stringify(command)} with the Blocked reason`, () => {
+    const out = runCommand(command);
+    assert.equal(out.decision, "deny");
+    assert.match(out.reason, /^Blocked by ignis-swarm: /);
+  });
+}
+
+for (const command of [
+  "git push --force-with-lease origin feat/a",
+  "git push -f origin feature/main-fix",
+  "git clean -fdx",
+  "node scripts/ignis-broker.mjs trust",
+]) {
+  test(`pre-tool-use asks before ${JSON.stringify(command)}`, () => {
+    const out = runCommand(command);
+    assert.equal(out.decision, "force_ask");
+    assert.match(out.reason, /requires explicit user confirmation/);
+  });
+}
+
+for (const command of ["npm test", 'echo "git reset --hard"', "git commit -m \"don't use --no-verify\""]) {
+  test(`pre-tool-use allows ${JSON.stringify(command)}`, () => {
+    assert.deepEqual(runCommand(command), { decision: "allow" });
+  });
+}

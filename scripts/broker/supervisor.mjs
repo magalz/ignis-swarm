@@ -1,9 +1,10 @@
 import path from "node:path";
-import { BrokerError, McpHttpAdapter, McpStdioAdapter, tryCliFallback } from "./adapters.mjs";
+import { BrokerError, McpHttpAdapter, McpStdioAdapter, redactSecrets, tryCliFallback } from "./adapters.mjs";
 import { BROKER_VERSION, resolveConfig, resolveRepoRoot } from "./config.mjs";
 import { cleanupExpiredSpills, truncateContentBlocks } from "./spill.mjs";
 
 const MAX_FALLBACK_EVENTS = 32;
+const MAX_SWEEP_ERRORS = 10;
 
 function poolKeyString(candidate, cwd) {
   let scope = "global";
@@ -24,10 +25,62 @@ function poolKeyString(candidate, cwd) {
   };
 }
 
+function sanitizeError(err, configs) {
+  const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+  let message = bErr.message;
+  for (const cfg of configs) message = redactSecrets(message, cfg);
+  if (message === bErr.message) return bErr;
+  return new BrokerError(bErr.kind, message);
+}
+
 function compactSummary(desc) {
   const single = String(desc || "").replace(/\s+/g, " ").trim();
   const first = (single.split(". ")[0] || single).trim();
   return first.length <= 140 ? first : `${first.slice(0, 137)}...`;
+}
+
+function routeMeta({ server, source, idx, primarySource, localError, cwd, retried, truncated, spillPath }) {
+  const fallbackFrom =
+    idx > 0 ? primarySource : localError && source === "global" ? "local" : null;
+  return {
+    server,
+    source,
+    ...(fallbackFrom ? { fallbackFrom } : {}),
+    ...(localError ? { localError } : {}),
+    ...(cwd ? { cwd } : {}),
+    retried,
+    truncated,
+    ...(spillPath ? { spillPath } : {}),
+  };
+}
+
+function fallbackEvent(server, from, to, reason, cwd) {
+  return {
+    ts: String(Math.floor(Date.now() / 1000)),
+    server,
+    from,
+    to,
+    reason,
+    ...(cwd ? { cwd } : {}),
+  };
+}
+
+function summarizeServers(candidates, poolSnap) {
+  const servers = [];
+  for (const [name, chain] of candidates.entries()) {
+    const primary = chain[0];
+    const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
+    servers.push({
+      name,
+      primarySource: primary.source,
+      hasGlobalFallback: chain.length > 1,
+      perWorkspace: primary.config.perWorkspace,
+      transport: primary.config.transport,
+      state: activeWorkspaces > 0 ? "connected" : "idle",
+      activeWorkspaces,
+    });
+  }
+  return servers;
 }
 
 export class Supervisor {
@@ -38,7 +91,9 @@ export class Supervisor {
     this.startedAt = Date.now();
     this.pool = new Map();
     this.pendingConnects = new Map();
+    this.retiredEntries = new Set();
     this.recentFallbacks = [];
+    this.sweepErrors = [];
   }
 
   async _connectCandidate(candidate, defaults, cwd) {
@@ -62,6 +117,7 @@ export class Supervisor {
         cwd: effectiveCwd,
         startupTimeoutMs,
         requestTimeoutMs,
+        redact: cfg,
       });
     }
 
@@ -74,42 +130,113 @@ export class Supervisor {
         headers: cfg.headers,
         startupTimeoutMs,
         requestTimeoutMs,
+        redact: cfg,
       });
     }
 
     throw new BrokerError("config", `unsupported transport \`${cfg.transport}\``);
   }
 
-  async _evictLruWorkspaceIfNeeded(maxInstances) {
+  async _evictLruWorkspaceIfNeeded(maxInstances, keyInfo) {
     if (!maxInstances || maxInstances <= 0) return;
-    const wsEntries = [...this.pool.entries()].filter(([, e]) => e.perWorkspace);
-    if (wsEntries.length < maxInstances) return;
-    wsEntries.sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-    const [oldestKey, oldest] = wsEntries[0];
-    this.pool.delete(oldestKey);
-    await oldest.adapter.shutdown();
+    const siblings = [...this.pool.entries()].filter(
+      ([, e]) => e.perWorkspace && e.server === keyInfo.server && e.source === keyInfo.source
+    );
+    const idle = siblings.filter(([, e]) => e.inFlight === 0).sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    let excess = siblings.length - maxInstances + 1;
+    while (excess > 0 && idle.length > 0) {
+      const [, entry] = idle.shift();
+      await this._evictEntry(entry);
+      excess -= 1;
+    }
+  }
+
+  async _tracked(entry, fn) {
+    try {
+      return await fn(entry.adapter);
+    } finally {
+      await this._release(entry);
+    }
+  }
+
+  async _release(entry) {
+    entry.inFlight -= 1;
+    entry.lastUsed = Date.now();
+    if (!entry.retired || entry.inFlight > 0) return;
+    try {
+      await this._drain(entry);
+    } catch (err) {
+      this._recordSweepError(err, [entry.redact], entry);
+    }
+  }
+
+  _retire(entry) {
+    if (this.pool.get(entry.key) === entry) this.pool.delete(entry.key);
+    entry.retired = true;
+    this.retiredEntries.add(entry);
+  }
+
+  _drain(entry, force = false) {
+    if (entry.closed) return Promise.resolve();
+    if (entry.draining) return entry.draining;
+    if (entry.inFlight > 0 && !force) return Promise.resolve();
+    entry.draining = (async () => {
+      try {
+        await entry.adapter.shutdown();
+        entry.closed = true;
+        this.retiredEntries.delete(entry);
+      } finally {
+        entry.draining = null;
+      }
+    })();
+    return entry.draining;
+  }
+
+  _recordSweepError(err, configs, entry) {
+    const message = sanitizeError(err, configs).message;
+    this.sweepErrors.push({
+      ts: String(Math.floor(Date.now() / 1000)),
+      ...(entry ? { server: entry.server, scope: entry.scope } : {}),
+      message,
+    });
+    if (this.sweepErrors.length > MAX_SWEEP_ERRORS) this.sweepErrors.shift();
   }
 
   async _getOrConnect(keyInfo, candidate, defaults, cwd) {
     const configDigest = JSON.stringify(candidate.config);
     const existing = this.pool.get(keyInfo.key);
     if (existing) {
-      if (existing.configDigest === configDigest && (await existing.adapter.isAlive())) {
+      existing.inFlight += 1;
+      let usable;
+      try {
+        usable = existing.configDigest === configDigest && (await existing.adapter.isAlive());
+      } catch (err) {
+        await this._release(existing);
+        throw err;
+      }
+      if (usable) {
         existing.lastUsed = Date.now();
         return existing;
       }
-      this.pool.delete(keyInfo.key);
-      await existing.adapter.shutdown();
+      this._retire(existing);
+      await this._release(existing);
+      const replacement = this.pool.get(keyInfo.key);
+      if (replacement && replacement !== existing) {
+        return this._getOrConnect(keyInfo, candidate, defaults, cwd);
+      }
     }
 
     const inflight = this.pendingConnects.get(keyInfo.key);
     if (inflight) {
-      return inflight;
+      inflight.leases += 1;
+      if (inflight.entry) inflight.entry.inFlight += 1;
+      return inflight.promise;
     }
 
-    const connectPromise = (async () => {
+    const pending = { entry: null, leases: 1, promise: null };
+    pending.promise = (async () => {
       if (candidate.config.perWorkspace) {
-        await this._evictLruWorkspaceIfNeeded(defaults.maxWorkspaceInstances);
+        await this._evictLruWorkspaceIfNeeded(defaults.maxWorkspaceInstances, keyInfo);
       }
 
       const adapter = await this._connectCandidate(candidate, defaults, cwd);
@@ -117,29 +244,31 @@ export class Supervisor {
         ...keyInfo,
         adapter,
         lastUsed: Date.now(),
+        inFlight: pending.leases,
+        redact: candidate.config,
         cachedTools: null,
         perWorkspace: candidate.config.perWorkspace,
         configDigest,
       };
+      pending.entry = entry;
       this.pool.set(keyInfo.key, entry);
       return entry;
     })();
 
-    this.pendingConnects.set(keyInfo.key, connectPromise);
+    this.pendingConnects.set(keyInfo.key, pending);
     try {
-      return await connectPromise;
+      return await pending.promise;
     } finally {
-      if (this.pendingConnects.get(keyInfo.key) === connectPromise) {
+      if (this.pendingConnects.get(keyInfo.key) === pending) {
         this.pendingConnects.delete(keyInfo.key);
       }
     }
   }
 
-  async _evictKey(key) {
-    const entry = this.pool.get(key);
-    if (!entry) return false;
-    this.pool.delete(key);
-    await entry.adapter.shutdown();
+  async _evictEntry(entry) {
+    if (this.pool.get(entry.key) !== entry) return false;
+    this._retire(entry);
+    await this._drain(entry);
     return true;
   }
 
@@ -164,23 +293,18 @@ export class Supervisor {
 
       if (existing?.cachedTools && existing.configDigest === configDigest && (await existing.adapter.isAlive())) {
         existing.lastUsed = Date.now();
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
         return {
           tools: existing.cachedTools,
-          meta: {
+          meta: routeMeta({
             server: serverName,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(cwd ? { cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd,
             retried: false,
             truncated: false,
-          },
+          }),
         };
       }
 
@@ -189,48 +313,38 @@ export class Supervisor {
         let entry = await this._getOrConnect(keyInfo, candidate, defaults, cwd);
         let tools;
         try {
-          tools = await entry.adapter.listTools();
+          tools = await this._tracked(entry, (adapter) => adapter.listTools());
         } catch (err) {
           if (err instanceof BrokerError && err.isRetryable() && defaults.retryOnTransportError) {
-            await this._evictKey(keyInfo.key);
+            if (err.kind !== "timeout") await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, defaults, cwd);
-            tools = await entry.adapter.listTools();
+            tools = await this._tracked(entry, (adapter) => adapter.listTools());
           } else {
             throw err;
           }
         }
         entry.cachedTools = tools;
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
         return {
           tools,
-          meta: {
+          meta: routeMeta({
             server: serverName,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(cwd ? { cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd,
             retried,
             truncated: false,
-          },
+          }),
         };
       } catch (err) {
-        const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+        const bErr = sanitizeError(err, [candidate.config]);
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
-          this._recordFallback({
-            ts: String(Math.floor(Date.now() / 1000)),
-            server: serverName,
-            from: candidate.source,
-            to: chain[idx + 1].source,
-            reason: bErr.message,
-            ...(cwd ? { cwd } : {}),
-          });
+          this._recordFallback(
+            fallbackEvent(serverName, candidate.source, chain[idx + 1].source, bErr.message, cwd)
+          );
           lastError = bErr;
           continue;
         }
@@ -259,25 +373,11 @@ export class Supervisor {
   }
 
   async list(req = {}) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     if (!req.server) {
       const poolSnap = await this._poolSnapshot();
-      const servers = [];
-      for (const [name, chain] of resolved.candidates.entries()) {
-        const primary = chain[0];
-        const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
-        servers.push({
-          name,
-          primarySource: primary.source,
-          hasGlobalFallback: chain.length > 1,
-          perWorkspace: primary.config.perWorkspace,
-          transport: primary.config.transport,
-          state: activeWorkspaces > 0 ? "connected" : "idle",
-          activeWorkspaces,
-        });
-      }
       return {
-        servers,
+        servers: summarizeServers(resolved.candidates, poolSnap),
         ...(resolved.localConfigError ? { localConfigError: resolved.localConfigError } : {}),
       };
     }
@@ -307,7 +407,7 @@ export class Supervisor {
   }
 
   async describe(req) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const chain = resolved.candidates.get(req.server);
     if (!chain) {
       throw new BrokerError("server_not_found", `server not found: ${req.server}`);
@@ -327,7 +427,7 @@ export class Supervisor {
   }
 
   async call(req) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const chain = resolved.candidates.get(req.server);
     if (!chain) {
       throw new BrokerError("server_not_found", `server not found: ${req.server}`);
@@ -350,17 +450,17 @@ export class Supervisor {
         let entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
         let res;
         try {
-          res = await entry.adapter.callTool(req.tool, req.arguments || {});
+          res = await this._tracked(entry, (adapter) => adapter.callTool(req.tool, req.arguments || {}));
         } catch (err) {
           if (
             err instanceof BrokerError &&
-            err.isRetryable() &&
+            err.kind === "transport" &&
             resolved.defaults.retryOnTransportError
           ) {
-            await this._evictKey(keyInfo.key);
+            await this._evictEntry(entry);
             retried = true;
             entry = await this._getOrConnect(keyInfo, candidate, resolved.defaults, req.cwd);
-            res = await entry.adapter.callTool(req.tool, req.arguments || {});
+            res = await this._tracked(entry, (adapter) => adapter.callTool(req.tool, req.arguments || {}));
           } else {
             throw err;
           }
@@ -373,39 +473,30 @@ export class Supervisor {
           spillDir,
           Boolean(req.full)
         );
-        const fallbackFrom =
-          idx > 0
-            ? primarySource
-            : localError && candidate.source === "global"
-              ? "local"
-              : null;
 
         return {
           content: trunc.content,
           isError: res.isError,
-          meta: {
+          meta: routeMeta({
             server: req.server,
             source: candidate.source,
-            ...(fallbackFrom ? { fallbackFrom } : {}),
-            ...(localError ? { localError } : {}),
-            ...(req.cwd ? { cwd: req.cwd } : {}),
+            idx,
+            primarySource,
+            localError,
+            cwd: req.cwd,
             retried,
             truncated: trunc.truncated,
-            ...(trunc.spillPath ? { spillPath: trunc.spillPath } : {}),
-          },
+            spillPath: trunc.spillPath,
+          }),
         };
       } catch (err) {
-        const bErr = err instanceof BrokerError ? err : new BrokerError("transport", err.message);
+        const bErr = sanitizeError(err, [candidate.config]);
+        if (bErr.kind === "timeout") throw bErr;
         if (candidate.source === "local") localError = bErr.message;
         if (idx + 1 < chain.length && bErr.isFailoverEligible()) {
-          this._recordFallback({
-            ts: String(Math.floor(Date.now() / 1000)),
-            server: req.server,
-            from: candidate.source,
-            to: chain[idx + 1].source,
-            reason: bErr.message,
-            ...(req.cwd ? { cwd: req.cwd } : {}),
-          });
+          this._recordFallback(
+            fallbackEvent(req.server, candidate.source, chain[idx + 1].source, bErr.message, req.cwd)
+          );
           lastError = bErr;
           continue;
         }
@@ -420,22 +511,22 @@ export class Supervisor {
     if (lastError && lastError.isFailoverEligible() && cliFallback) {
       const timeoutMs = chain[0].config.requestTimeoutMs ?? resolved.defaults.requestTimeoutMs;
       const effectiveCwd = req.cwd ? resolveRepoRoot(req.cwd) : undefined;
-      const cliRes = await tryCliFallback(
-        cliFallback,
-        req.tool,
-        req.arguments || {},
-        effectiveCwd,
-        timeoutMs
-      );
+      let cliRes;
+      try {
+        cliRes = await tryCliFallback(
+          cliFallback,
+          req.tool,
+          req.arguments || {},
+          effectiveCwd,
+          timeoutMs
+        );
+      } catch (err) {
+        throw sanitizeError(err, chain.map((c) => c.config));
+      }
       if (cliRes) {
-        this._recordFallback({
-          ts: String(Math.floor(Date.now() / 1000)),
-          server: req.server,
-          from: chain[chain.length - 1].source,
-          to: "cli_fallback",
-          reason: lastError.message,
-          ...(req.cwd ? { cwd: req.cwd } : {}),
-        });
+        this._recordFallback(
+          fallbackEvent(req.server, chain[chain.length - 1].source, "cli_fallback", lastError.message, req.cwd)
+        );
         const trunc = truncateContentBlocks(
           cliRes.content,
           maxBytes,
@@ -465,23 +556,8 @@ export class Supervisor {
   }
 
   async status(req = {}) {
-    const resolved = resolveConfig(this.brokerHome, req.cwd);
+    const resolved = resolveConfig(this.brokerHome, req.cwd, this.dataDir);
     const poolSnap = await this._poolSnapshot();
-    const servers = [];
-
-    for (const [name, chain] of resolved.candidates.entries()) {
-      const primary = chain[0];
-      const activeWorkspaces = poolSnap.filter((p) => p.server === name && p.alive).length;
-      servers.push({
-        name,
-        primarySource: primary.source,
-        hasGlobalFallback: chain.length > 1,
-        perWorkspace: primary.config.perWorkspace,
-        transport: primary.config.transport,
-        state: activeWorkspaces > 0 ? "connected" : "idle",
-        activeWorkspaces,
-      });
-    }
 
     return {
       pid: process.pid,
@@ -490,49 +566,85 @@ export class Supervisor {
       port: this.port,
       ...(resolved.localPath ? { localConfigPath: resolved.localPath } : {}),
       ...(resolved.localConfigError ? { localConfigError: resolved.localConfigError } : {}),
-      servers,
+      servers: summarizeServers(resolved.candidates, poolSnap),
       pool: poolSnap,
       recentFallbacks: [...this.recentFallbacks],
+      sweepErrors: [...this.sweepErrors],
     };
   }
 
   async restart(req = {}) {
     const targetScope = req.cwd ? resolveRepoRoot(req.cwd) : null;
     const toRemove = [];
-    for (const [key, entry] of this.pool.entries()) {
+    for (const entry of this.pool.values()) {
       const serverMatch = !req.server || entry.server === req.server;
       const scopeMatch = !targetScope || entry.scope === targetScope;
       if (serverMatch && scopeMatch) {
-        toRemove.push([key, entry]);
+        toRemove.push(entry);
       }
     }
-    for (const [key, entry] of toRemove) {
-      this.pool.delete(key);
-      await entry.adapter.shutdown();
+    let failure = null;
+    for (const entry of toRemove) {
+      this._retire(entry);
     }
+    for (const entry of toRemove) {
+      try {
+        await this._drain(entry, true);
+      } catch (err) {
+        failure ??= err;
+      }
+    }
+    if (failure) throw failure;
     return { evicted: toRemove.length };
   }
 
   async maintenanceSweep() {
+    let resolved;
     try {
-      const resolved = resolveConfig(this.brokerHome, null);
-      const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
-      const now = Date.now();
-      for (const [key, entry] of [...this.pool.entries()]) {
-        if (entry.perWorkspace && maxIdleMs > 0 && now - entry.lastUsed >= maxIdleMs) {
-          this.pool.delete(key);
-          await entry.adapter.shutdown();
-        }
+      resolved = resolveConfig(this.brokerHome, null, this.dataDir);
+    } catch (err) {
+      this._recordSweepError(err, []);
+      return;
+    }
+    const maxIdleMs = resolved.defaults.idleTimeoutSecs * 1000;
+    const now = Date.now();
+    for (const entry of [...this.retiredEntries]) {
+      try {
+        await this._drain(entry);
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
       }
+    }
+    for (const entry of [...this.pool.values()]) {
+      try {
+        if (
+          entry.perWorkspace &&
+          entry.inFlight === 0 &&
+          maxIdleMs > 0 &&
+          now - entry.lastUsed >= maxIdleMs
+        ) {
+          await this._evictEntry(entry);
+        }
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
+      }
+    }
+    try {
       cleanupExpiredSpills(path.join(this.dataDir, "spill"), resolved.defaults.spillTtlHours);
-    } catch {}
+    } catch (err) {
+      this._recordSweepError(err, []);
+    }
   }
 
   async shutdown() {
-    const entries = [...this.pool.values()];
-    this.pool.clear();
+    const entries = [...this.pool.values(), ...this.retiredEntries];
+    for (const entry of entries) this._retire(entry);
     for (const entry of entries) {
-      await entry.adapter.shutdown();
+      try {
+        await this._drain(entry, true);
+      } catch (err) {
+        this._recordSweepError(err, [entry.redact], entry);
+      }
     }
   }
 }

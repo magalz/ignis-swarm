@@ -2,23 +2,35 @@ import fs from "node:fs";
 import path from "node:path";
 import { brokerDataDir, brokerHome } from "../scripts/broker/config.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
+import { isInteractiveUserSession, readStdin, sanitizeConversationId } from "./lib.mjs";
 
 const DEFAULT_THRESHOLD_KB = 550;
 const COOLDOWN_BYTES = 150 * 1024;
-const COMPACT_MARKER_RE = /"(?:compact_boundary|compaction_boundary|isCompactSummary)"/;
+const CHECKPOINT_NEEDLE = Buffer.from('"CHECKPOINT"');
 
-function readStdin() {
+function isCheckpointLine(line) {
   try {
-    const raw = fs.readFileSync(0, "utf8").trim();
-    return raw ? JSON.parse(raw) : {};
+    return JSON.parse(line)?.type === "CHECKPOINT";
   } catch {
-    return {};
+    return false;
   }
 }
 
-function sanitizeConvId(id) {
-  const raw = typeof id === "string" && id.trim() ? id.trim() : "default";
-  return raw.replace(/[^a-zA-Z0-9._-]/g, "_");
+function findLastCheckpointEnd(buf) {
+  let lastEnd = 0;
+  let from = 0;
+  while (from < buf.length) {
+    const hit = buf.indexOf(CHECKPOINT_NEEDLE, from);
+    if (hit === -1) break;
+    const start = buf.lastIndexOf(0x0a, hit) + 1;
+    let nl = buf.indexOf(0x0a, hit);
+    if (nl === -1) nl = buf.length;
+    if (isCheckpointLine(buf.toString("utf8", start, nl))) {
+      lastEnd = nl < buf.length ? nl + 1 : buf.length;
+    }
+    from = nl + 1;
+  }
+  return lastEnd;
 }
 
 function measureActiveBytes(transcriptPath, thresholdBytes) {
@@ -42,18 +54,7 @@ function measureActiveBytes(transcriptPath, thresholdBytes) {
     return { activeBytes: stat.size, lastMarkerEnd: 0 };
   }
 
-  let lastMarkerEnd = 0;
-  let offset = 0;
-  while (offset < buf.length) {
-    let nl = buf.indexOf(0x0a, offset);
-    if (nl === -1) nl = buf.length;
-    const line = buf.subarray(offset, nl).toString("utf8");
-    if (COMPACT_MARKER_RE.test(line)) {
-      lastMarkerEnd = nl < buf.length ? nl + 1 : buf.length;
-    }
-    offset = nl + 1;
-  }
-
+  const lastMarkerEnd = findLastCheckpointEnd(buf);
   return { activeBytes: buf.length - lastMarkerEnd, lastMarkerEnd };
 }
 
@@ -93,11 +94,7 @@ function writeState(statePath, activeBytes, lastMarkerEnd) {
 
 function main() {
   const payload = readStdin();
-  if (
-    payload.isSubagent === true ||
-    payload.subagent === true ||
-    Boolean(payload.parentConversationId)
-  ) {
+  if (!isInteractiveUserSession(payload)) {
     process.stdout.write(JSON.stringify({}));
     return;
   }
@@ -127,7 +124,7 @@ function main() {
     return;
   }
 
-  const convId = sanitizeConvId(payload.conversationId);
+  const convId = sanitizeConversationId(payload.conversationId);
   const statePath = path.join(dataDir, `compact-watch-${convId}.json`);
   const state = readState(statePath);
 

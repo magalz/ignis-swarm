@@ -1,16 +1,31 @@
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveWindowsExecutable } from "./adapters.mjs";
-import { discoverMcpConfig } from "./config.mjs";
+import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
+import { describeServers, discoverLocalConfig, discoverMcpConfig } from "./config.mjs";
+import { parseJsonSafely, readTrustedLocalConfig } from "./trust.mjs";
 
 const VALID_TRACKER_KINDS = new Set(["none", "linear", "itsaplan", "github", "other"]);
 const VALID_REVIEW_STRATEGIES = new Set([
   "antigravity_gemini_only",
   "antigravity_first",
   "headless_always",
+]);
+
+const VALID_HEADLESS_BACKENDS = new Set(["claude", "codex"]);
+const STATE_KEYS = new Set([
+  "version",
+  "completed",
+  "skipped",
+  "completedAt",
+  "brokerManagedServers",
+  "tracker",
+  "trackers",
+  "memtrace",
+  "reviewRouting",
+  "compaction",
 ]);
 
 export function onboardingPath(dataDir) {
@@ -177,12 +192,94 @@ export function saveOnboardingState(dataDir, patch = {}) {
   }
 
   const next = normalizeState(merged);
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(onboardingPath(dataDir), JSON.stringify(next, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  writePrivateFileAtomic(onboardingPath(dataDir), JSON.stringify(next, null, 2));
   return next;
+}
+
+function oneOf(set) {
+  return `one of: ${[...set].join(", ")}`;
+}
+
+function validateTracker(entry, where) {
+  if (!isPlainObject(entry)) return `${where} must be an object`;
+  if (entry.kind !== undefined && !VALID_TRACKER_KINDS.has(entry.kind)) {
+    return `${where}.kind must be ${oneOf(VALID_TRACKER_KINDS)}`;
+  }
+  if (entry.mcpServer !== undefined && entry.mcpServer !== null && typeof entry.mcpServer !== "string") {
+    return `${where}.mcpServer must be a string or null`;
+  }
+  return null;
+}
+
+function validateSection(value, where, checks) {
+  if (value === undefined) return null;
+  if (!isPlainObject(value)) return `${where} must be an object`;
+  for (const [key, ok, expected] of checks) {
+    if (value[key] !== undefined && !ok(value[key])) return `${where}.${key} must be ${expected}`;
+  }
+  return null;
+}
+
+const isString = (v) => typeof v === "string";
+const isStringOrNull = (v) => v === null || typeof v === "string";
+const isBoolean = (v) => typeof v === "boolean";
+const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
+
+function firstInputError(input) {
+  for (const key of Object.keys(input)) {
+    if (!STATE_KEYS.has(key)) return `unknown key ${key} (known keys: ${[...STATE_KEYS].join(", ")})`;
+  }
+  const flat = [
+    ["version", isNumber, "a number"],
+    ["completed", isBoolean, "a boolean"],
+    ["skipped", isBoolean, "a boolean"],
+    ["completedAt", isStringOrNull, "a string or null"],
+    ["brokerManagedServers", (v) => Array.isArray(v) && v.every(isString), "an array of strings"],
+  ];
+  for (const [key, ok, expected] of flat) {
+    if (input[key] !== undefined && !ok(input[key])) return `${key} must be ${expected}`;
+  }
+  if (input.tracker !== undefined) {
+    const err = validateTracker(input.tracker, "tracker");
+    if (err) return err;
+  }
+  if (input.trackers !== undefined) {
+    if (!Array.isArray(input.trackers)) return "trackers must be an array of tracker objects";
+    for (const [i, entry] of input.trackers.entries()) {
+      const err = validateTracker(entry, `trackers[${i}]`);
+      if (err) return err;
+    }
+  }
+  return (
+    validateSection(input.memtrace, "memtrace", [["enabled", isBoolean, "a boolean"]]) ||
+    validateSection(input.reviewRouting, "reviewRouting", [
+      ["strategy", (v) => VALID_REVIEW_STRATEGIES.has(v), oneOf(VALID_REVIEW_STRATEGIES)],
+      [
+        "headlessBackend",
+        (v) => v === null || VALID_HEADLESS_BACKENDS.has(v),
+        `null or ${oneOf(VALID_HEADLESS_BACKENDS)}`,
+      ],
+      ["headlessModel", isStringOrNull, "a string or null"],
+      ["effort", isString, "a string"],
+    ]) ||
+    validateSection(input.compaction, "compaction", [["transcriptThresholdKb", isNumber, "a number"]])
+  );
+}
+
+export function parseOnboardingInput(text) {
+  const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  if (source.trim() === "") throw new Error("onboarding input is empty");
+  const input = parseJsonSafely(source);
+  if (!isPlainObject(input)) throw new Error("onboarding input must be a JSON object");
+  const problem = firstInputError(input);
+  if (problem) throw new Error(`invalid onboarding state: ${problem}`);
+  return input;
+}
+
+export function saveOnboardingInput(dataDir, input) {
+  const patch = { ...input };
+  if (patch.completed === undefined) patch.completed = patch.skipped !== true;
+  return saveOnboardingState(dataDir, patch);
 }
 
 export function skipOnboarding(dataDir) {
@@ -191,11 +288,7 @@ export function skipOnboarding(dataDir) {
 
 export function resetOnboarding(dataDir) {
   const next = defaultOnboardingState();
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(onboardingPath(dataDir), JSON.stringify(next, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  writePrivateFileAtomic(onboardingPath(dataDir), JSON.stringify(next, null, 2));
   return next;
 }
 
@@ -300,9 +393,24 @@ export function probeCodexModels(codexHome) {
   };
 }
 
-export function probeEnvironment(home, dataDir, fromMcpPath, codexHome) {
-  const sourcePath =
-    fromMcpPath || path.join(os.homedir(), ".gemini", "config", "mcp_config.json");
+export function defaultMcpSourcePath(fromFlag) {
+  return typeof fromFlag === "string"
+    ? fromFlag
+    : path.join(os.homedir(), ".gemini", "config", "mcp_config.json");
+}
+
+function probeLocalBrokerConfig(dataDir, cwd) {
+  const file = discoverLocalConfig(cwd);
+  if (!file) return null;
+  const read = readTrustedLocalConfig(dataDir, file);
+  if (read.error) {
+    return { path: read.path, trusted: false, servers: [], error: read.error.message };
+  }
+  return { path: read.path, trusted: read.status === "trusted", servers: describeServers(read.parsed) };
+}
+
+export function probeEnvironment(home, dataDir, fromMcpPath, codexHome, cwd) {
+  const sourcePath = defaultMcpSourcePath(fromMcpPath || undefined);
   return {
     onboarding: loadOnboardingState(dataDir),
     discoveredMcps: discoverMcpConfig(sourcePath, home),
@@ -312,240 +420,6 @@ export function probeEnvironment(home, dataDir, fromMcpPath, codexHome) {
       memtrace: detectCli("memtrace"),
     },
     codex: probeCodexModels(codexHome),
+    localBrokerConfig: probeLocalBrokerConfig(dataDir, cwd),
   };
-}
-
-export const BLIND_REVIEW_FALLBACK_TTL_MS = 10 * 60 * 1000;
-
-export function blindReviewStatePath(dataDir) {
-  return path.join(dataDir, "blind-review-state.json");
-}
-
-export function normalizeWorkspaceKey(dir) {
-  const resolved = path.resolve(dir);
-  let canonical = resolved;
-  try {
-    canonical = fs.realpathSync.native
-      ? fs.realpathSync.native(resolved)
-      : fs.realpathSync(resolved);
-  } catch {
-    canonical = resolved;
-  }
-  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
-}
-
-const BLIND_REVIEW_LOCK_TIMEOUT_MS = 2500;
-const BLIND_REVIEW_LOCK_STALE_MS = 5000;
-const BLIND_REVIEW_LOCK_RETRY_MS = 10;
-const LOCK_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
-
-function isSameOrAncestor(ancestor, descendant) {
-  if (ancestor === descendant) return true;
-  const prefix = ancestor.endsWith(path.sep) ? ancestor : `${ancestor}${path.sep}`;
-  return descendant.startsWith(prefix);
-}
-
-function tryEvictStaleLock(lockPath) {
-  const reclaimPath = `${lockPath}.reclaim`;
-  let reclaimAcquired = false;
-  try {
-    const rfd = fs.openSync(reclaimPath, "wx", 0o600);
-    try {
-      fs.writeFileSync(rfd, `${process.pid}\n`, "utf8");
-    } finally {
-      fs.closeSync(rfd);
-    }
-    reclaimAcquired = true;
-  } catch (err) {
-    if (err && err.code === "EEXIST") {
-      try {
-        const rStat = fs.statSync(reclaimPath);
-        if (Date.now() - rStat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
-          const rQuarantine = `${reclaimPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.stale`;
-          fs.renameSync(reclaimPath, rQuarantine);
-          try {
-            fs.unlinkSync(rQuarantine);
-          } catch {}
-        }
-      } catch {}
-    }
-    return false;
-  }
-
-  try {
-    let stat;
-    try {
-      stat = fs.statSync(lockPath);
-    } catch (err) {
-      return Boolean(err && err.code === "ENOENT");
-    }
-    if (Date.now() - stat.mtimeMs <= BLIND_REVIEW_LOCK_STALE_MS) {
-      return false;
-    }
-    const quarantine = `${lockPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.stale`;
-    try {
-      fs.renameSync(lockPath, quarantine);
-    } catch {
-      return false;
-    }
-    try {
-      const qStat = fs.statSync(quarantine);
-      if (Date.now() - qStat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS) {
-        fs.unlinkSync(quarantine);
-        return true;
-      }
-      try {
-        fs.linkSync(quarantine, lockPath);
-      } catch {}
-      try {
-        fs.unlinkSync(quarantine);
-      } catch {}
-      return false;
-    } catch {
-      try {
-        fs.unlinkSync(quarantine);
-      } catch {}
-      return false;
-    }
-  } finally {
-    if (reclaimAcquired) {
-      try {
-        fs.unlinkSync(reclaimPath);
-      } catch {}
-    }
-  }
-}
-
-function acquireBlindReviewLock(lockPath) {
-  const deadline = Date.now() + BLIND_REVIEW_LOCK_TIMEOUT_MS;
-  const token = `${process.pid}:${crypto.randomBytes(8).toString("hex")}\n`;
-  while (true) {
-    try {
-      const fd = fs.openSync(lockPath, "wx", 0o600);
-      try {
-        fs.writeFileSync(fd, token, "utf8");
-      } finally {
-        fs.closeSync(fd);
-      }
-      return token;
-    } catch (err) {
-      if (!err || err.code !== "EEXIST") throw err;
-      try {
-        const stat = fs.statSync(lockPath);
-        if (Date.now() - stat.mtimeMs > BLIND_REVIEW_LOCK_STALE_MS && tryEvictStaleLock(lockPath)) {
-          continue;
-        }
-      } catch (statErr) {
-        if (statErr && statErr.code === "ENOENT") continue;
-      }
-      if (Date.now() >= deadline) {
-        const timeoutErr = new Error(`timed out acquiring lock: ${lockPath}`);
-        timeoutErr.code = "ETIMEDOUT";
-        throw timeoutErr;
-      }
-      Atomics.wait(LOCK_SLEEP_VIEW, 0, 0, BLIND_REVIEW_LOCK_RETRY_MS);
-    }
-  }
-}
-
-function releaseBlindReviewLock(lockPath, token) {
-  try {
-    if (fs.readFileSync(lockPath, "utf8") === token) {
-      fs.unlinkSync(lockPath);
-    }
-  } catch {}
-}
-
-function readBlindReviewState(dataDir) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(blindReviewStatePath(dataDir), "utf8"));
-    if (raw && typeof raw === "object" && raw.workspaces && typeof raw.workspaces === "object") {
-      return raw;
-    }
-  } catch {
-    return { workspaces: {} };
-  }
-  return { workspaces: {} };
-}
-
-export function recordBlindReviewState(
-  dataDir,
-  cwd,
-  { fallbackToNative, reason = null, nowMs = Date.now() },
-) {
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const target = blindReviewStatePath(dataDir);
-  const lockPath = `${target}.lock`;
-  const lockToken = acquireBlindReviewLock(lockPath);
-  try {
-    const existing = readBlindReviewState(dataDir);
-    const workspaces = {};
-    for (const [key, entry] of Object.entries(existing.workspaces)) {
-      const ts = entry?.timestampMs;
-      if (Number.isFinite(ts) && nowMs - ts <= BLIND_REVIEW_FALLBACK_TTL_MS) {
-        workspaces[key] = entry;
-      }
-    }
-    workspaces[normalizeWorkspaceKey(cwd)] = {
-      fallbackToNative: Boolean(fallbackToNative),
-      timestampMs: nowMs,
-      reason,
-    };
-    const state = { workspaces };
-    const tmp = `${target}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-    const payload = `${JSON.stringify(state, null, 2)}\n`;
-    try {
-      fs.writeFileSync(tmp, payload, { encoding: "utf8", mode: 0o600 });
-      fs.renameSync(tmp, target);
-    } catch (err) {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {}
-      if (err && (err.code === "EPERM" || err.code === "EACCES")) {
-        fs.writeFileSync(target, payload, { encoding: "utf8", mode: 0o600 });
-      } else {
-        throw err;
-      }
-    }
-    return state;
-  } finally {
-    releaseBlindReviewLock(lockPath, lockToken);
-  }
-}
-
-export function hasFreshNativeFallback(dataDir, dirs, nowMs = Date.now()) {
-  const validDirs = (dirs ?? []).filter((dir) => typeof dir === "string" && dir.trim());
-  if (validDirs.length === 0) return false;
-  const { workspaces } = readBlindReviewState(dataDir);
-  const freshEntries = [];
-  for (const [storedKey, entry] of Object.entries(workspaces)) {
-    if (!storedKey || !storedKey.trim()) continue;
-    if (!entry || typeof entry.fallbackToNative !== "boolean") continue;
-    if (!Number.isFinite(entry.timestampMs)) continue;
-    const delta = nowMs - entry.timestampMs;
-    if (!(delta >= 0 && delta <= BLIND_REVIEW_FALLBACK_TTL_MS)) continue;
-    freshEntries.push({
-      key: normalizeWorkspaceKey(storedKey),
-      fallbackToNative: entry.fallbackToNative,
-      timestampMs: entry.timestampMs,
-    });
-  }
-  if (freshEntries.length === 0) return false;
-  return validDirs.every((dir) => {
-    const normDir = normalizeWorkspaceKey(dir);
-    let best = null;
-    for (const entry of freshEntries) {
-      if (!isSameOrAncestor(entry.key, normDir)) continue;
-      if (
-        !best ||
-        entry.key.length > best.key.length ||
-        (entry.key.length === best.key.length &&
-          (entry.timestampMs > best.timestampMs ||
-            (entry.timestampMs === best.timestampMs && !entry.fallbackToNative)))
-      ) {
-        best = entry;
-      }
-    }
-    return best?.fallbackToNative === true;
-  });
 }
