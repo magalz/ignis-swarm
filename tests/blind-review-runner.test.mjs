@@ -154,7 +154,7 @@ function withFixture(fn, { routing = headlessRouting(), makeRepo = createFeature
       assert.equal(record.headSha, head(dir));
       return record;
     };
-    const gateAllows = (...dirs) => reviewGateDecision(dataDir, dirs).allow;
+    const gateAllows = (...dirs) => reviewGateDecision(dataDir, dirs, { env: iso.env }).allow;
     const git = (args, dir = repo) => runGit(dir, args, { env: iso.env });
     return fn({ ...base, shimDir, repo, head, assertState, gateAllows, git });
   });
@@ -807,6 +807,16 @@ describe("blind-review runner: diff extraction", () => {
     });
   });
 
+  it("a fallback prints JSON even without --json", async () => {
+    await withFixture(async ({ repo, shimDir, git, run }) => {
+      fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
+      git(["add", "big.txt"]);
+      git(["commit", "-q", "-m", "big file"]);
+      const out = parseOut(run(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], { IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), IGNIS_REVIEW_MAX_DIFF_BYTES: "1024" }));
+      assert.equal(out.fallbackToNative, true);
+    });
+  });
+
   it("a diff above the size limit records a fallback state", async () => {
     await withFixture(async ({ repo, shimDir, git, run, assertState, gateAllows }) => {
       fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
@@ -831,7 +841,7 @@ describe("blind-review runner: diff extraction", () => {
   });
 
   it("a git failure falls back to native with the extraction failure as the reason", async () => {
-    await withFixture(async ({ iso, repo, shimDir, run }) => {
+    await withFixture(async ({ repo, shimDir, run }) => {
       const out = parseOut(run(jsonArgs(repo), {}, { noPath: shimDir }));
       assert.deepEqual({ useNative: out.useNative, fallbackToNative: out.fallbackToNative }, { useNative: true, fallbackToNative: true });
       assert.match(out.reason, /diff extraction failed/);
@@ -839,7 +849,7 @@ describe("blind-review runner: diff extraction", () => {
   });
 
   it("a git failure reports that no state could be recorded and writes none", async () => {
-    await withFixture(async ({ iso, repo, dataDir, shimDir, run }) => {
+    await withFixture(async ({ repo, dataDir, shimDir, run }) => {
       const res = run(jsonArgs(repo), {}, { noPath: shimDir });
       const out = parseOut(res);
       assert.ok(
