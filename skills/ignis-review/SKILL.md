@@ -35,7 +35,7 @@ Routes by `reviewRouting.strategy` in `~/.ignis-broker/onboarding.json` (set via
   `PreToolUse` blocks `invoke_subagent(TypeName: "blind-edge-hunter")` until `run-blind-review.mjs` records a fresh `fallbackToNative: true` marker; only then fall back to the native subagent.
 
 In all routing modes:
-1. Pass **only** the diff scope and repository path — **never** include implementation plan files, issue tracker notes, or author rationales. `run-blind-review.mjs --base <base-sha>` diffs from the merge-base of `<base-sha>` through the current working tree (committed and uncommitted tracked changes); for native `blind-edge-hunter`, pass the same scope (`<base-sha>...HEAD` plus any uncommitted tracked changes).
+1. Pass **only** the diff scope and repository path — **never** include implementation plan files, issue tracker notes, or author rationales. `run-blind-review.mjs --base <base-sha>` diffs from the merge-base of `<base-sha>` through the current working tree: committed, staged, unstaged and untracked non-ignored files. Native `blind-edge-hunter` only has `git diff`, which does not show untracked files: pass it `<base-sha>...HEAD` plus a second `git diff` with no range for uncommitted tracked changes, and name any untracked file in the scope.
 2. Require concrete proof (`file:line` + trace or read-only command output) for every `HIGH`/`MEDIUM` finding and post the verbatim verdict (`PASS | ISSUES`) onto the `/swarm` board.
 
 ### Reviewer B — `@acceptance-auditor` (Acceptance + Integration + Audit Compliance)

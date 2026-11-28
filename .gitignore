@@ -4,3 +4,5 @@ node_modules/
 coverage/
 *.log
 local-reviewers.json
+.memdb/
+.memtrace/

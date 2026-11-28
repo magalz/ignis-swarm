@@ -6,13 +6,13 @@
 
 <p align="center">
   <strong>Contract-driven, auditable <code>/swarm</code> engineering workflow for Google Antigravity.</strong><br/>
-  Zero external dependencies · Cross-platform (macOS, Linux, Windows) · Node.js &ge; 20
+  Zero external dependencies · Tested in CI on Linux, Windows and macOS · Node.js &ge; 22
 </p>
 
 <p align="center">
-  <a href="https://github.com/magalz/ignis-swarm/releases/tag/v1.0.1"><img src="https://img.shields.io/badge/release-v1.0.1-orange" alt="Release v1.0.1" /></a>
+  <a href="https://github.com/magalz/ignis-swarm/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/release-v1.1.0-orange" alt="Release v1.1.0" /></a>
   <a href="https://codecov.io/gh/magalz/ignis-swarm"><img src="https://codecov.io/gh/magalz/ignis-swarm/graph/badge.svg" alt="Codecov Coverage" /></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node >= 22" />
   <img src="https://img.shields.io/badge/dependencies-zero-blue" alt="Zero Dependencies" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License" /></a>
   <a href="https://github.com/magalz/ignis-swarm/wiki"><img src="https://img.shields.io/badge/docs-GitHub%20Wiki-informational" alt="GitHub Wiki" /></a>
@@ -28,7 +28,7 @@ Most multi-agent setups rely on verbose personas and hope the model remembers ev
 - **Frozen contracts before parallel fan-out** — `/plan` locks shared types, signatures, and exclusive file ownership before `/swarm` spawns parallel workers.
 - **Outer-loop BDD + inner-loop TDD** — Every nuclear task starts with observable `Given / When / Then` criteria, proves a failing test first (Red → Green → Refactor), and forbids over-mocking and narrative inline comments.
 - **Auditable decision trails** — Technical choices (`docs/adr/ADR-NNN-*.md`) and business rules (`docs/bdr/BDR-NNN-*.md`) live in 1 file per decision with a lean `INDEX.md`, enforced by a deterministic `Stop` hook.
-- **Unbiased 3-lens final audit** — A read-only `blind-edge-hunter` subagent (and optional headless Claude Opus / Codex CLI runners) inspects **only the raw `git diff`** with zero access to plans or trackers, paired with an independent `@acceptance-auditor`.
+- **Unbiased 3-lens final audit** — A `blind-edge-hunter` subagent (and optional headless Claude Opus / Codex CLI runners) reviews the change **from the diff alone**, without being given plans or trackers, paired with an independent `@acceptance-auditor`. The native subagent has only `grep_search`, `find_by_name` and a `run_command` limited to `git diff` over the given range and paths, and no file viewer. The headless runner is stricter: it receives the diff on stdin and (Claude) no file tools and no user or project settings.
 - **Resilient local MCP broker (`ignis-swarm_broker`)** — Supervises `stdio` and Streamable HTTP MCP servers behind 4 compact meta-tools with auto-reconnect, per-workspace pooling, local-first/global-fallback config, and spill-to-file output truncation.
 
 ---
@@ -36,7 +36,7 @@ Most multi-agent setups rely on verbose personas and hope the model remembers ev
 ## Prerequisites & Installation
 
 - **Google Antigravity** (App or `agy` CLI)
-- **Node.js `>= 20`** (powers the zero-dependency hooks and bundled MCP broker)
+- **Node.js `>= 22`** (powers the zero-dependency hooks and bundled MCP broker). CI runs Node 22 and 24 on Ubuntu and Windows, and Node 24 on macOS.
 
 ### Install via Antigravity CLI
 
@@ -55,7 +55,7 @@ agy plugin install ./ignis-swarm
 agy plugin list
 ```
 
-You should see `ignis-swarm (enabled, 1.0.1)` with **10 skills, 1 agent, 1 rule, 1 MCP server, and 5 hooks**.
+You should see `ignis-swarm (enabled, 1.1.0)` with **10 skills, 4 agents, 1 rule, 5 hooks, and 1 MCP server**. The four agents are `verifier`, `acceptance-auditor`, `doc-auditor` and `blind-edge-hunter`.
 
 ---
 
@@ -139,7 +139,7 @@ flowchart LR
 1. **Phase 0 (`/plan`):** Maps callers/callees and `docs/{adr,bdr}/INDEX.md`, cuts dead weight (`subtract-before-you-add`) and speculative work (YAGNI), freezes shared contracts (Wave 0), and splits work into non-colliding waves with exclusive file ownership.
 2. **Phases 1–2 (`/swarm` Coordinator + Workers):** Dispatches 1 named worker per nuclear task using a strict 5-field brief and capability-tier model routing; pairs waves with `@verifier` (Red → Green proof, scope check, anti-mock check, factual coverage) and pauses for `/compact` at wave boundaries when context pressure rises.
 3. **Phase 3 (`@doc-auditor`):** Writes 1 file per `[ADR]`/`[BDR]` decision, updates `INDEX.md`, and optionally mirrors links/comments into your connected issue tracker.
-4. **Phase 4 (3-Lens Final Audit):** Combines **`blind-edge-hunter`** (strictly diff-only, read-only, `inheritMcp: false`, `model: pro`, or headless Claude/Codex via `scripts/run-blind-review.mjs`) with **`@acceptance-auditor`** (full access to plan, tracker, and ADRs/BDRs).
+4. **Phase 4 (3-Lens Final Audit):** Combines **`blind-edge-hunter`** (reviews the diff only: `grep_search`, `find_by_name` and `run_command` limited to `git diff`, no file viewer, `inheritMcp: false`, `model: pro`; or headless Claude/Codex via `scripts/run-blind-review.mjs`) with **`@acceptance-auditor`** (full access to plan, tracker, and ADRs/BDRs).
 5. **Phase 5 (Closure):** Fixes proven `HIGH`/`MEDIUM` findings, reports observed coverage and audit verdicts, and emits a pre-filled post-slice `/compact` checkpoint.
 
 > Detailed walkthrough, brief templates, model routing, and compaction checkpoints: **[Five-Phase Swarm Workflow](https://github.com/magalz/ignis-swarm/wiki/Five-Phase-Swarm-Workflow)**.
@@ -149,13 +149,21 @@ flowchart LR
 ## Built-In Resilience & Safety at a Glance
 
 ### Resilient MCP Broker (`ignis-swarm_broker`)
-Exposes **4 compact meta-tools** (`broker_list`, `broker_describe`, `broker_call`, `broker_status`) backed by a detached localhost Node.js daemon with lazy auto-start, crash recovery, per-workspace pooling, local-first (`.agents/ignis-broker.json`) + global-fallback (`~/.ignis-broker/servers.json`) config, `${VAR}` secret expansion from `~/.ignis-broker/.env`, and spill-to-file output truncation.
+Exposes **4 compact meta-tools** (`broker_list`, `broker_describe`, `broker_call`, `broker_status`) backed by a detached localhost Node.js daemon with lazy auto-start, crash recovery, per-workspace pooling, local-first (`.agents/ignis-broker.json`) + global-fallback (`~/.ignis-broker/servers.json`) config, `${VAR}` secret expansion from `~/.ignis-broker/.env` (global config only), and spill-to-file output truncation.
 
 ```bash
 # Quick CLI diagnostics
 node scripts/ignis-broker.mjs status
 node scripts/ignis-broker.mjs discover-mcp
 ```
+
+How the broker behaves:
+
+- **Local configs need a git repo and your trust.** `.agents/ignis-broker.json` is found only inside a git repository, and is ignored until you review it and run `node scripts/ignis-broker.mjs trust --cwd <repo>`. Trust is bound to the file's exact bytes, so editing it voids trust. `${VAR}` is never expanded in a local config; keep secrets in the global `servers.json`. See [SECURITY.md](SECURITY.md) for the limits of this trust.
+- **`import-mcp` merges** into `~/.ignis-broker/servers.json` and keeps servers registered earlier (a server with the same name is replaced). Literal env/header secrets move to `~/.ignis-broker/.env` as `IGNIS_<SERVER>_<KEY>`; the import is rejected if a generated variable name collides with another server's variable or a value contains a line break.
+- **Working directory.** A stdio server without a `cwd` starts in the broker data directory.
+- **Lifecycle.** `stop` waits for the daemon and fails, naming its pid, if it survives. An explicit `restart` stops busy servers at once. A config change lets in-flight calls finish first. The daemon exits after `idleTimeoutSecs` (default 900) without traffic.
+- **Errors never carry secrets.** Expanded `${VAR}` values, header values, URL credentials and query values, and every stdio `env` value of 4 or more characters are masked in errors and status.
 
 ### Automatic Lifecycle Hooks (`hooks.json`)
 | Hook | What it does automatically |
@@ -193,7 +201,7 @@ Detailed guides, schemas, CLI flags, environment variables, and troubleshooting 
 agy plugin validate --strict .
 
 # Full automated test suite (hooks, broker unit/supervisor/E2E, onboarding, blind-review runner)
-node --test tests/*.test.mjs
+node --test --test-timeout=60000 tests/*.test.mjs
 ```
 
 - Architecture Decision Records: [docs/adr/INDEX.md](docs/adr/INDEX.md)
