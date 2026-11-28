@@ -137,9 +137,10 @@ test("a request body over the cap is refused and the daemon keeps serving", { ti
     pump();
   });
   // The daemon answers 400 and destroys the request while the client is still writing, so a
-  // socket reset is the usual outcome; any other client error (refused, timeout) is a failure.
+  // socket reset is the usual outcome (on Windows the pending write can end as ECANCELED);
+  // any other client error (refused, timeout) is a failure.
   if (outcome.error) {
-    assert.match(String(outcome.error.code), /^(ECONNRESET|EPIPE)$/, `unexpected client error: ${outcome.error.message}`);
+    assert.match(String(outcome.error.code), /^(ECONNRESET|EPIPE|ECANCELED)$/, `unexpected client error: ${outcome.error.message}`);
   } else {
     assert.equal(outcome.status, 400, "oversized body is a protocol error (400)");
     assert.match(outcome.text, /exceeds/);
