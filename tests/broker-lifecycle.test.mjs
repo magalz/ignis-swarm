@@ -13,6 +13,13 @@ const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "sc
 const POSIX = process.platform !== "win32";
 const BROKER_ARGS = [BIN, "daemon"];
 
+// An env where `ps` and `powershell` cannot be found, so the identity query fails.
+// Windows env names are case-insensitive: drop every PATH variant, or `Path` wins.
+function envWithoutTools(env, emptyBin) {
+  const kept = Object.fromEntries(Object.entries(env).filter(([key]) => key.toUpperCase() !== "PATH"));
+  return { ...kept, PATH: emptyBin };
+}
+
 function stopDaemonFor({ env, dataDir }) {
   const info = readDaemonInfo(dataDir);
   runNode(BIN, ["stop"], { env, timeoutMs: 15_000 });
@@ -482,7 +489,38 @@ test("ensureDaemon never kills an unrelated live pid recorded in daemon.json and
   assert.equal(await stopDaemon(dataDir), true);
 });
 
-test("ensureDaemon refuses to spawn when it cannot confirm what the hung pid is", { skip: !POSIX && "the identity query is powershell on win32; PATH cannot hide it" }, async (t) => {
+test("stopDaemon stops a healthy daemon through /admin/shutdown even when its identity cannot be queried", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  t.after(() => {
+    killQuietly(readDaemonInfo(dataDir)?.pid);
+    iso.cleanup();
+  });
+  const info = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
+  const emptyBin = path.join(iso.dirs.root, "empty-bin");
+  fs.mkdirSync(emptyBin);
+  const harness = path.join(iso.dirs.root, "stop-harness.mjs");
+  fs.writeFileSync(
+    harness,
+    `
+import { stopDaemon } from ${JSON.stringify(LIFECYCLE_URL)};
+try {
+  console.log(String(await stopDaemon(process.argv[2])));
+} catch (err) {
+  console.error(err.message);
+  process.exit(2);
+}
+`
+  );
+  const res = runNode(harness, [dataDir], { env: envWithoutTools(iso.env, emptyBin), timeoutMs: 30_000 });
+  assert.equal(res.timedOut, false);
+  assert.equal(res.status, 0, `a healthy daemon must stop without an identity query: ${res.stderr}`);
+  assert.equal(res.stdout.trim(), "true");
+  await waitFor(() => !isPidAlive(info.pid), 10_000, "the daemon to exit");
+  assert.equal(readDaemonInfo(dataDir), null);
+});
+
+test("ensureDaemon refuses to spawn when it cannot confirm what the hung pid is", async (t) => {
   const iso = isolatedEnv();
   const dataDir = iso.dirs.brokerData;
   const script = path.join(iso.dirs.root, "mute-daemon.mjs");
@@ -509,7 +547,7 @@ try {
 }
 `
   );
-  const res = runNode(harness, [iso.dirs.brokerHome, dataDir], { env: { ...iso.env, PATH: emptyBin }, timeoutMs: 30_000 });
+  const res = runNode(harness, [iso.dirs.brokerHome, dataDir], { env: envWithoutTools(iso.env, emptyBin), timeoutMs: 30_000 });
   assert.equal(res.timedOut, false);
   assert.equal(res.status, 2, `expected a refusal: ${res.stdout} ${res.stderr}`);
   assert.match(res.stderr, new RegExp(`${oldInfo.pid}`));
