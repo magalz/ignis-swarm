@@ -10,7 +10,7 @@ import { isInteractiveUserSession, readStdin, resolveWorkspace } from "./lib.mjs
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const CHECKS_DEADLINE_MS = 3500;
+export const CHECKS_DEADLINE_MS = 3500;
 const MEMTRACE_TIMEOUT_MS = 3000;
 const BROKER_TIMEOUT_MS = 2500;
 const MAX_CHILD_OUTPUT = 1024 * 1024;
@@ -176,7 +176,7 @@ function buildOnboardingNotice(home, dataDir) {
 
   return (
     `[ignis-swarm][First-Run Onboarding Required] Load skill \`ignis-onboarding\` before starting the user's request (or let the user skip). ` +
-    `In that skill, replace \`<plugin-root>\` with \`${PLUGIN_ROOT}\` (broker CLI: \`${brokerCli}\`). ` +
+    `In that skill, every command is \`node "<broker-cli>" <command>\`: replace \`<broker-cli>\` with this absolute path: \`${brokerCli}\`. ` +
     `Example: \`node "${brokerCli}" onboarding --probe\`. ` +
     `Discovered MCPs (redacted): ${mcpSummary}. Local CLIs: ${cliSummary}. ` +
     `(Main interactive session only — subagents and /swarm workers must ignore this.)`
@@ -303,7 +303,23 @@ async function main() {
   });
 }
 
-main().catch(() => {
-  killRunningChildren();
-  emit({});
-});
+function canonicalPath(file) {
+  const real = fs.realpathSync.native(file);
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return canonicalPath(process.argv[1]) === canonicalPath(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main().catch(() => {
+    killRunningChildren();
+    emit({});
+  });
+}
