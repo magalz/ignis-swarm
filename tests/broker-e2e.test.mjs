@@ -41,16 +41,33 @@ test("e2e CLI lazy-starts daemon, imports MCPs with summary list, and mcp-bridge
   const iso = isolatedEnv();
   const home = iso.dirs.root;
   const env = iso.env;
-  t.after(() => {
+  let bridge = null;
+  let rl = null;
+  // One hook, in this order: the bridge goes first, because it retries and can lazy-spawn a
+  // detached daemon; only then is the daemon stopped and the iso folder removed.
+  t.after(async () => {
     try {
-      spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
-        encoding: "utf8",
-        env,
-        timeout: CLI_TIMEOUT_MS,
-        windowsHide: true,
-      });
+      if (bridge) {
+        const exited = new Promise((resolve) => bridge.once("exit", resolve));
+        rl.close();
+        bridge.stdin.destroy();
+        bridge.kill();
+        if (bridge.exitCode === null && bridge.signalCode === null) {
+          let timer;
+          await Promise.race([exited, new Promise((r) => { timer = setTimeout(r, 10_000); })]).finally(() => clearTimeout(timer));
+        }
+      }
     } finally {
-      iso.cleanup();
+      try {
+        spawnSync(process.execPath, [BROKER_ENTRY, "stop"], {
+          encoding: "utf8",
+          env,
+          timeout: CLI_TIMEOUT_MS,
+          windowsHide: true,
+        });
+      } finally {
+        iso.cleanup();
+      }
     }
   });
   const mockScript = writeMockStdioServer(home, { label: "pong-node-e2e", banner: false });
@@ -87,33 +104,37 @@ test("e2e CLI lazy-starts daemon, imports MCPs with summary list, and mcp-bridge
   const stJson = JSON.parse(st.stdout);
   assert.ok(stJson.pid > 0);
 
-  const bridge = spawn(process.execPath, [BROKER_ENTRY, "mcp-bridge"], {
+  bridge = spawn(process.execPath, [BROKER_ENTRY, "mcp-bridge"], {
     env,
     stdio: ["pipe", "pipe", "ignore"],
     windowsHide: true,
   });
 
-  const rl = readline.createInterface({ input: bridge.stdout });
-  const bridgeExited = new Promise((resolve) => bridge.once("exit", resolve));
-  t.after(async () => {
-    rl.close();
-    bridge.stdin.destroy();
-    bridge.kill();
-    await Promise.race([bridgeExited, new Promise((r) => setTimeout(r, 10_000))]);
-  });
+  rl = readline.createInterface({ input: bridge.stdout });
 
   // The next reply line, or an error when the bridge exits or WAIT_MS passes. The timer is
   // ref'd and cleared on settle, so a silent bridge fails the test instead of hanging it.
   const nextLine = (label) =>
     new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`no bridge reply in ${WAIT_MS} ms: ${label}`)), WAIT_MS);
-      const onExit = () => reject(new Error(`the bridge exited while waiting for: ${label}`));
-      bridge.once("exit", onExit);
-      rl.once("line", (line) => {
+      const settle = () => {
         clearTimeout(timer);
         bridge.off("exit", onExit);
+        rl.off("line", onLine);
+      };
+      const timer = setTimeout(() => {
+        settle();
+        reject(new Error(`no bridge reply in ${WAIT_MS} ms: ${label}`));
+      }, WAIT_MS);
+      const onExit = () => {
+        settle();
+        reject(new Error(`the bridge exited while waiting for: ${label}`));
+      };
+      const onLine = (line) => {
+        settle();
         resolve(JSON.parse(line));
-      });
+      };
+      bridge.once("exit", onExit);
+      rl.once("line", onLine);
     });
 
   bridge.stdin.write(
