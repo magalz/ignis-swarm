@@ -4,8 +4,6 @@ import path from "node:path";
 import { isPlainObject, writePrivateFileAtomic } from "../lib/common.mjs";
 import { gitToplevel, headSha } from "../lib/git-changes.mjs";
 
-export { renameWithRetry } from "../lib/common.mjs";
-
 export const REVIEW_STATE_TTL_MS = 10 * 60 * 1000;
 
 const STATUSES = new Set(["fallback", "reviewed", "empty"]);

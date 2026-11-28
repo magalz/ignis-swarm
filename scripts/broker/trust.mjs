@@ -169,8 +169,7 @@ function loadStore(dataDir, { strict }) {
 }
 
 function saveStore(dataDir, configs) {
-  writePrivateFileAtomic(trustStorePath(dataDir), `${JSON.stringify({ version: 1, configs }, null, 2)}
-`);
+  writePrivateFileAtomic(trustStorePath(dataDir), `${JSON.stringify({ version: 1, configs }, null, 2)}\n`);
 }
 
 export function trustStatus(entry, bytes) {

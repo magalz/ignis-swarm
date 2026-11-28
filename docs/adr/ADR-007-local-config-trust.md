@@ -28,7 +28,7 @@ scope: [scripts/broker/trust.mjs, scripts/broker/config.mjs, scripts/ignis-broke
 `discoverLocalConfig` (`scripts/broker/config.mjs`) looks for `.agents/ignis-broker.json` only inside a git repository: it walks up from `cwd` to the first directory holding `.git`, and stops there. It finds nothing if it reaches the user's home directory first, or if there is no `.git`.
 
 ### 2. Trust is by exact bytes
-`ignis-broker trust [--cwd <dir>]` calls `trustLocalConfig` (`scripts/broker/trust.mjs`). It reads the file once, parses those same bytes as a JSON object, and records the real path and the SHA-256 of those bytes in `<dataDir>/trusted-local-configs.json` (`{version, configs: {<path>: {sha256, trustedAt}}}`, written to a temp file with mode `0600` and renamed into place). The hash and the parse come from the same bytes, so the file cannot change between them. Paths are resolved with `realpath` and lowercased on Windows. The command prints the servers it trusts (environment and header values masked). `trust --list` shows each entry as `ok`, `changed` or `missing`; `trust --revoke` removes one.
+`ignis-broker trust [--cwd <dir>]` calls `trustLocalConfig` (`scripts/broker/trust.mjs`). It reads the file once, parses those same bytes as a JSON object, and records the real path and the SHA-256 of those bytes in `<dataDir>/trusted-local-configs.json` (`{version, configs: {<path>: {sha256, trustedAt}}}`, written to a temp file with mode `0600` and renamed into place). The hash and the parse come from the same bytes, so the file cannot change between them. Paths are resolved with `realpath` and lowercased on Windows. The command prints the servers it trusts through `describeServers` (`scripts/broker/config.mjs`): env and header values show as `***REDACTED***`, and URL credentials, query and fragment are removed. `trust --list` shows each entry as `trusted`, `changed` or `missing` (from `trustStatus`); `trust --revoke` removes one.
 
 `readTrustedLocalConfig` reports `trusted` when the stored hash equals the hash of the current bytes, `changed` when it differs, and `untrusted` when there is no entry. Editing the file voids trust.
 
@@ -43,7 +43,7 @@ In `resolveConfig`, a local config that is not `trusted` contributes nothing: ne
 
 ### 6. Guard and onboarding
 - `hooks/command-rules.mjs` returns `force_ask` for a `node` command that runs `ignis-broker ... trust`, so the host asks the user before an agent can trust a config. This is a pattern match, not a sandbox (ADR-006).
-- Onboarding's probe, `probeLocalBrokerConfig` in `scripts/broker/onboarding.mjs`, reports `localBrokerConfig` (`path`, `trusted`, a masked server summary, or `error`). Reviewing and trusting the local config is part of onboarding.
+- Onboarding's probe (`probeEnvironment` in `scripts/broker/onboarding.mjs`) reports `localBrokerConfig` (`path`, `trusted`, the same redacted server summary from `describeServers`, or `error`). Reviewing and trusting the local config is part of onboarding.
 
 ## Consequences
 - **Positive:** a cloned repository cannot start servers or change broker defaults until the user has seen its servers and run one command. A later edit, including one pulled from upstream, asks again.
@@ -56,6 +56,6 @@ In `resolveConfig`, a local config that is not `trusted` contributes nothing: ne
   - A corrupt or unreadable trust store reads as empty (nothing is trusted); `trust` and `--revoke` refuse to overwrite it.
 
 ## Verification & Links
-- **Code / Contracts:** `scripts/broker/trust.mjs`, `scripts/broker/config.mjs` (`discoverLocalConfig`, `resolveConfig`, `normalizeServerConfig`), `scripts/ignis-broker.mjs` (`cmdTrust`), `hooks/command-rules.mjs`, `scripts/broker/onboarding.mjs` (`probeLocalBrokerConfig`)
+- **Code / Contracts:** `scripts/broker/trust.mjs`, `scripts/broker/config.mjs` (`discoverLocalConfig`, `resolveConfig`, `normalizeServerConfig`, `describeServers`), `scripts/ignis-broker.mjs` (`cmdTrust`), `hooks/command-rules.mjs`, `scripts/broker/onboarding.mjs` (`probeEnvironment`)
 - **Tests:** `tests/broker-trust.test.mjs`, `tests/broker-trust-cli.test.mjs`, `tests/onboarding-cli.test.mjs`, `tests/pre-tool-use.test.mjs`
 - **Tracker:** AGYSWM-61
