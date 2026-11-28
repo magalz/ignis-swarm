@@ -8,3 +8,6 @@
 | ADR-004 | Opt-In Onboarding and Deterministic Compaction Checkpoints | Accepted | [ADR-004-onboarding-and-compaction-checkpoints.md](ADR-004-onboarding-and-compaction-checkpoints.md) | 2026-11-26 |
 | ADR-005 | Cross-Platform Headless Blind Review Runners | Accepted | [ADR-005-headless-blind-review-runners.md](ADR-005-headless-blind-review-runners.md) | 2026-11-26 |
 | ADR-006 | Enforced Phase 4 Blind Review Routing, 2-Stage Onboarding QOL & Payload-Only Slash Handoffs | Accepted | [ADR-006-enforced-phase4-blind-review-routing.md](ADR-006-enforced-phase4-blind-review-routing.md) | 2026-11-26 |
+| ADR-007 | Trust Gate for Repository-Local Broker Configs | Accepted | [ADR-007-local-config-trust.md](ADR-007-local-config-trust.md) | 2026-11-27 |
+| ADR-008 | Per-Workspace Review State and Explicit Verdict Contract | Accepted | [ADR-008-per-workspace-review-state-and-verdict.md](ADR-008-per-workspace-review-state-and-verdict.md) | 2026-11-27 |
+| ADR-009 | Node.js 22 Minimum and the CI Matrix | Accepted | [ADR-009-node-22-minimum.md](ADR-009-node-22-minimum.md) | 2026-11-27 |
