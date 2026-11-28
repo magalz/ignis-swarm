@@ -496,7 +496,12 @@ test("stopDaemon stops a healthy daemon through /admin/shutdown even when its id
     killQuietly(readDaemonInfo(dataDir)?.pid);
     iso.cleanup();
   });
-  const info = await ensureDaemon(iso.dirs.brokerHome, dataDir, BIN);
+  // Start it through the CLI, not in this process: on POSIX a daemon whose parent is
+  // blocked in spawnSync stays a zombie after it exits, and still looks alive.
+  const started = runNode(BIN, ["status"], { env: iso.env, timeoutMs: 30_000 });
+  assert.equal(started.status, 0, started.stderr);
+  const info = readDaemonInfo(dataDir);
+  assert.ok(isPidAlive(info?.pid), "the CLI started a daemon");
   const emptyBin = path.join(iso.dirs.root, "empty-bin");
   fs.mkdirSync(emptyBin);
   const harness = path.join(iso.dirs.root, "stop-harness.mjs");
