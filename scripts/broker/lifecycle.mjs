@@ -212,6 +212,8 @@ async function killAndWait(pid) {
 }
 
 const BROKER_COMMAND = /ignis-broker\.mjs["']?\s+daemon(?:\s|$)/;
+const DATA_DIR_FLAG = /(?:^|\s)--data-dir(?:\s+|=)["']?/g;
+const PATH_BOUNDARY = /^(?:["']|\s*$|\s+-)/;
 
 function queryCommandLine(pid) {
   const [command, args] =
@@ -225,18 +227,37 @@ function queryCommandLine(pid) {
   });
 }
 
-async function pidIdentity(pid) {
+function normalizePath(value) {
+  const slashed = value.replace(/\\/g, "/");
+  return process.platform === "win32" ? slashed.toLowerCase() : slashed;
+}
+
+function commandLineIdentity(line, dataDir) {
+  const command = BROKER_COMMAND.exec(line);
+  if (!command) return "other";
+  const rest = normalizePath(line.slice(command.index + command[0].length));
+  const target = normalizePath(dataDir);
+  let flagged = false;
+  for (const flag of rest.matchAll(DATA_DIR_FLAG)) {
+    flagged = true;
+    const after = rest.slice(flag.index + flag[0].length);
+    if (after.startsWith(target) && PATH_BOUNDARY.test(after.slice(target.length))) return "broker";
+  }
+  return flagged ? "other" : "unknown";
+}
+
+async function pidIdentity(pid, dataDir) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return "other";
   if (!isPidAlive(pid)) return "dead";
   const line = await queryCommandLine(pid);
   if (line === null) return isPidAlive(pid) ? "unknown" : "dead";
-  return BROKER_COMMAND.test(line) ? "broker" : "other";
+  return commandLineIdentity(line, dataDir);
 }
 
-async function confirmedIdentity(pid) {
-  const identity = await pidIdentity(pid);
+async function confirmedIdentity(pid, dataDir) {
+  const identity = await pidIdentity(pid, dataDir);
   if (identity === "unknown") {
-    throw new Error(`cannot confirm that pid ${pid} is an ignis-broker daemon, so it was left running`);
+    throw new Error(`cannot confirm that pid ${pid} is an ignis-broker daemon of this data dir, so it was left running`);
   }
   return identity;
 }
@@ -251,10 +272,10 @@ function notExited(pid) {
   return new Error(`ignis-broker daemon pid ${pid} did not exit`);
 }
 
-async function shutdownAndKill(info) {
+async function shutdownAndKill(info, dataDir) {
   await requestShutdown(info);
   if (await waitUntilGone(info.pid, SHUTDOWN_WAIT_MS)) return "stopped";
-  const identity = await confirmedIdentity(info.pid);
+  const identity = await confirmedIdentity(info.pid, dataDir);
   if (identity === "dead") return "stopped";
   if (identity === "other") return "other";
   return (await killAndWait(info.pid)) ? "stopped" : "alive";
@@ -264,11 +285,11 @@ export async function stopDaemon(dataDir) {
   const info = readDaemonInfo(dataDir);
   if (!info) return false;
   if (!(await probeHealth(info))) {
-    const identity = await pidIdentity(info.pid);
+    const identity = await pidIdentity(info.pid, dataDir);
     if (identity === "dead" || identity === "other") dropDaemonInfo(dataDir);
     return false;
   }
-  const outcome = await shutdownAndKill(info);
+  const outcome = await shutdownAndKill(info, dataDir);
   if (outcome === "alive") throw notExited(info.pid);
   dropDaemonInfo(dataDir);
   return outcome === "stopped";
@@ -313,16 +334,16 @@ export async function ensureDaemon(home, dataDir, entryScript) {
         return recheck;
       }
       if (h) {
-        if ((await shutdownAndKill(recheck)) === "alive") {
+        if ((await shutdownAndKill(recheck, dataDir)) === "alive") {
           throw new Error(`could not stop the outdated ignis-broker daemon pid ${recheck.pid}`);
         }
-      } else if ((await confirmedIdentity(recheck.pid)) === "broker" && !(await killAndWait(recheck.pid))) {
+      } else if ((await confirmedIdentity(recheck.pid, dataDir)) === "broker" && !(await killAndWait(recheck.pid))) {
         throw notExited(recheck.pid);
       }
       dropDaemonInfo(dataDir);
     }
 
-    const child = spawn(process.execPath, [entryScript, "daemon"], {
+    const child = spawn(process.execPath, [entryScript, "daemon", "--data-dir", dataDir], {
       cwd: dataDir,
       detached: true,
       stdio: "ignore",

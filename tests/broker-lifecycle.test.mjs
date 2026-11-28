@@ -682,7 +682,7 @@ test("a broker command line without --data-dir is never killed and never replace
     iso.cleanup();
   });
   const oldInfo = await waitFor(() => readDaemonInfo(dataDir), 10_000, "old daemon.json");
-  await assert.rejects(ensureDaemon(iso.dirs.brokerHome, dataDir, BIN), new RegExp(`cannot confirm.*pid ${oldInfo.pid}\b`));
+  await assert.rejects(ensureDaemon(iso.dirs.brokerHome, dataDir, BIN), new RegExp(`cannot confirm that pid ${oldInfo.pid} `));
   assert.equal(isPidAlive(oldInfo.pid), true, "an unconfirmable daemon was killed");
   assert.equal(readDaemonInfo(dataDir)?.pid, oldInfo.pid, "daemon.json was replaced by a second daemon");
   assert.equal(await stopDaemon(dataDir), false);
