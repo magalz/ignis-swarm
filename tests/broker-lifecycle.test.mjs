@@ -431,10 +431,6 @@ test("stopDaemon escalates from SIGTERM to SIGKILL for a daemon that traps SIGTE
   assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), false);
 });
 
-async function waitDead(pid, timeoutMs, what) {
-  await waitFor(() => !isPidAlive(pid), timeoutMs, what);
-}
-
 test("stopDaemon never kills a pid that answers health but is not a broker daemon", async (t) => {
   const iso = isolatedEnv();
   const dataDir = iso.dirs.brokerData;
@@ -573,5 +569,5 @@ test("the win32 hard kill takes the daemon's child process down too", { skip: PO
   assert.ok(isPidAlive(kidPid));
   assert.equal(await stopDaemon(dataDir), true);
   assert.equal(isPidAlive(info.pid), false);
-  await waitDead(kidPid, 10_000, "the daemon's child to die with it");
+  await waitFor(() => !isPidAlive(kidPid), 10_000, "the daemon's child to die with it");
 });

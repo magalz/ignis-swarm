@@ -107,11 +107,18 @@ const SHUTDOWN_WAIT_MS = 3000;
 const TERM_GRACE_MS = 1500;
 const KILL_WAIT_MS = 1500;
 const SPAWN_WAIT_MS = 6000;
+const TREE_KILL_MS = 4000;
 const IDENTITY_QUERY_MS = process.platform === "win32" ? 15_000 : 5000;
 const LOCK_MAX_HOLD_MS =
-  HEALTH_PROBE_MS + IDENTITY_QUERY_MS + SHUTDOWN_REQUEST_MS + SHUTDOWN_WAIT_MS + TERM_GRACE_MS + KILL_WAIT_MS + SPAWN_WAIT_MS;
-const LOCK_STALE_MS = 30_000;
-const EVICT_GUARD_STALE_MS = 5000;
+  HEALTH_PROBE_MS +
+  IDENTITY_QUERY_MS +
+  SHUTDOWN_REQUEST_MS +
+  SHUTDOWN_WAIT_MS +
+  TERM_GRACE_MS +
+  TREE_KILL_MS +
+  KILL_WAIT_MS +
+  SPAWN_WAIT_MS;
+const LOCK_STALE_MS = LOCK_MAX_HOLD_MS + 15_000;
 const LOCK_WAIT_MS = LOCK_STALE_MS + LOCK_MAX_HOLD_MS;
 
 function readLockRaw(lockPath) {
@@ -136,24 +143,18 @@ function isLockStale(lockPath, raw) {
 }
 
 function evictStaleLock(lockPath, raw) {
-  const guard = `${lockPath}.evict`;
+  const moved = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   try {
-    fs.closeSync(fs.openSync(guard, "wx"));
-  } catch (err) {
-    if (err?.code === "EEXIST") {
-      try {
-        if (Date.now() - fs.statSync(guard).mtimeMs > EVICT_GUARD_STALE_MS) fs.rmSync(guard, { force: true });
-      } catch {}
-    }
+    fs.renameSync(lockPath, moved);
+  } catch {
     return false;
   }
   try {
-    if (readLockRaw(lockPath) === raw) fs.rmSync(lockPath, { force: true });
-  } finally {
-    try {
-      fs.rmSync(guard, { force: true });
-    } catch {}
-  }
+    if (readLockRaw(moved) !== raw) fs.linkSync(moved, lockPath);
+  } catch {}
+  try {
+    fs.rmSync(moved, { force: true });
+  } catch {}
   return true;
 }
 
