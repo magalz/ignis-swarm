@@ -323,6 +323,22 @@ test("stopDaemon keeps daemon.json while a pid that does not answer health is st
   assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json still points at the live pid");
 });
 
+test("stopDaemon matches its own daemon when the data dir has a trailing separator", async (t) => {
+  const iso = isolatedEnv();
+  const dataDir = iso.dirs.brokerData;
+  const script = path.join(iso.dirs.root, "mute-daemon.mjs");
+  fs.writeFileSync(script, MUTE_DAEMON);
+  const child = spawn(process.execPath, [script, dataDir, ...brokerArgs(dataDir)], { stdio: "ignore", windowsHide: true });
+  t.after(() => {
+    killQuietly(child.pid);
+    iso.cleanup();
+  });
+  const info = await waitFor(() => readDaemonInfo(dataDir), 10_000, "mute daemon.json");
+  assert.equal(await stopDaemon(dataDir + path.sep), false);
+  assert.equal(isPidAlive(info.pid), true, "the unresponsive daemon is not killed");
+  assert.equal(fs.existsSync(path.join(dataDir, "daemon.json")), true, "daemon.json of a live daemon of this data dir was dropped");
+});
+
 function pinPid(pid) {
   const original = process.kill;
   process.kill = (target, signal) => {
@@ -690,7 +706,7 @@ test("a broker command line without --data-dir is never killed and never replace
   assert.equal(readDaemonInfo(dataDir)?.pid, oldInfo.pid, "stopDaemon dropped the daemon.json of an unconfirmable daemon");
 });
 
-test("a data dir with spaces is matched, quoted or not, and never by a longer sibling", async (t) => {
+test("a data dir with spaces is matched", async (t) => {
   const iso = isolatedEnv();
   const dataDir = path.join(iso.dirs.root, "data dir with spaces");
   fs.mkdirSync(dataDir, { recursive: true });
