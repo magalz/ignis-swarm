@@ -1,6 +1,6 @@
 # Opt-In Issue Tracker Profiles
 
-> **All trackers are opt-in.** `onboarding.json` holds a `trackers` list of `{ kind, mcpServer }` entries (`kind`: `linear`, `itsaplan`, `github`, or `other`). When `trackers` is empty (the default), skip all tracker calls and keep plans, ADRs (`docs/adr/`), BDRs (`docs/bdr/`), and playbooks (`docs/playbooks/`) strictly in the local repository. When it has entries, apply each action to **every** entry using that entry's profile column (`tracker.kind` mirrors the first entry only; do not stop there).
+> **All trackers are opt-in.** `onboarding.json` holds a `trackers` list of `{ kind, mcpServer }` entries (`kind`: `linear`, `itsaplan`, `github`, or `other`). When `trackers` is empty (the default), skip all tracker calls and keep plans, ADRs (`docs/adr/`), BDRs (`docs/bdr/`), and playbooks (`docs/playbooks/`) strictly in the local repository. When it has entries, apply each action to **every** entry using that entry's profile column (`tracker` is a legacy single-entry field; use `trackers`).
 
 ## Action Mapping by Tracker Profile
 
