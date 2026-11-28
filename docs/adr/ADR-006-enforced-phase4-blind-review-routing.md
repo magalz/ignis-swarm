@@ -38,7 +38,7 @@ Not enforced:
 - Anything the host does after the hook speaks: the hook returns `allow` (no objection) and never grants permission (see "Host decision semantics").
 
 ### 2. Per-workspace review state
-`scripts/broker/review-state.mjs` stores one JSON file per workspace root at `<dataDir>/blind-review/<sha256(key)>.json`, where `key` is `normalizeWorkspaceKey(root)`: the `realpath` of the git top-level, lowercased on Windows. The record is `{version, key, status, reason, headSha, timestampMs}`. There is no shared file and no lock: each write goes to a unique temp file (mode `0o600`, directory `0o700`) and is renamed into place, with a short retry on Windows `EPERM`/`EACCES`/`EBUSY`. Files older than 7 days are pruned on write. A read never rewrites anything, and a record whose stored `key` differs from the requested root is ignored.
+`scripts/broker/review-state.mjs` stores one JSON file per workspace root at `<dataDir>/blind-review/<sha256(key)>.json`, where `key` is `normalizeWorkspaceKey(root)`: the `realpath` of the git top-level, lowercased on Windows. The record is `{version, key, status, reason, headSha, timestampMs}`. There is no shared file and no lock: each write goes to a unique temp file (mode `0o600`, directory `0o700`) and is renamed into place, with a short retry on `EPERM`/`EACCES`/`EBUSY`. Files older than 7 days are pruned on write. A read never rewrites anything, and a record whose stored `key` differs from the requested root is ignored.
 
 `status` is one of:
 - `fallback`: the headless reviewer could not give a verdict (missing CLI, spawn error, non-zero exit, no `Status:` line, bad diff, unconfigured backend). Native review is allowed.
@@ -54,7 +54,7 @@ On a denial for missing state, the message lists one runner command per missing 
 ### 3. Hook modules after the split, and who loads what
 - `hooks/pre-tool-use.mjs` is the dispatcher. It statically imports only `command-rules.mjs` and `lib.mjs`. It normalizes the tool name, then sends `runcommand` to `evaluateCommand` and `invokesubagent` to `subagent-gate.mjs`, which it imports **lazily**, only for that tool. Any other tool gets no opinion.
 - `hooks/command-rules.mjs` holds the shell-command rules and loads no broker code.
-- `hooks/subagent-gate.mjs` holds the `blind-edge-hunter` gate. It alone loads `scripts/broker/config.mjs`, `onboarding.mjs`, `review-state.mjs` and `scripts/lib/git-changes.mjs`. A `run_command` call therefore never loads the onboarding or state code, and a failure to load the gate cannot affect command rules.
+- `hooks/subagent-gate.mjs` holds the `blind-edge-hunter` gate. Within PreToolUse, it alone loads `scripts/broker/config.mjs`, `onboarding.mjs`, `review-state.mjs` and `scripts/lib/git-changes.mjs`. A `run_command` call therefore never loads the onboarding or state code, and a failure to load the gate cannot affect command rules.
 - `hooks/lib.mjs` is shared by every hook: `readStdin`, `resolveWorkspace`, `isInteractiveUserSession`, `isSubagentPayload`, `sanitizeConversationId`.
 - `hooks/session-start.mjs` prints the routing notice, the onboarding notice and the broker and decision-index hints. `hooks/stop-gate.mjs` scans the working diff and checks the decision indexes. `hooks/post-tool-use.mjs` writes the redacted audit log. `hooks/compaction-watch.mjs` is the compaction reminder (ADR-004).
 
