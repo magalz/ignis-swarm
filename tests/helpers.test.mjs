@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { isPidAlive } from "../scripts/broker/lifecycle.mjs";
 import { loadOnboardingState } from "../scripts/broker/onboarding.mjs";
@@ -468,5 +469,45 @@ test("writeOnboardingState merges defaults, lets the state override them and rou
     assert.deepEqual(loadOnboardingState(dataDir).reviewRouting, routing);
   } finally {
     rmTemp(dir);
+  }
+});
+
+test("isolatedEnv cleanup on POSIX kills the daemon's whole process group, so its children are not orphaned", { skip: process.platform === "win32" }, async () => {
+  const iso = isolatedEnv();
+  const entry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ignis-broker.mjs");
+  const childPidFile = path.join(iso.dirs.root, "child.pid");
+  const daemonScript = [
+    'const { spawn } = require("node:child_process");',
+    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+    'require("node:fs").writeFileSync(process.argv[1], String(child.pid));',
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  const launcherScript = [
+    'const { spawn } = require("node:child_process");',
+    "const d = spawn(process.execPath, [\"-e\", process.argv[1], process.argv[2], process.argv[3], \"daemon\"], { detached: true, stdio: \"ignore\" });",
+    "d.unref();",
+    "process.stdout.write(String(d.pid));",
+  ].join("\n");
+  const launched = spawnSync(process.execPath, ["-e", launcherScript, daemonScript, childPidFile, entry], { encoding: "utf8" });
+  assert.equal(launched.status, 0, launched.stderr);
+  const daemonPid = Number(launched.stdout);
+  let childPid = 0;
+  try {
+    await waitUntil("the fake daemon to start its child", () => fs.existsSync(childPidFile) && fs.readFileSync(childPidFile, "utf8") !== "", 10_000);
+    childPid = Number(fs.readFileSync(childPidFile, "utf8"));
+    assert.ok(isPidAlive(daemonPid) && isPidAlive(childPid));
+    fs.writeFileSync(path.join(iso.dirs.brokerData, "daemon.json"), JSON.stringify({ pid: daemonPid }));
+
+    iso.cleanup();
+
+    await waitUntil("the daemon and its child to be gone", () => !isPidAlive(daemonPid) && !isPidAlive(childPid), 10_000);
+  } finally {
+    for (const pid of [daemonPid, childPid]) {
+      if (pid > 0 && isPidAlive(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
   }
 });
