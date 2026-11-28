@@ -316,7 +316,7 @@ export async function ensureDaemon(home, dataDir, entryScript) {
         if (!h) {
           if (!(await killAndWait(recheck.pid))) throw notExited(recheck.pid);
         } else if (!(await shutdownAndKill(recheck))) {
-          throw new Error("could not stop the outdated ignis-broker daemon");
+          throw new Error(`could not stop the outdated ignis-broker daemon pid ${recheck.pid}`);
         }
       }
       dropDaemonInfo(dataDir);

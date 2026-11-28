@@ -186,7 +186,7 @@ test("racing evictors of a stale lock never both hold it", async (t) => {
   const probe = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
   const deadPid = Number(probe.stdout);
   assert.ok(deadPid > 0 && !isPidAlive(deadPid));
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: deadPid, ts: Date.now() }));
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: deadPid, ts: Date.now() - 120_000 }));
   const racer = path.join(root, "racer.mjs");
   fs.writeFileSync(racer, LOCK_RACER);
   const results = [];
