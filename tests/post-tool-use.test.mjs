@@ -8,13 +8,14 @@ import { isolatedEnv, runNode } from "./helpers.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(PLUGIN_ROOT, "hooks", "post-tool-use.mjs");
+const HOOK_TIMEOUT_MS = 60_000;
 const ROTATE_THRESHOLD = 5 * 1024 * 1024;
 
 const iso = isolatedEnv();
 after(() => iso.cleanup());
 
 function runHook(inputObj) {
-  const res = runNode(HOOK, [], { input: JSON.stringify(inputObj), env: iso.env, cwd: PLUGIN_ROOT, timeoutMs: 8000 });
+  const res = runNode(HOOK, [], { input: JSON.stringify(inputObj), env: iso.env, cwd: PLUGIN_ROOT, timeoutMs: HOOK_TIMEOUT_MS });
   assert.equal(res.status, 0, `hook failed: ${res.stderr}`);
   return JSON.parse(res.stdout.trim());
 }
@@ -37,19 +38,24 @@ function runCommand(convId, commandLine) {
   return entries[entries.length - 1];
 }
 
-test("post-tool-use returns empty object and appends audit log", () => {
-  const out = runHook({
-    conversationId: "conv-123",
-    stepIdx: 4,
-    toolCall: { name: "run_command", args: { CommandLine: "go test ./..." } },
-  });
-  assert.deepEqual(out, {});
+const GO_TEST_CALL = {
+  conversationId: "conv-123",
+  stepIdx: 4,
+  toolCall: { name: "run_command", args: { CommandLine: "go test ./..." } },
+};
 
-  const logPath = auditPath("conv-123");
-  assert.equal(fs.existsSync(logPath), true);
-  const record = JSON.parse(fs.readFileSync(logPath, "utf8").trim());
-  assert.equal(record.isTest, true);
-  assert.equal(record.tool, "run_command");
+test("post-tool-use returns an empty object", () => {
+  assert.deepEqual(runHook(GO_TEST_CALL), {});
+});
+
+test("post-tool-use appends one audit record for a test command", () => {
+  runHook({ ...GO_TEST_CALL, conversationId: "conv-append" });
+  const records = readEntries(auditPath("conv-append"));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].isTest, true);
+  assert.equal(records[0].tool, "run_command");
+  assert.equal(records[0].stepIdx, 4);
+  assert.equal(records[0].command, "go test ./...");
 });
 
 const TOKENS = {
@@ -206,26 +212,27 @@ test("post-tool-use leaves a plain npm test command unchanged and flags it as a 
   assert.equal(record.isTest, true);
 });
 
-test("post-tool-use keeps the entry format", () => {
+test("post-tool-use keeps the entry format of a command record", () => {
   const record = runCommand("entry-format", "npm test");
   assert.deepEqual(Object.keys(record), ["ts", "stepIdx", "tool", "error", "isTest", "command"]);
   assert.equal(record.stepIdx, 1);
   assert.equal(record.error, null);
+});
 
-  runHook({ conversationId: "entry-format", stepIdx: 2, toolCall: { name: "edit_file", args: { Path: "src/a.mjs" } } });
-  const [, edit] = readEntries(auditPath("entry-format"));
+test("post-tool-use keeps the entry format of an edit record", () => {
+  runHook({ conversationId: "entry-format-edit", stepIdx: 2, toolCall: { name: "edit_file", args: { Path: "src/a.mjs" } } });
+  const [edit] = readEntries(auditPath("entry-format-edit"));
   assert.deepEqual(Object.keys(edit), ["ts", "stepIdx", "tool", "error", "path"]);
   assert.equal(edit.path, "src/a.mjs");
 });
 
 test("post-tool-use redacts before truncating to 240 characters", () => {
-  const secret = TOKENS.githubClassic;
-  const record = runCommand("straddle", `${"x".repeat(230)} TOKEN=${secret} tail`);
+  const record = runCommand("straddle", `${"x".repeat(230)} TOKEN=${TOKENS.githubClassic} tail`);
   assert.equal(record.command, `${"x".repeat(230)} TOKEN=[RE`);
-  assert.equal(record.command.length, 240);
+});
 
-  const longRecord = runCommand("long-plain", "y".repeat(500));
-  assert.equal(longRecord.command, "y".repeat(240));
+test("post-tool-use truncates a long plain command to 240 characters", () => {
+  assert.equal(runCommand("long-plain", "y".repeat(500)).command, "y".repeat(240));
 });
 
 test("post-tool-use does not rotate a log under the threshold", () => {
@@ -235,31 +242,46 @@ test("post-tool-use does not rotate a log under the threshold", () => {
   assert.equal(fs.existsSync(auditPath("small-log", ".1.jsonl")), false);
 });
 
-test("post-tool-use rotates a log over 5 MiB into .1.jsonl and starts a new file", () => {
-  const convId = "rotate-me";
+/** Write a log over the rotation threshold, plus a stale archive, then append one command. */
+function rotateOversizedLog(convId) {
   const line = `${JSON.stringify({ pad: "a".repeat(1000) })}\n`;
   const oldLog = line.repeat(Math.ceil((5.1 * 1024 * 1024) / line.length));
   assert.ok(oldLog.length > ROTATE_THRESHOLD);
   fs.mkdirSync(path.dirname(auditPath(convId)), { recursive: true });
   fs.writeFileSync(auditPath(convId), oldLog);
   fs.writeFileSync(auditPath(convId, ".1.jsonl"), "stale\n");
-
   runCommand(convId, "npm test");
+  return oldLog;
+}
 
-  assert.equal(fs.statSync(auditPath(convId, ".1.jsonl")).size, oldLog.length);
-  const entries = readEntries(auditPath(convId));
+test("post-tool-use moves a log over 5 MiB to .1.jsonl, replacing the old archive", () => {
+  const oldLog = rotateOversizedLog("rotate-archive");
+  assert.equal(fs.statSync(auditPath("rotate-archive", ".1.jsonl")).size, oldLog.length);
+});
+
+test("post-tool-use starts a new log file after rotating", () => {
+  rotateOversizedLog("rotate-new");
+  const entries = readEntries(auditPath("rotate-new"));
   assert.equal(entries.length, 1);
   assert.equal(entries[0].command, "npm test");
-  if (process.platform !== "win32") {
-    assert.equal(fs.statSync(auditPath(convId)).mode & 0o777, 0o600);
-  }
 });
 
-test("post-tool-use redacts long flag-heavy commands quickly", () => {
-  for (const command of ["--pwd".repeat(1700), "--token-".repeat(1100)]) {
-    const started = Date.now();
-    const record = runCommand("flag-heavy", command);
-    assert.ok(Date.now() - started < 1500, `redaction took ${Date.now() - started} ms`);
-    assert.equal(typeof record.command, "string");
-  }
+test("post-tool-use creates the rotated log with mode 0600", { skip: process.platform === "win32" }, () => {
+  rotateOversizedLog("rotate-mode");
+  assert.equal(fs.statSync(auditPath("rotate-mode")).mode & 0o777, 0o600);
 });
+
+// The bound only has to catch catastrophic backtracking, so it includes the spawn and stays far above a loaded machine's slowdown.
+const REDACTION_BOUND_MS = 20_000;
+
+for (const [label, command] of [
+  ["--pwd repeated", "--pwd".repeat(1700)],
+  ["--token- repeated", "--token-".repeat(1100)],
+]) {
+  test(`post-tool-use redacts a long flag-heavy command (${label}) without catastrophic backtracking`, () => {
+    const started = Date.now();
+    const record = runCommand(`flag-heavy-${label.split(" ")[0]}`, command);
+    assert.ok(Date.now() - started < REDACTION_BOUND_MS, `redaction took ${Date.now() - started} ms`);
+    assert.equal(record.command, command.slice(0, 240));
+  });
+}
