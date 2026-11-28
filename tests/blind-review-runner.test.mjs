@@ -41,6 +41,12 @@ function createFeatureRepo(dir, env, { file = "app.js", before = "export const v
   return dir;
 }
 
+function commitBigFile(git, repo) {
+  fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
+  git(["add", "big.txt"]);
+  git(["commit", "-q", "-m", "big file"]);
+}
+
 function writeShim(dir, name, source) {
   const shimPath = path.join(dir, name);
   fs.writeFileSync(shimPath, source, "utf8");
@@ -341,7 +347,6 @@ describe("blind-review runner: fallback to native", () => {
       const expected = `${git(["diff", "base-ref", "HEAD"])}
 `;
       assert.equal(out.diffBytes, Buffer.byteLength(expected));
-      assert.equal(out.diffBytes > 0, true);
     });
   });
 
@@ -795,9 +800,7 @@ describe("blind-review runner: diff extraction", () => {
 
   it("a diff above the size limit falls back to native and says why", async () => {
     await withFixture(async ({ repo, shimDir, git, run }) => {
-      fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
-      git(["add", "big.txt"]);
-      git(["commit", "-q", "-m", "big file"]);
+      commitBigFile(git, repo);
       const out = parseOut(run(jsonArgs(repo), { IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), IGNIS_REVIEW_MAX_DIFF_BYTES: "1024" }));
       assert.deepEqual(
         { useNative: out.useNative, fallbackToNative: out.fallbackToNative, base: out.base },
@@ -809,9 +812,7 @@ describe("blind-review runner: diff extraction", () => {
 
   it("a fallback prints JSON even without --json", async () => {
     await withFixture(async ({ repo, shimDir, git, run }) => {
-      fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
-      git(["add", "big.txt"]);
-      git(["commit", "-q", "-m", "big file"]);
+      commitBigFile(git, repo);
       const out = parseOut(run(["--base", "base-ref", "--cwd", repo, "--backend", "auto"], { IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), IGNIS_REVIEW_MAX_DIFF_BYTES: "1024" }));
       assert.equal(out.fallbackToNative, true);
     });
@@ -819,9 +820,7 @@ describe("blind-review runner: diff extraction", () => {
 
   it("a diff above the size limit records a fallback state", async () => {
     await withFixture(async ({ repo, shimDir, git, run, assertState, gateAllows }) => {
-      fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
-      git(["add", "big.txt"]);
-      git(["commit", "-q", "-m", "big file"]);
+      commitBigFile(git, repo);
       run(jsonArgs(repo), { IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), IGNIS_REVIEW_MAX_DIFF_BYTES: "1024" });
       assertState("fallback");
       assert.equal(gateAllows(repo), true);
@@ -830,9 +829,7 @@ describe("blind-review runner: diff extraction", () => {
 
   it("a non-numeric size limit is ignored and the review runs", async () => {
     await withFixture(async ({ repo, shimDir, git, run, assertState, gateAllows }) => {
-      fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(8192), "utf8");
-      git(["add", "big.txt"]);
-      git(["commit", "-q", "-m", "big file"]);
+      commitBigFile(git, repo);
       const out = parseOut(run(jsonArgs(repo), { IGNIS_CLAUDE_CMD: createEchoShim(shimDir, "ok"), IGNIS_REVIEW_MAX_DIFF_BYTES: "not-a-number" }));
       assert.equal(out.useNative, false);
       assertState("reviewed");
