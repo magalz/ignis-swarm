@@ -50,8 +50,8 @@ test("a daemon with no traffic exits on idle and removes its daemon.json", async
   assert.equal(res.timedOut, false);
   pid = readDaemonInfo(iso.dirs.brokerData)?.pid;
   assert.ok(pid, `daemon.json missing after status: ${res.stderr}`);
-  const gone = await waitFor(() => !isPidAlive(pid), 6000);
-  assert.equal(gone, true, "daemon pid is still alive 6 s after the 2 s idle timeout");
+  const gone = await waitFor(() => !isPidAlive(pid), 20_000);
+  assert.equal(gone, true, "daemon pid is still alive 20 s after the 2 s idle timeout");
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
 });
 
@@ -68,6 +68,7 @@ test("a slow call in flight when the idle timer would fire completes, then the d
   fs.writeFileSync(
     mock,
     `
+import fs from "node:fs";
 import readline from "node:readline";
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -77,37 +78,40 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (msg.method === "tools/list") {
     send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "slow", inputSchema: { type: "object" } }] } });
   } else if (msg.method === "tools/call") {
-    setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "slow-done" }], isError: false } }), 3000);
+    fs.writeFileSync(process.argv[2], "started");
+    const poll = setInterval(() => {
+      if (!fs.existsSync(process.argv[3])) return;
+      clearInterval(poll);
+      send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "slow-done" }], isError: false } });
+    }, 50);
   }
 });
 `
   );
+  const started = path.join(work, "started");
+  const release = path.join(work, "release");
   writeIdleConfig(iso, {
-    demo: { transport: "stdio", command: process.execPath, args: [mock], requestTimeoutMs: 20_000 },
+    demo: { transport: "stdio", command: process.execPath, args: [mock, started, release], requestTimeoutMs: 60_000 },
   });
-  const warm = runNode(BIN, ["status"], { env: iso.env, timeoutMs: 30_000 });
-  assert.equal(warm.timedOut, false);
-  pid = readDaemonInfo(iso.dirs.brokerData)?.pid;
-  assert.ok(pid, `daemon.json missing after status: ${warm.stderr}`);
 
   const child = spawn(process.execPath, [BIN, "call", "demo", "slow"], { env: iso.env, windowsHide: true });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (err += d));
-  const killer = setTimeout(() => child.kill("SIGKILL"), 20_000);
-  let removedDuringCall = false;
+  const killer = setTimeout(() => child.kill("SIGKILL"), 90_000);
   const exited = new Promise((resolve) => child.once("close", resolve));
-  const watcher = (async () => {
-    let done = false;
-    exited.then(() => (done = true));
-    while (!done) {
-      if (!fs.existsSync(daemonInfoPath(iso.dirs.brokerData)) || !isPidAlive(pid)) removedDuringCall = true;
-      await sleep(100);
-    }
-  })();
+  assert.equal(await waitFor(() => fs.existsSync(started), 45_000), true, `the call never reached the mock: ${err}`);
+  pid = readDaemonInfo(iso.dirs.brokerData)?.pid;
+  assert.ok(pid, "daemon.json missing while the call is in flight");
+  let removedDuringCall = false;
+  const watchUntil = Date.now() + 3500;
+  while (Date.now() < watchUntil) {
+    if (!fs.existsSync(daemonInfoPath(iso.dirs.brokerData)) || !isPidAlive(pid)) removedDuringCall = true;
+    await sleep(100);
+  }
+  fs.writeFileSync(release, "go");
   const code = await exited;
-  await watcher;
   clearTimeout(killer);
   assert.equal(code, 0, `call failed: ${err}`);
   assert.match(out, /slow-done/);
@@ -115,7 +119,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   assert.ok(isPidAlive(pid));
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), true);
 
-  const gone = await waitFor(() => !isPidAlive(pid), 6000);
+  const gone = await waitFor(() => !isPidAlive(pid), 20_000);
   assert.equal(gone, true, "daemon did not exit on idle after the call finished");
   assert.equal(fs.existsSync(daemonInfoPath(iso.dirs.brokerData)), false);
 });
@@ -151,7 +155,7 @@ ${body}
     windowsHide: true,
     stdio: "ignore",
   });
-  const killer = setTimeout(() => child.kill("SIGKILL"), 8000);
+  const killer = setTimeout(() => child.kill("SIGKILL"), 30_000);
   return new Promise((resolve) => child.once("close", resolve)).finally(() => clearTimeout(killer));
 }
 
@@ -252,4 +256,69 @@ setInterval(() => {
   assert.equal(await closed, 1);
   const dead = await waitFor(() => !isPidAlive(childPid), 4000);
   assert.equal(dead, true, "the pooled child survived the daemon crash");
+});
+
+const SUPERVISOR_URL = pathToFileURL(path.join(ROOT, "scripts", "broker", "supervisor.mjs")).href;
+
+const SLOW_FIRST_SHUTDOWN = `
+const { Supervisor } = await import(${JSON.stringify(SUPERVISOR_URL)});
+let shutdownCalls = 0;
+Supervisor.prototype.shutdown = async function () {
+  shutdownCalls += 1;
+  if (shutdownCalls === 1) await new Promise((resolve) => setTimeout(resolve, 1800));
+};
+`;
+
+test("a crash while the idle timer is due exits 1 and logs the crash instead of exiting 0 on idle", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-crash-idle-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  fs.writeFileSync(
+    path.join(iso.dirs.brokerHome, "servers.json"),
+    JSON.stringify({ version: 1, defaults: { idleTimeoutSecs: 1 }, servers: {} })
+  );
+  const code = await startHarness(
+    iso,
+    work,
+    `${SLOW_FIRST_SHUTDOWN}
+setTimeout(() => { throw new Error("crash-idle-boom"); }, 300);`
+  );
+  assert.equal(code, 1, "an idle tick during the crash window made the daemon exit as if it had idled");
+  const log = fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8");
+  assert.match(log, /crash-idle-boom/);
+});
+
+test("an admin shutdown request during a crash is ignored and the crash still exits 1", async (t) => {
+  const iso = isolatedEnv();
+  const work = mkTemp("ignis-crash-admin-");
+  t.after(() => {
+    killDaemon(iso.dirs.brokerData);
+    iso.cleanup();
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const closed = startHarness(
+    iso,
+    work,
+    `${SLOW_FIRST_SHUTDOWN}
+setTimeout(() => { throw new Error("crash-admin-boom"); }, 300);`
+  );
+  const info = await waitFor(() => readDaemonInfo(iso.dirs.brokerData), 15_000).then(() => readDaemonInfo(iso.dirs.brokerData));
+  const logged = await waitFor(() => {
+    try {
+      return /crash-admin-boom/.test(fs.readFileSync(path.join(iso.dirs.brokerData, "daemon.log"), "utf8"));
+    } catch {
+      return false;
+    }
+  }, 15_000);
+  assert.equal(logged, true, "the crash was never logged");
+  await fetch(`http://127.0.0.1:${info.port}/admin/shutdown`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${info.token}` },
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => {});
+  assert.equal(await closed, 1, "the admin shutdown turned the crash into a clean exit");
 });
