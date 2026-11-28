@@ -350,6 +350,8 @@ export async function runDaemon(home, dataDir, port = 0) {
     return secs * 1000;
   }
 
+  let idleTimer = null;
+
   function scheduleIdleCheck() {
     const limit = idleLimitMs();
     const delay = Math.min(IDLE_CHECK_MAX_MS, Math.max(IDLE_CHECK_MIN_MS, limit / 4));
@@ -362,6 +364,7 @@ export async function runDaemon(home, dataDir, port = 0) {
       scheduleIdleCheck();
     }, delay);
     timer.unref();
+    idleTimer = timer;
   }
 
   async function idleShutdown() {
@@ -376,6 +379,9 @@ export async function runDaemon(home, dataDir, port = 0) {
 
   async function crash(err) {
     appendDaemonLog(dataDir, err);
+    shuttingDown = true;
+    clearInterval(sweepTimer);
+    clearTimeout(idleTimer);
     try {
       await Promise.race([supervisor.shutdown(), new Promise((resolve) => setTimeout(resolve, CRASH_SHUTDOWN_MS))]);
     } catch {}

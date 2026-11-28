@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { killProcessTree } from "./adapters.mjs";
 import { BROKER_VERSION } from "./config.mjs";
 
@@ -107,8 +107,9 @@ const SHUTDOWN_WAIT_MS = 3000;
 const TERM_GRACE_MS = 1500;
 const KILL_WAIT_MS = 1500;
 const SPAWN_WAIT_MS = 6000;
+const IDENTITY_QUERY_MS = process.platform === "win32" ? 15_000 : 5000;
 const LOCK_MAX_HOLD_MS =
-  HEALTH_PROBE_MS + SHUTDOWN_REQUEST_MS + SHUTDOWN_WAIT_MS + TERM_GRACE_MS + KILL_WAIT_MS + SPAWN_WAIT_MS;
+  HEALTH_PROBE_MS + IDENTITY_QUERY_MS + SHUTDOWN_REQUEST_MS + SHUTDOWN_WAIT_MS + TERM_GRACE_MS + KILL_WAIT_MS + SPAWN_WAIT_MS;
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = LOCK_STALE_MS + LOCK_MAX_HOLD_MS;
 
@@ -202,6 +203,42 @@ async function killAndWait(pid) {
   return waitUntilGone(pid, KILL_WAIT_MS);
 }
 
+const BROKER_COMMAND = /ignis-broker\.mjs["']?\s+daemon(?:\s|$)/;
+
+function queryCommandLine(pid) {
+  const [command, args] =
+    process.platform === "win32"
+      ? ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`]]
+      : ["ps", ["-ww", "-o", "command=", "-p", String(pid)]];
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: IDENTITY_QUERY_MS, windowsHide: true, encoding: "utf8" }, (err, stdout) => {
+      resolve(err ? null : stdout.trim() || null);
+    });
+  });
+}
+
+async function pidIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "other";
+  if (!isPidAlive(pid)) return "dead";
+  const line = await queryCommandLine(pid);
+  if (line === null) return isPidAlive(pid) ? "unknown" : "dead";
+  return BROKER_COMMAND.test(line) ? "broker" : "other";
+}
+
+async function confirmedIdentity(pid) {
+  const identity = await pidIdentity(pid);
+  if (identity === "unknown") {
+    throw new Error(`cannot confirm that pid ${pid} is an ignis-broker daemon, so it was left running`);
+  }
+  return identity;
+}
+
+function dropDaemonInfo(dataDir) {
+  try {
+    fs.rmSync(daemonInfoPath(dataDir), { force: true });
+  } catch {}
+}
+
 function notExited(pid) {
   return new Error(`ignis-broker daemon pid ${pid} did not exit`);
 }
@@ -216,17 +253,17 @@ export async function stopDaemon(dataDir) {
   const info = readDaemonInfo(dataDir);
   if (!info) return false;
   if (!(await probeHealth(info))) {
-    if (!isPidAlive(info.pid)) {
-      try {
-        fs.rmSync(daemonInfoPath(dataDir), { force: true });
-      } catch {}
-    }
+    const identity = await pidIdentity(info.pid);
+    if (identity === "dead" || identity === "other") dropDaemonInfo(dataDir);
+    return false;
+  }
+  const identity = await confirmedIdentity(info.pid);
+  if (identity === "other") {
+    dropDaemonInfo(dataDir);
     return false;
   }
   if (!(await shutdownAndKill(info))) throw notExited(info.pid);
-  try {
-    fs.rmSync(daemonInfoPath(dataDir), { force: true });
-  } catch {}
+  dropDaemonInfo(dataDir);
   return true;
 }
 
@@ -268,15 +305,14 @@ export async function ensureDaemon(home, dataDir, entryScript) {
       if (h?.ok && isDaemonVersionAcceptable(h.version, BROKER_VERSION)) {
         return recheck;
       }
-      if (h?.ok) {
-        if (!(await shutdownAndKill(recheck))) {
+      if (isPidAlive(recheck.pid) && (await confirmedIdentity(recheck.pid)) === "broker") {
+        if (!h) {
+          if (!(await killAndWait(recheck.pid))) throw notExited(recheck.pid);
+        } else if (!(await shutdownAndKill(recheck))) {
           throw new Error("could not stop the outdated ignis-broker daemon");
         }
       }
-      if (!h && isPidAlive(recheck.pid) && !(await killAndWait(recheck.pid))) throw notExited(recheck.pid);
-      try {
-        fs.rmSync(daemonInfoPath(dataDir), { force: true });
-      } catch {}
+      dropDaemonInfo(dataDir);
     }
 
     const child = spawn(process.execPath, [entryScript, "daemon"], {

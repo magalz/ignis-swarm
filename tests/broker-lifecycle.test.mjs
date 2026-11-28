@@ -545,7 +545,7 @@ test("ensureDaemon does not drop daemon.json while a pid that answers ok:false i
 const TREE_DAEMON = FAKE_DAEMON.replace(
   "setInterval",
   `import { spawn } from "node:child_process";
-const kid = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+const kid = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true, detached: true });
 fs.writeFileSync(path.join(dataDir, "child.pid"), String(kid.pid));
 setInterval`
 );
