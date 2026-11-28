@@ -1,25 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { evaluateCommand } from "../hooks/command-rules.mjs";
+import { isolatedEnv, runNode } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
+const HOOK_TIMEOUT_MS = 60_000;
 
-function runHook(scriptRelPath, inputObj, extraEnv = {}) {
-  const scriptPath = path.join(PLUGIN_ROOT, scriptRelPath);
-  const res = spawnSync(process.execPath, [scriptPath], {
-    cwd: PLUGIN_ROOT,
-    input: JSON.stringify(inputObj),
-    encoding: "utf8",
-    env: { ...process.env, ...extraEnv },
-    timeout: 8000,
-    windowsHide: true,
-  });
-  assert.equal(res.status, 0, `Hook ${scriptRelPath} failed: ${res.stderr}`);
-  return JSON.parse(res.stdout.trim());
+function runHook(scriptRelPath, inputObj) {
+  const iso = isolatedEnv();
+  try {
+    const res = runNode(path.join(PLUGIN_ROOT, scriptRelPath), [], {
+      cwd: PLUGIN_ROOT,
+      input: JSON.stringify(inputObj),
+      env: iso.env,
+      timeoutMs: HOOK_TIMEOUT_MS,
+    });
+    assert.equal(res.timedOut, false, `Hook ${scriptRelPath} timed out`);
+    assert.equal(res.status, 0, `Hook ${scriptRelPath} failed: ${res.stderr}`);
+    return JSON.parse(res.stdout.trim());
+  } finally {
+    iso.cleanup();
+  }
 }
 
 const NO_VERIFY = "`--no-verify` bypasses";
@@ -578,14 +582,13 @@ for (const [command, decision, reason] of ROWS) {
   });
 }
 
-test("evaluateCommand ignores input that is not a command line", () => {
-  for (const input of [undefined, null, 42, {}, []]) {
+for (const [label, input] of [["undefined", undefined], ["null", null], ["a number", 42], ["an object", {}], ["an array", []]]) {
+  test(`evaluateCommand ignores ${label} as input`, () => {
     assert.equal(evaluateCommand(input), null);
-  }
-});
+  });
+}
 
-test("evaluateCommand never throws on malformed command lines", () => {
-  const malformed = [
+const MALFORMED = [
     'echo "git reset --hard',
     "echo 'git reset --hard",
     "git reset --hard \\",
@@ -619,45 +622,54 @@ test("evaluateCommand never throws on malformed command lines", () => {
     "node ignis-broker.mjs trust",
     "rm -rf ~/{",
     "rm -rf $(",
-  ];
-  for (const command of malformed) {
+];
+
+for (const command of MALFORMED) {
+  test(`evaluateCommand does not throw on malformed ${JSON.stringify(command)}`, () => {
     let result;
     assert.doesNotThrow(() => {
       result = evaluateCommand(command);
-    }, `threw on ${JSON.stringify(command)}`);
+    });
     assert.ok(
       result === null || result.decision === "deny" || result.decision === "force_ask",
-      `bad result for ${JSON.stringify(command)}`,
+      `bad result ${JSON.stringify(result)}`,
     );
-  }
-});
+  });
+}
 
-test("evaluateCommand returns the strongest verdict across segments", () => {
-  assert.equal(evaluateCommand("git clean -fd && git reset --hard").decision, "deny");
-  assert.equal(evaluateCommand("git reset --hard && git clean -fd").decision, "deny");
-  assert.equal(evaluateCommand("npm test && git clean -fd").decision, "force_ask");
-  assert.equal(evaluateCommand("git push -f origin feat/a ; git push -f origin main").decision, "deny");
-});
+for (const [command, decision] of [
+  ["git clean -fd && git reset --hard", "deny"],
+  ["git reset --hard && git clean -fd", "deny"],
+  ["npm test && git clean -fd", "force_ask"],
+  ["git push -f origin feat/a ; git push -f origin main", "deny"],
+]) {
+  test(`evaluateCommand returns ${decision} as the strongest verdict of ${JSON.stringify(command)}`, () => {
+    assert.equal(evaluateCommand(command).decision, decision);
+  });
+}
 
-test("evaluateCommand denies deleting main or master with the exact reason", () => {
-  for (const command of ["git push origin --delete main", "git push origin -d master", "git push origin :main"]) {
-    assert.deepEqual(evaluateCommand(command), { decision: "deny", reason: DELETE_MAIN }, command);
+for (const command of ["git push origin --delete main", "git push origin -d master", "git push origin :main"]) {
+  test(`evaluateCommand denies ${JSON.stringify(command)} with the exact reason`, () => {
+    assert.deepEqual(evaluateCommand(command), { decision: "deny", reason: DELETE_MAIN });
+  });
+}
+
+function nestShell(command, depth) {
+  let nested = command;
+  for (let level = 0; level < depth; level += 1) {
+    nested = `sh -c "${nested.replace(/[\\"]/g, "\\$&")}"`;
   }
-});
+  return nested;
+}
 
 test("evaluateCommand asks before analysing deeply nested shell wrappers", () => {
-  let command = "git status";
-  for (let depth = 0; depth < 12; depth += 1) {
-    command = `sh -c "${command.replace(/[\\"]/g, "\\$&")}"`;
-  }
-  const result = evaluateCommand(command);
+  const result = evaluateCommand(nestShell("git status", 12));
   assert.equal(result.decision, "force_ask");
   assert.match(result.reason, /deeply nested shell wrappers/);
-  let shallow = "git reset --hard";
-  for (let depth = 0; depth < 3; depth += 1) {
-    shallow = `sh -c "${shallow.replace(/[\\"]/g, "\\$&")}"`;
-  }
-  assert.equal(evaluateCommand(shallow).decision, "deny");
+});
+
+test("evaluateCommand still denies a blocked command inside shallow shell wrappers", () => {
+  assert.equal(evaluateCommand(nestShell("git reset --hard", 3)).decision, "deny");
 });
 
 test("evaluateCommand asks before analysing an oversized command line", () => {
@@ -672,43 +684,43 @@ function runCommand(commandLine) {
   });
 }
 
-test("pre-tool-use prints deny with a reason for blocked commands", () => {
-  for (const command of [
-    'git commit -m "wip" --no-verify',
-    "git push --force origin main",
-    "git reset --hard HEAD~1",
-    "git -C /repo reset --hard origin/main",
-    "git commit -nm x",
-    "git -c core.hooksPath=/dev/null commit -m x",
-    "rm -fr /",
-    "rm -r -f /",
-    "rm -rf E:\\ && echo done",
-    "Remove-Item -Force -Recurse C:\\",
-    "rm -rf ~",
-    "Remove-Item -Recurse -Force $HOME",
-    "rd /s /q C:\\",
-  ]) {
+for (const command of [
+  'git commit -m "wip" --no-verify',
+  "git push --force origin main",
+  "git reset --hard HEAD~1",
+  "git -C /repo reset --hard origin/main",
+  "git commit -nm x",
+  "git -c core.hooksPath=/dev/null commit -m x",
+  "rm -fr /",
+  "rm -r -f /",
+  "rm -rf E:\\ && echo done",
+  "Remove-Item -Force -Recurse C:\\",
+  "rm -rf ~",
+  "Remove-Item -Recurse -Force $HOME",
+  "rd /s /q C:\\",
+]) {
+  test(`pre-tool-use denies ${JSON.stringify(command)} with the Blocked reason`, () => {
     const out = runCommand(command);
-    assert.equal(out.decision, "deny", `Expected deny for: ${command}`);
+    assert.equal(out.decision, "deny");
     assert.match(out.reason, /^Blocked by ignis-swarm: /);
-  }
-});
+  });
+}
 
-test("pre-tool-use prints force_ask for force pushes and git clean -f", () => {
-  for (const command of [
-    "git push --force-with-lease origin feat/a",
-    "git push -f origin feature/main-fix",
-    "git clean -fdx",
-    "node scripts/ignis-broker.mjs trust",
-  ]) {
+for (const command of [
+  "git push --force-with-lease origin feat/a",
+  "git push -f origin feature/main-fix",
+  "git clean -fdx",
+  "node scripts/ignis-broker.mjs trust",
+]) {
+  test(`pre-tool-use asks before ${JSON.stringify(command)}`, () => {
     const out = runCommand(command);
-    assert.equal(out.decision, "force_ask", `Expected force_ask for: ${command}`);
+    assert.equal(out.decision, "force_ask");
     assert.match(out.reason, /requires explicit user confirmation/);
-  }
-});
+  });
+}
 
-test("pre-tool-use allows normal commands and quoted text", () => {
-  for (const command of ["npm test", 'echo "git reset --hard"', "git commit -m \"don't use --no-verify\""]) {
-    assert.deepEqual(runCommand(command), { decision: "allow" }, `Expected allow for: ${command}`);
-  }
-});
+for (const command of ["npm test", 'echo "git reset --hard"', "git commit -m \"don't use --no-verify\""]) {
+  test(`pre-tool-use allows ${JSON.stringify(command)}`, () => {
+    assert.deepEqual(runCommand(command), { decision: "allow" });
+  });
+}

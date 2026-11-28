@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isolatedEnv, mkTemp, runNode, writeOnboardingState } from "./helpers.mjs";
+import { isolatedEnv, mkTemp, removeTree, runNode, writeOnboardingState } from "./helpers.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOOKS_DIR = path.join(PLUGIN_ROOT, "hooks");
 const HOOK = path.join(HOOKS_DIR, "pre-tool-use.mjs");
+const HOOK_TIMEOUT_MS = 60_000;
 const NO_OPINION = { decision: "allow" };
 const UNREADABLE_LINE = "ignis-swarm pre-tool-use: unreadable hook payload";
 
@@ -15,7 +16,7 @@ function runHook(input, { hookPath = HOOK, state } = {}) {
   const iso = isolatedEnv();
   try {
     if (state) writeOnboardingState(iso.dirs.brokerData, state);
-    const res = runNode(hookPath, [], { input, env: iso.env, cwd: PLUGIN_ROOT, timeoutMs: 8000 });
+    const res = runNode(hookPath, [], { input, env: iso.env, cwd: PLUGIN_ROOT, timeoutMs: HOOK_TIMEOUT_MS });
     assert.equal(res.timedOut, false, "the hook timed out");
     assert.equal(res.status, 0, `the hook exited ${res.status}: ${res.stderr}`);
     return { out: JSON.parse(res.stdout.trim()), raw: res.stdout, stderr: res.stderr };
@@ -93,7 +94,7 @@ function commandSeenByRules(commandLine) {
     });
     return out.reason;
   } finally {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeTree(root);
   }
 }
 
@@ -110,17 +111,17 @@ test("a CommandLine that is a JSON-encoded string is still denied", () => {
   assert.equal(out.decision, "deny");
 });
 
-test("the command rules see a JSON-encoded CommandLine as its plain value", () => {
-  for (const [encoded, plain] of JSON_ENCODED_COMMANDS) {
-    assert.equal(commandSeenByRules(encoded), plain, encoded);
-  }
-});
+for (const [encoded, plain] of JSON_ENCODED_COMMANDS) {
+  test(`the command rules see the JSON-encoded CommandLine ${encoded} as its plain value`, () => {
+    assert.equal(commandSeenByRules(encoded), plain);
+  });
+}
 
-test("a CommandLine that is not one whole JSON string literal reaches the command rules unchanged", () => {
-  for (const commandLine of PLAIN_COMMANDS) {
-    assert.equal(commandSeenByRules(commandLine), commandLine, commandLine);
-  }
-});
+for (const commandLine of PLAIN_COMMANDS) {
+  test(`the CommandLine ${commandLine} reaches the command rules unchanged`, () => {
+    assert.equal(commandSeenByRules(commandLine), commandLine);
+  });
+}
 
 test("a payload without a tool name gets no opinion", () => {
   const { out } = runHook(JSON.stringify({ toolCall: { args: { CommandLine: "git reset --hard" } } }));
@@ -133,21 +134,21 @@ test("invalid JSON on stdin gets no opinion and one stderr line", () => {
   assert.equal(stderr.trim(), UNREADABLE_LINE);
 });
 
-test("empty stdin gets no opinion and one stderr line", () => {
-  for (const input of ["", "  \n"]) {
+for (const input of ["", "  \n"]) {
+  test(`empty stdin ${JSON.stringify(input)} gets no opinion and one stderr line`, () => {
     const { out, stderr } = runHook(input);
-    assert.deepEqual(out, NO_OPINION, JSON.stringify(input));
+    assert.deepEqual(out, NO_OPINION);
     assert.equal(stderr.trim(), UNREADABLE_LINE);
-  }
-});
+  });
+}
 
-test("stdin that is valid JSON but not a payload object gets no opinion and one stderr line", () => {
-  for (const input of ["null", "7", '"text"', "[]", '[{"toolCall":{"name":"run_command"}}]', "{}"]) {
+for (const input of ["null", "7", '"text"', "[]", '[{"toolCall":{"name":"run_command"}}]', "{}"]) {
+  test(`stdin ${input} is valid JSON but not a payload object: no opinion and one stderr line`, () => {
     const { out, stderr } = runHook(input);
-    assert.deepEqual(out, NO_OPINION, input);
-    assert.equal(stderr.trim(), UNREADABLE_LINE, input);
-  }
-});
+    assert.deepEqual(out, NO_OPINION);
+    assert.equal(stderr.trim(), UNREADABLE_LINE);
+  });
+}
 
 test("a payload that starts with a byte order mark is still read", () => {
   const { out, stderr } = runHook("﻿" + toolPayload("RunCommand", { CommandLine: "git reset --hard" }));
@@ -175,7 +176,7 @@ test("an error in the command rules is written to stderr and the hook gives no o
     assert.deepEqual(out, NO_OPINION);
     assert.match(stderr, /ignis-swarm pre-tool-use: rules exploded/);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeTree(root);
   }
 });
 
@@ -193,17 +194,18 @@ test("an unrelated tool prints exactly the no-opinion string", () => {
   assert.equal(stdout, NO_OPINION_STDOUT);
 });
 
-test("an unreadable payload prints exactly the no-opinion string", () => {
-  for (const input of ["", "{not json", "{}", "null"]) {
-    const stdout = runHook(input).raw;
-    assert.equal(stdout, NO_OPINION_STDOUT, JSON.stringify(input));
-    assert.notEqual(stdout, "{}", JSON.stringify(input));
-  }
-});
+for (const input of ["", "{not json", "{}", "null"]) {
+  test(`an unreadable payload ${JSON.stringify(input)} prints exactly the no-opinion string`, () => {
+    assert.equal(runHook(input).raw, NO_OPINION_STDOUT);
+  });
+}
 
 test("a subagent type the gate has no opinion on prints exactly the no-opinion string", () => {
   const otherType = toolPayload("invoke_subagent", { TypeName: "general-purpose" });
   assert.equal(runHook(otherType, { state: HEADLESS_ALWAYS }).raw, NO_OPINION_STDOUT);
+});
+
+test("blind-edge-hunter under the default routing prints exactly the no-opinion string", () => {
   const hunter = toolPayload("invoke_subagent", { TypeName: "blind-edge-hunter" });
-  assert.equal(runHook(hunter).raw, NO_OPINION_STDOUT, "default routing is antigravity_gemini_only");
+  assert.equal(runHook(hunter).raw, NO_OPINION_STDOUT);
 });

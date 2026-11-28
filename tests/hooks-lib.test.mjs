@@ -1,9 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   isInteractiveUserSession,
@@ -13,218 +11,232 @@ import {
 } from "../hooks/lib.mjs";
 import { evaluateCommand } from "../hooks/command-rules.mjs";
 import { evaluateSubagent } from "../hooks/subagent-gate.mjs";
+import { isolatedEnv, mkTemp, removeTree, runNode } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
 const HOOKS_DIR = path.join(PLUGIN_ROOT, "hooks");
+// Spawned hooks start slowly when the whole suite runs in parallel; the bound only catches a hang.
+const HOOK_TIMEOUT_MS = 60_000;
 
-function makeTempDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function removeDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true });
-}
-
-function isolatedEnv(root) {
-  return {
-    ...process.env,
-    IGNIS_BROKER_HOME: path.join(root, "broker-home"),
-    IGNIS_BROKER_DATA: path.join(root, "broker-data"),
-    HOME: root,
-    USERPROFILE: root,
-    CODEX_HOME: path.join(root, "codex"),
-  };
-}
-
-test("resolveWorkspace prefers an existing cwd, then the first workspace path, then empty", () => {
-  const dir = makeTempDir("ignis-lib-ws-");
+/** Run `fn(iso, root)` with a fresh isolated environment and an empty temp folder; both are removed afterwards. */
+function withSandbox(prefix, fn) {
+  const iso = isolatedEnv();
+  const root = mkTemp(prefix);
   try {
+    return fn(iso, root);
+  } finally {
+    removeTree(root);
+    iso.cleanup();
+  }
+}
+
+/** Run `fn` with the broker environment variables of `iso` set on this process, then restore them. */
+function withBrokerEnv(iso, fn) {
+  const keys = ["IGNIS_BROKER_HOME", "IGNIS_BROKER_DATA"];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) process.env[key] = iso.env[key];
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function subagentCall(args) {
+  return { toolCall: { name: "invoke_subagent", args } };
+}
+
+test("resolveWorkspace prefers an existing cwd over the workspace paths", () => {
+  withSandbox("ignis-lib-ws-", (iso, dir) => {
     assert.equal(resolveWorkspace({ cwd: dir, workspacePaths: ["/other"] }), dir);
+  });
+});
+
+test("resolveWorkspace falls back to the first workspace path when cwd does not exist", () => {
+  withSandbox("ignis-lib-ws-", (iso, dir) => {
     const missing = path.join(dir, "does-not-exist");
     assert.equal(resolveWorkspace({ cwd: missing, workspacePaths: ["/first", "/second"] }), "/first");
-    assert.equal(resolveWorkspace({ workspacePaths: ["/first"] }), "/first");
-    assert.equal(resolveWorkspace({ cwd: missing, workspacePaths: [] }), "");
-    assert.equal(resolveWorkspace({ cwd: missing, workspacePaths: "nope" }), "");
-    assert.equal(resolveWorkspace({}), "");
-  } finally {
-    removeDir(dir);
-  }
+  });
 });
 
-test("isSubagentPayload is a negative check on the three subagent markers", () => {
-  assert.equal(isSubagentPayload({ isSubagent: true }), true);
-  assert.equal(isSubagentPayload({ subagent: true }), true);
-  assert.equal(isSubagentPayload({ parentConversationId: "parent-1" }), true);
-  assert.equal(isSubagentPayload({}), false);
-  assert.equal(isSubagentPayload({ isSubagent: "true" }), false);
-  assert.equal(isSubagentPayload({ subagent: 1 }), false);
-  assert.equal(isSubagentPayload({ parentConversationId: "" }), false);
-  assert.equal(isSubagentPayload({ lastUserInput: "hello" }), false);
+test("resolveWorkspace uses the first workspace path when there is no cwd", () => {
+  assert.equal(resolveWorkspace({ workspacePaths: ["/first"] }), "/first");
 });
 
-test("isInteractiveUserSession needs positive evidence of a user and rejects subagents", () => {
-  assert.equal(isInteractiveUserSession({}), false);
-  assert.equal(isInteractiveUserSession({ lastUserInput: "" }), false);
-  assert.equal(isInteractiveUserSession({ lastUserInput: "   " }), false);
-  assert.equal(isInteractiveUserSession({ lastUserInput: 42 }), false);
-  assert.equal(isInteractiveUserSession({ lastUserInput: "build it" }), true);
-  assert.equal(isInteractiveUserSession({ lastUserInput: "build it", isSubagent: true }), false);
-  assert.equal(isInteractiveUserSession({ lastUserInput: "build it", subagent: true }), false);
-  assert.equal(
-    isInteractiveUserSession({ lastUserInput: "build it", parentConversationId: "p" }),
-    false,
-  );
-  assert.equal(isInteractiveUserSession({ transcriptPath: "   " }), false);
+for (const [label, payload] of [
+  ["an empty workspace list", { workspacePaths: [] }],
+  ["a workspace list that is not an array", { workspacePaths: "nope" }],
+  ["no cwd and no workspace list", {}],
+]) {
+  test(`resolveWorkspace returns an empty string for ${label}`, () => {
+    withSandbox("ignis-lib-ws-", (iso, dir) => {
+      const input = "workspacePaths" in payload ? { cwd: path.join(dir, "does-not-exist"), ...payload } : payload;
+      assert.equal(resolveWorkspace(input), "");
+    });
+  });
+}
+
+for (const [payload, expected] of [
+  [{ isSubagent: true }, true],
+  [{ subagent: true }, true],
+  [{ parentConversationId: "parent-1" }, true],
+  [{}, false],
+  [{ isSubagent: "true" }, false],
+  [{ subagent: 1 }, false],
+  [{ parentConversationId: "" }, false],
+  [{ lastUserInput: "hello" }, false],
+]) {
+  test(`isSubagentPayload(${JSON.stringify(payload)}) is ${expected}`, () => {
+    assert.equal(isSubagentPayload(payload), expected);
+  });
+}
+
+for (const [payload, expected] of [
+  [{}, false],
+  [{ lastUserInput: "" }, false],
+  [{ lastUserInput: "   " }, false],
+  [{ lastUserInput: 42 }, false],
+  [{ lastUserInput: "build it" }, true],
+  [{ lastUserInput: "build it", isSubagent: true }, false],
+  [{ lastUserInput: "build it", subagent: true }, false],
+  [{ lastUserInput: "build it", parentConversationId: "p" }, false],
+  [{ transcriptPath: "   " }, false],
+]) {
+  test(`isInteractiveUserSession(${JSON.stringify(payload)}) is ${expected}`, () => {
+    assert.equal(isInteractiveUserSession(payload), expected);
+  });
+}
+
+const USER_INPUT_LINE = `${JSON.stringify({ type: "USER_INPUT", text: "hi" })}\n`;
+
+const TRANSCRIPTS = [
+  ["a USER_INPUT line at the head", USER_INPUT_LINE, true],
+  ["a USER_INPUT line with spaces around the colon", '{"type" : "USER_INPUT"}\n', true],
+  ["no USER_INPUT line", `${JSON.stringify({ type: "PLANNER_RESPONSE" })}\n`, false],
+  ["a USER_INPUT line beyond the head of the file", `${"x".repeat(5000)}\n${JSON.stringify({ type: "USER_INPUT" })}\n`, false],
+];
+
+for (const [label, content, expected] of TRANSCRIPTS) {
+  test(`isInteractiveUserSession on a transcript with ${label} is ${expected}`, () => {
+    withSandbox("ignis-lib-tr-", (iso, dir) => {
+      const transcript = path.join(dir, "transcript.jsonl");
+      fs.writeFileSync(transcript, content);
+      assert.equal(isInteractiveUserSession({ transcriptPath: transcript }), expected);
+    });
+  });
+}
+
+test("isInteractiveUserSession rejects a missing transcript file", () => {
+  withSandbox("ignis-lib-tr-", (iso, dir) => {
+    assert.equal(isInteractiveUserSession({ transcriptPath: path.join(dir, "missing.jsonl") }), false);
+  });
 });
 
-test("isInteractiveUserSession reads USER_INPUT from the head of a transcript file", () => {
-  const dir = makeTempDir("ignis-lib-tr-");
-  try {
-    const withUser = path.join(dir, "with-user.jsonl");
-    fs.writeFileSync(withUser, `${JSON.stringify({ type: "USER_INPUT", text: "hi" })}\n`);
-    const spacedUser = path.join(dir, "spaced-user.jsonl");
-    fs.writeFileSync(spacedUser, '{"type" : "USER_INPUT"}\n');
-    const withoutUser = path.join(dir, "without-user.jsonl");
-    fs.writeFileSync(withoutUser, `${JSON.stringify({ type: "PLANNER_RESPONSE" })}\n`);
-    const lateUser = path.join(dir, "late-user.jsonl");
-    fs.writeFileSync(
-      lateUser,
-      `${"x".repeat(5000)}\n${JSON.stringify({ type: "USER_INPUT" })}\n`,
-    );
-    const missing = path.join(dir, "missing.jsonl");
+for (const [label, extra] of [
+  ["isSubagent", { isSubagent: true }],
+  ["parentConversationId", { parentConversationId: "p" }],
+]) {
+  test(`isInteractiveUserSession rejects a transcript with a user when ${label} is set`, () => {
+    withSandbox("ignis-lib-tr-", (iso, dir) => {
+      const transcript = path.join(dir, "transcript.jsonl");
+      fs.writeFileSync(transcript, USER_INPUT_LINE);
+      assert.equal(isInteractiveUserSession({ transcriptPath: transcript, ...extra }), false);
+    });
+  });
+}
 
-    assert.equal(isInteractiveUserSession({ transcriptPath: withUser }), true);
-    assert.equal(isInteractiveUserSession({ transcriptPath: spacedUser }), true);
-    assert.equal(isInteractiveUserSession({ transcriptPath: withoutUser }), false);
-    assert.equal(isInteractiveUserSession({ transcriptPath: lateUser }), false);
-    assert.equal(isInteractiveUserSession({ transcriptPath: missing }), false);
-    assert.equal(isInteractiveUserSession({ transcriptPath: withUser, isSubagent: true }), false);
-    assert.equal(
-      isInteractiveUserSession({ transcriptPath: withUser, parentConversationId: "p" }),
-      false,
-    );
-  } finally {
-    removeDir(dir);
-  }
-});
+for (const [input, expected] of [
+  ["conv-123_a.b", "conv-123_a.b"],
+  ["  conv-1  ", "conv-1"],
+  ["a b/c\\d:e", "a_b_c_d_e"],
+  ["../x", ".._x"],
+  ["..\\..\\evil", ".._.._evil"],
+  [undefined, "unknown"],
+  [null, "unknown"],
+  ["", "unknown"],
+  ["   ", "unknown"],
+  [12345, "12345"],
+]) {
+  test(`sanitizeConversationId(${JSON.stringify(input)}) is ${JSON.stringify(expected)}`, () => {
+    assert.equal(sanitizeConversationId(input), expected);
+  });
+}
 
-test("sanitizeConversationId keeps dots, trims, falls back to unknown and neutralises separators", () => {
-  assert.equal(sanitizeConversationId("conv-123_a.b"), "conv-123_a.b");
-  assert.equal(sanitizeConversationId("  conv-1  "), "conv-1");
-  assert.equal(sanitizeConversationId("a b/c\\d:e"), "a_b_c_d_e");
-  assert.equal(sanitizeConversationId("../x"), ".._x");
-  assert.equal(sanitizeConversationId("..\\..\\evil"), ".._.._evil");
-  assert.equal(sanitizeConversationId(undefined), "unknown");
-  assert.equal(sanitizeConversationId(null), "unknown");
-  assert.equal(sanitizeConversationId(""), "unknown");
-  assert.equal(sanitizeConversationId("   "), "unknown");
-  assert.equal(sanitizeConversationId(12345), "12345");
-  for (const hostile of ["../x", "..\\x", "/etc/passwd", "a/../../b", "C:\\Windows"]) {
-    assert.doesNotMatch(sanitizeConversationId(hostile), /[\\/:]/, `separator left in: ${hostile}`);
-  }
-});
+for (const hostile of ["../x", "..\\x", "/etc/passwd", "a/../../b", "C:\\Windows"]) {
+  test(`sanitizeConversationId leaves no path separator in ${JSON.stringify(hostile)}`, () => {
+    assert.doesNotMatch(sanitizeConversationId(hostile), /[\\/:]/);
+  });
+}
 
-test("evaluateCommand returns deny, force_ask or null in rule order", () => {
-  const deny = evaluateCommand("git reset --hard HEAD~1");
-  assert.equal(deny.decision, "deny");
-  assert.match(deny.reason, /git reset --hard/);
+for (const [command, decision, reasonPattern] of [
+  ["git reset --hard HEAD~1", "deny", /git reset --hard/],
+  ["git push --force-with-lease origin feat/a", "force_ask", /force push/],
+  ["git push --force origin main", "deny", /force-pushing to main\/master is forbidden/],
+  ["git commit -m wip --no-verify", "deny", /--no-verify/],
+  ["git clean -fd", "force_ask", /git clean -f/],
+]) {
+  test(`evaluateCommand ${JSON.stringify(command)} is ${decision}`, () => {
+    const result = evaluateCommand(command);
+    assert.equal(result.decision, decision);
+    assert.match(result.reason, reasonPattern);
+  });
+}
 
-  const ask = evaluateCommand("git push --force-with-lease origin feat/a");
-  assert.equal(ask.decision, "force_ask");
-  assert.match(ask.reason, /force push/);
+for (const command of ["npm test", "", "   ", undefined]) {
+  test(`evaluateCommand has no opinion on ${JSON.stringify(command)}`, () => {
+    assert.equal(evaluateCommand(command), null);
+  });
+}
 
-  assert.equal(evaluateCommand("git push --force origin main").decision, "deny");
-  assert.equal(evaluateCommand("git commit -m wip --no-verify").decision, "deny");
-  assert.equal(evaluateCommand("git clean -fd").decision, "force_ask");
-
-  assert.equal(evaluateCommand("npm test"), null);
-  assert.equal(evaluateCommand(""), null);
-  assert.equal(evaluateCommand("   "), null);
-  assert.equal(evaluateCommand(undefined), null);
-});
-
-test("evaluateSubagent returns null for subagents that are not blind-edge-hunter", () => {
-  const root = makeTempDir("ignis-lib-gate-other-");
-  const saved = {};
-  const env = isolatedEnv(root);
-  for (const key of ["IGNIS_BROKER_HOME", "IGNIS_BROKER_DATA"]) {
-    saved[key] = process.env[key];
-    process.env[key] = env[key];
-  }
-  try {
-    assert.equal(
-      evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { TypeName: "code-reviewer" } } }),
-      null,
-    );
-    assert.equal(
-      evaluateSubagent({ toolCall: { name: "invoke_subagent", args: { typeName: "research" } } }),
-      null,
-    );
-    assert.equal(evaluateSubagent({ toolCall: { name: "invoke_subagent", args: {} } }), null);
-    assert.equal(evaluateSubagent({}), null);
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    removeDir(root);
-  }
-});
+for (const [label, payload] of [
+  ["TypeName code-reviewer", subagentCall({ TypeName: "code-reviewer" })],
+  ["typeName research", subagentCall({ typeName: "research" })],
+  ["no type name", subagentCall({})],
+  ["no tool call", {}],
+]) {
+  test(`evaluateSubagent returns null for ${label}`, () => {
+    withSandbox("ignis-lib-gate-other-", (iso) => {
+      withBrokerEnv(iso, () => assert.equal(evaluateSubagent(payload), null));
+    });
+  });
+}
 
 test("evaluateSubagent returns null for blind-edge-hunter when routing is not headless_always", () => {
-  const root = makeTempDir("ignis-lib-gate-");
-  const saved = {};
-  const env = isolatedEnv(root);
-  for (const key of ["IGNIS_BROKER_HOME", "IGNIS_BROKER_DATA"]) {
-    saved[key] = process.env[key];
-    process.env[key] = env[key];
-  }
-  try {
-    assert.equal(
-      evaluateSubagent({
-        cwd: root,
-        toolCall: { name: "invoke_subagent", args: { TypeName: "blind-edge-hunter" } },
-      }),
-      null,
-    );
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    removeDir(root);
-  }
+  withSandbox("ignis-lib-gate-", (iso, root) => {
+    withBrokerEnv(iso, () => {
+      assert.equal(evaluateSubagent({ cwd: root, ...subagentCall({ TypeName: "blind-edge-hunter" }) }), null);
+    });
+  });
 });
 
-test("readStdin parses JSON from stdin and returns an empty object for empty or invalid input", () => {
-  const dir = makeTempDir("ignis-lib-stdin-");
-  try {
-    const script = path.join(dir, "read-stdin.mjs");
-    const libUrl = pathToFileURL(path.join(HOOKS_DIR, "lib.mjs")).href;
-    fs.writeFileSync(
-      script,
-      `import { readStdin } from ${JSON.stringify(libUrl)};\nprocess.stdout.write(JSON.stringify(readStdin()));\n`,
-    );
-    const run = (input) => {
-      const res = spawnSync(process.execPath, [script], {
-        input,
-        encoding: "utf8",
-        timeout: 8000,
-        windowsHide: true,
-      });
+const STDIN_CASES = [
+  ["a JSON object", '{"a":1,"b":[2]}', { a: 1, b: [2] }],
+  ["a JSON object with surrounding whitespace", '  {"a":1}\n', { a: 1 }],
+  ["empty input", "", {}],
+  ["whitespace only", "  \n", {}],
+  ["text that is not JSON", "not json", {}],
+];
+
+for (const [label, input, expected] of STDIN_CASES) {
+  test(`readStdin returns ${JSON.stringify(expected)} for ${label}`, () => {
+    withSandbox("ignis-lib-stdin-", (iso, dir) => {
+      const script = path.join(dir, "read-stdin.mjs");
+      const libUrl = pathToFileURL(path.join(HOOKS_DIR, "lib.mjs")).href;
+      fs.writeFileSync(
+        script,
+        `import { readStdin } from ${JSON.stringify(libUrl)};\nprocess.stdout.write(JSON.stringify(readStdin()));\n`,
+      );
+      const res = runNode(script, [], { input, env: iso.env, timeoutMs: HOOK_TIMEOUT_MS });
+      assert.equal(res.timedOut, false, "readStdin script timed out");
       assert.equal(res.status, 0, res.stderr);
-      return JSON.parse(res.stdout);
-    };
-    assert.deepEqual(run('{"a":1,"b":[2]}'), { a: 1, b: [2] });
-    assert.deepEqual(run('  {"a":1}\n'), { a: 1 });
-    assert.deepEqual(run(""), {});
-    assert.deepEqual(run("  \n"), {});
-    assert.deepEqual(run("not json"), {});
-  } finally {
-    removeDir(dir);
-  }
-});
+      assert.deepEqual(JSON.parse(res.stdout), expected);
+    });
+  });
+}
 
 const BROKEN_GATES = {
   "a syntax error": "export function evaluateSubagent( {\n",
@@ -234,88 +246,84 @@ const BROKEN_GATES = {
     'export function evaluateSubagent() { throw new Error("gate exploded"); }\n',
 };
 
-function runCopiedPreToolUse(root, input) {
-  const res = spawnSync(process.execPath, [path.join(root, "hooks", "pre-tool-use.mjs")], {
-    cwd: root,
-    input: JSON.stringify(input),
-    encoding: "utf8",
-    env: isolatedEnv(root),
-    timeout: 8000,
-    windowsHide: true,
-  });
-  assert.equal(res.status, 0, `pre-tool-use exited ${res.status}: ${res.stderr}`);
-  return { out: JSON.parse(res.stdout.trim()), stderr: res.stderr };
-}
-
-for (const [label, source] of Object.entries(BROKEN_GATES)) {
-  test(`pre-tool-use keeps the command guard when the subagent gate has ${label}`, () => {
-    const root = makeTempDir("ignis-lib-broken-");
-    try {
-      fs.cpSync(HOOKS_DIR, path.join(root, "hooks"), { recursive: true });
-      fs.writeFileSync(path.join(root, "hooks", "subagent-gate.mjs"), source);
-
-      const denied = runCopiedPreToolUse(root, {
-        toolCall: { name: "run_command", args: { CommandLine: "git reset --hard" } },
-      });
-      assert.equal(denied.out.decision, "deny");
-
-      const asked = runCopiedPreToolUse(root, {
-        toolCall: { name: "run_command", args: { CommandLine: "git clean -fd" } },
-      });
-      assert.equal(asked.out.decision, "force_ask");
-
-      const allowed = runCopiedPreToolUse(root, {
-        toolCall: { name: "run_command", args: { CommandLine: "npm test" } },
-      });
-      assert.equal(allowed.out.decision, "allow");
-
-      const subagent = runCopiedPreToolUse(root, {
-        toolCall: { name: "invoke_subagent", args: { TypeName: "blind-edge-hunter" } },
-      });
-      assert.equal(subagent.out.decision, "allow");
-      assert.notEqual(subagent.stderr.trim(), "", "a gate failure must be reported on stderr");
-    } finally {
-      removeDir(root);
-    }
-  });
-}
-
-test("pre-tool-use prints allow and exits 0 when stdin is not an object", () => {
-  const root = makeTempDir("ignis-lib-null-");
-  try {
+/** Run a copy of the hooks, with `gateSource` as its subagent gate, on one tool call. */
+function runCopiedPreToolUse(gateSource, toolCall) {
+  return withSandbox("ignis-lib-broken-", (iso, root) => {
     fs.cpSync(HOOKS_DIR, path.join(root, "hooks"), { recursive: true });
-    for (const input of [null, 7, "text"]) {
-      const res = spawnSync(process.execPath, [path.join(root, "hooks", "pre-tool-use.mjs")], {
+    fs.writeFileSync(path.join(root, "hooks", "subagent-gate.mjs"), gateSource);
+    const res = runNode(path.join(root, "hooks", "pre-tool-use.mjs"), [], {
+      cwd: root,
+      input: JSON.stringify({ toolCall }),
+      env: iso.env,
+      timeoutMs: HOOK_TIMEOUT_MS,
+    });
+    assert.equal(res.timedOut, false, "pre-tool-use timed out");
+    assert.equal(res.status, 0, `pre-tool-use exited ${res.status}: ${res.stderr}`);
+    return { out: JSON.parse(res.stdout.trim()), stderr: res.stderr };
+  });
+}
+
+const GUARDED_COMMANDS = [
+  ["denies git reset --hard", "git reset --hard", "deny"],
+  ["asks before git clean -fd", "git clean -fd", "force_ask"],
+  ["allows npm test", "npm test", "allow"],
+];
+
+for (const [gateLabel, source] of Object.entries(BROKEN_GATES)) {
+  for (const [label, commandLine, decision] of GUARDED_COMMANDS) {
+    test(`pre-tool-use ${label} when the subagent gate has ${gateLabel}`, () => {
+      const result = runCopiedPreToolUse(source, { name: "run_command", args: { CommandLine: commandLine } });
+      assert.equal(result.out.decision, decision);
+    });
+  }
+
+  test(`pre-tool-use allows a subagent and reports on stderr when the subagent gate has ${gateLabel}`, () => {
+    const result = runCopiedPreToolUse(source, { name: "invoke_subagent", args: { TypeName: "blind-edge-hunter" } });
+    assert.equal(result.out.decision, "allow");
+    assert.match(result.stderr.trim(), /^ignis-swarm pre-tool-use: .+/);
+  });
+}
+
+for (const input of [null, 7, "text"]) {
+  test(`pre-tool-use prints allow and exits 0 when stdin is ${JSON.stringify(input)}`, () => {
+    withSandbox("ignis-lib-null-", (iso, root) => {
+      fs.cpSync(HOOKS_DIR, path.join(root, "hooks"), { recursive: true });
+      const res = runNode(path.join(root, "hooks", "pre-tool-use.mjs"), [], {
         cwd: root,
         input: JSON.stringify(input),
-        encoding: "utf8",
-        env: isolatedEnv(root),
-        timeout: 8000,
-        windowsHide: true,
+        env: iso.env,
+        timeoutMs: HOOK_TIMEOUT_MS,
       });
+      assert.equal(res.timedOut, false, "pre-tool-use timed out");
       assert.equal(res.status, 0, res.stderr);
       assert.deepEqual(JSON.parse(res.stdout.trim()), { decision: "allow" });
-    }
-  } finally {
-    removeDir(root);
-  }
+    });
+  });
+}
+
+test("pre-tool-use has no static dependency on the broker", () => {
+  const preToolUse = fs.readFileSync(path.join(HOOKS_DIR, "pre-tool-use.mjs"), "utf8");
+  assert.doesNotMatch(preToolUse, /scripts\/broker/);
 });
 
-test("pre-tool-use and command-rules have no static dependency on the broker or the subagent gate", () => {
-  const preToolUse = fs.readFileSync(path.join(HOOKS_DIR, "pre-tool-use.mjs"), "utf8");
+test("command-rules has no static dependency on the broker", () => {
   const commandRules = fs.readFileSync(path.join(HOOKS_DIR, "command-rules.mjs"), "utf8");
-  assert.doesNotMatch(preToolUse, /scripts\/broker/);
   assert.doesNotMatch(commandRules, /scripts\/broker/);
+});
+
+test("pre-tool-use loads the subagent gate by dynamic import only", () => {
+  const preToolUse = fs.readFileSync(path.join(HOOKS_DIR, "pre-tool-use.mjs"), "utf8");
   assert.doesNotMatch(preToolUse, /^import\b[^\n]*subagent-gate/m);
   assert.match(preToolUse, /import\(\s*["']\.\/subagent-gate\.mjs["']\s*\)/);
 });
 
-test("no hook redefines a helper that lives in hooks/lib.mjs", () => {
-  const helperDefinition =
-    /(?:function|const|let)\s+(?:readStdin|resolveWorkspace|isSubagentPayload|isInteractiveUserSession|sanitizeConversationId|sanitizeConvId)\b/;
-  for (const name of fs.readdirSync(HOOKS_DIR)) {
-    if (!name.endsWith(".mjs") || name === "lib.mjs") continue;
+const SHARED_HELPER_DEFINITION =
+  /(?:function|const|let)\s+(?:readStdin|resolveWorkspace|isSubagentPayload|isInteractiveUserSession|sanitizeConversationId|sanitizeConvId)\b/;
+
+for (const name of fs.readdirSync(HOOKS_DIR)) {
+  if (!name.endsWith(".mjs") || name === "lib.mjs") continue;
+  test(`${name} does not redefine a helper that lives in hooks/lib.mjs`, () => {
     const source = fs.readFileSync(path.join(HOOKS_DIR, name), "utf8");
-    assert.doesNotMatch(source, helperDefinition, `${name} redefines a shared helper`);
-  }
-});
+    assert.doesNotMatch(source, SHARED_HELPER_DEFINITION);
+  });
+}
