@@ -212,7 +212,7 @@ async function killAndWait(pid) {
 }
 
 const BROKER_COMMAND = /ignis-broker\.mjs["']?\s+daemon(?:\s|$)/;
-const DATA_DIR_FLAG = /(?:^|\s)--data-dir(?:\s+|=)["']?/g;
+const DATA_DIR_FLAG = /(?:^|\s)--data-dir\s+["']?/g;
 const PATH_BOUNDARY = /^(?:["']|\s*$|\s+-)/;
 
 function queryCommandLine(pid) {
@@ -251,7 +251,7 @@ async function pidIdentity(pid, dataDir) {
   if (!isPidAlive(pid)) return "dead";
   const line = await queryCommandLine(pid);
   if (line === null) return isPidAlive(pid) ? "unknown" : "dead";
-  return commandLineIdentity(line, dataDir);
+  return commandLineIdentity(line, path.resolve(dataDir));
 }
 
 async function confirmedIdentity(pid, dataDir) {
