@@ -56,5 +56,5 @@ The runner's prompt asks the reviewer to end with exactly one line, `Status: PAS
 
 ## Verification & Links
 - **Code / Contracts:** `scripts/broker/review-state.mjs`, `hooks/subagent-gate.mjs`, `scripts/run-blind-review.mjs` (`parseVerdict`, `reviewStatus`)
-- **Tests:** `tests/review-state.test.mjs`, `tests/subagent-gate.test.mjs`, `tests/blind-review-runner.test.mjs`
+- **Tests:** `tests/review-state.test.mjs`, `tests/subagent-gate.test.mjs`, `tests/blind-review-runner.test.mjs`, `tests/blind-review-verdict.test.mjs`
 - **Tracker:** AGYSWM-61; see ADR-005 and ADR-006
