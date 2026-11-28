@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfig, BROKER_VERSION } from "../scripts/broker/config.mjs";
+import { probeEnvironment } from "../scripts/broker/onboarding.mjs";
+import { initGitRepo, isolatedEnv, runNode, writeOnboardingState } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROKER_BIN = path.resolve(__dirname, "..", "scripts", "ignis-broker.mjs");
@@ -357,4 +359,245 @@ test("detectCli on Windows prefers .cmd over extensionless POSIX shim on PATH", 
 
 test("BROKER_VERSION is 1.0.1", () => {
   assert.equal(BROKER_VERSION, "1.0.1");
+});
+
+const T = { timeoutMs: 30_000 };
+
+function onb(iso, args, opts = {}) {
+  return runNode(BROKER_BIN, ["onboarding", ...args], { env: iso.env, ...T, ...opts });
+}
+
+function stateFile(iso) {
+  return path.join(iso.dirs.brokerData, "onboarding.json");
+}
+
+const SAMPLE_STATE = {
+  brokerManagedServers: ["linear"],
+  tracker: { kind: "linear", mcpServer: "linear" },
+  memtrace: { enabled: true },
+  reviewRouting: { strategy: "antigravity_first", headlessBackend: "codex", headlessModel: "m", effort: "high" },
+};
+
+function withoutStamp(state) {
+  const { completedAt, ...rest } = state;
+  assert.equal(typeof completedAt === "string" || completedAt === null, true);
+  return rest;
+}
+
+test("onboarding --save sets completed true unless skipped, and honours an explicit completed false", () => {
+  const iso = isolatedEnv();
+  try {
+    const plain = onb(iso, ["--save", JSON.stringify(SAMPLE_STATE)]);
+    assert.equal(plain.status, 0, plain.stderr);
+    const saved = JSON.parse(plain.stdout);
+    assert.equal(saved.completed, true);
+    assert.equal(typeof saved.completedAt, "string");
+    assert.equal(JSON.parse(onb(iso, ["--get"]).stdout).completed, true);
+
+    const skipped = JSON.parse(onb(iso, ["--save", JSON.stringify({ skipped: true })]).stdout);
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.completed, false);
+    assert.equal(skipped.completedAt, null);
+
+    onb(iso, ["--reset"]);
+    const explicit = JSON.parse(onb(iso, ["--save", JSON.stringify({ completed: false })]).stdout);
+    assert.equal(explicit.completed, false);
+    assert.equal(explicit.skipped, false);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+test("onboarding --save-file and --stdin save the same state as --save", () => {
+  const iso = isolatedEnv();
+  try {
+    const json = JSON.stringify(SAMPLE_STATE);
+    const viaFlag = withoutStamp(JSON.parse(onb(iso, ["--save", json]).stdout));
+    assert.equal(viaFlag.completed, true);
+
+    const file = path.join(iso.dirs.root, "input.json");
+    fs.writeFileSync(file, `﻿${json}`);
+
+    onb(iso, ["--reset"]);
+    const viaFile = onb(iso, ["--save-file", file]);
+    assert.equal(viaFile.status, 0, viaFile.stderr);
+    assert.deepEqual(withoutStamp(JSON.parse(viaFile.stdout)), viaFlag);
+
+    onb(iso, ["--reset"]);
+    const viaStdin = onb(iso, ["--stdin"], { input: json });
+    assert.equal(viaStdin.status, 0, viaStdin.stderr);
+    assert.deepEqual(withoutStamp(JSON.parse(viaStdin.stdout)), viaFlag);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+test("onboarding --save-file with a missing file and --stdin with empty input fail and write nothing", () => {
+  const iso = isolatedEnv();
+  try {
+    const missing = onb(iso, ["--save-file", path.join(iso.dirs.root, "nope.json")]);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /cannot read/);
+    assert.equal(fs.existsSync(stateFile(iso)), false);
+
+    const empty = onb(iso, ["--stdin"], { input: "  \n" });
+    assert.notEqual(empty.status, 0);
+    assert.match(empty.stderr, /empty/);
+    assert.equal(fs.existsSync(stateFile(iso)), false);
+
+    const dir = onb(iso, ["--save-file", iso.dirs.root]);
+    assert.notEqual(dir.status, 0);
+    assert.match(dir.stderr, /cannot read/);
+    assert.equal(fs.existsSync(stateFile(iso)), false);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+const REJECTED = [
+  ["memtrace not an object", { memtrace: true }, /memtrace.*object/],
+  ["memtrace.enabled not a boolean", { memtrace: { enabled: "yes" } }, /memtrace\.enabled.*boolean/],
+  ["tracker kind outside the known kinds", { tracker: { kind: "jira" } }, /tracker\.kind.*one of/],
+  ["tracker kind in the wrong case", { tracker: { kind: "Linear" } }, /tracker\.kind.*one of/],
+  ["trackers entry with an unknown kind", { trackers: [{ kind: "nope" }] }, /trackers\[0\]\.kind.*one of/],
+  ["reviewRouting.headlessBackend not a known backend", { reviewRouting: { headlessBackend: "gemini" } }, /reviewRouting\.headlessBackend.*one of/],
+  ["reviewRouting.strategy not a known strategy", { reviewRouting: { strategy: "sometimes" } }, /reviewRouting\.strategy.*one of/],
+  ["brokerManagedServers not an array of strings", { brokerManagedServers: ["a", 3] }, /brokerManagedServers.*array of strings/],
+  ["brokerManagedServers a plain string", { brokerManagedServers: "linear" }, /brokerManagedServers.*array of strings/],
+  ["completed not a boolean", { completed: "true" }, /completed.*boolean/],
+  ["compaction.transcriptThresholdKb not a number", { compaction: { transcriptThresholdKb: "big" } }, /transcriptThresholdKb.*number/],
+  ["unknown top-level key", { completd: true }, /unknown key.*completd/],
+];
+
+for (const [label, bad, pattern] of REJECTED) {
+  test(`onboarding --save rejects ${label} and leaves the state file unchanged`, () => {
+    const iso = isolatedEnv();
+    try {
+      const file = writeOnboardingState(iso.dirs.brokerData);
+      const before = fs.readFileSync(file, "utf8");
+      const res = onb(iso, ["--save", JSON.stringify(bad)]);
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, pattern);
+      assert.equal(fs.readFileSync(file, "utf8"), before);
+    } finally {
+      iso.cleanup();
+    }
+  });
+}
+
+test("onboarding --save-file and --stdin run the same validation, and invalid JSON is not quoted back", () => {
+  const iso = isolatedEnv();
+  try {
+    const file = writeOnboardingState(iso.dirs.brokerData);
+    const before = fs.readFileSync(file, "utf8");
+    const input = path.join(iso.dirs.root, "bad.json");
+    fs.writeFileSync(input, JSON.stringify({ memtrace: true }));
+    const viaFile = onb(iso, ["--save-file", input]);
+    assert.notEqual(viaFile.status, 0);
+    assert.match(viaFile.stderr, /memtrace.*object/);
+    const viaStdin = onb(iso, ["--stdin"], { input: JSON.stringify({ memtrace: true }) });
+    assert.notEqual(viaStdin.status, 0);
+    assert.match(viaStdin.stderr, /memtrace.*object/);
+
+    const marker = ["leak", "me", String(Date.now())].join("-");
+    const broken = onb(iso, ["--save", `{"note": "${marker}" "x"`]);
+    assert.notEqual(broken.status, 0);
+    assert.match(broken.stderr, /invalid JSON at line 1, column \d+/);
+    assert.equal(broken.stderr.includes(marker), false);
+    assert.equal(fs.readFileSync(file, "utf8"), before);
+
+    const array = onb(iso, ["--save", "[]"]);
+    assert.notEqual(array.status, 0);
+    assert.match(array.stderr, /JSON object/);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+test("a legacy onboarding state file with odd types still loads through --get", () => {
+  const iso = isolatedEnv();
+  try {
+    fs.mkdirSync(iso.dirs.brokerData, { recursive: true });
+    fs.writeFileSync(
+      stateFile(iso),
+      JSON.stringify({
+        version: "1",
+        completed: "yes",
+        memtrace: true,
+        brokerManagedServers: "linear",
+        compaction: { transcriptThresholdKb: "big" },
+        reviewRouting: { headlessBackend: 7 },
+        legacyKey: 1,
+      })
+    );
+    const res = onb(iso, ["--get"]);
+    assert.equal(res.status, 0, res.stderr);
+    const state = JSON.parse(res.stdout);
+    assert.equal(state.completed, true);
+    assert.deepEqual(state.memtrace, { enabled: false });
+    assert.deepEqual(state.brokerManagedServers, []);
+    assert.equal(state.reviewRouting.headlessBackend, null);
+    assert.equal(state.compaction.transcriptThresholdKb, 550);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+test("onboarding --probe reports localBrokerConfig with its trust and redacted servers", () => {
+  const iso = isolatedEnv();
+  try {
+    const plainDir = path.join(iso.dirs.root, "plain");
+    fs.mkdirSync(plainDir);
+    const none = onb(iso, ["--probe"], { cwd: plainDir });
+    assert.equal(none.status, 0, none.stderr);
+    assert.equal(JSON.parse(none.stdout).localBrokerConfig, null);
+
+    const repo = initGitRepo(path.join(iso.dirs.root, "repo"), { env: iso.env });
+    const bare = onb(iso, ["--probe"], { cwd: repo });
+    assert.equal(JSON.parse(bare.stdout).localBrokerConfig, null);
+
+    const secret = ["sek", "ret", String(process.pid), String(Date.now())].join("-");
+    fs.mkdirSync(path.join(repo, ".agents"));
+    const configFile = path.join(repo, ".agents", "ignis-broker.json");
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({
+        servers: {
+          local: { command: "node", args: ["srv.mjs"], env: { API_TOKEN: secret } },
+          remote: { url: "https://mcp.example.test/mcp?key=" + secret, headers: { Authorization: `Bearer ${secret}` } },
+        },
+      })
+    );
+
+    const untrusted = onb(iso, ["--probe"], { cwd: repo });
+    assert.equal(untrusted.status, 0, untrusted.stderr);
+    assert.equal(untrusted.stdout.includes(secret), false);
+    const local = JSON.parse(untrusted.stdout).localBrokerConfig;
+    assert.equal(local.trusted, false);
+    assert.equal(fs.realpathSync.native(local.path).toLowerCase(), fs.realpathSync.native(configFile).toLowerCase());
+    assert.deepEqual(local.servers.map((s) => s.name).sort(), ["local", "remote"]);
+    assert.deepEqual(local.servers.find((s) => s.name === "local").env, { API_TOKEN: "***" });
+    assert.deepEqual(local.servers.find((s) => s.name === "remote").headers, { Authorization: "***" });
+
+    const trust = runNode(BROKER_BIN, ["trust", "--cwd", repo], { env: iso.env, ...T });
+    assert.equal(trust.status, 0, trust.stderr);
+    const trusted = onb(iso, ["--probe"], { cwd: repo });
+    assert.equal(trusted.stdout.includes(secret), false);
+    assert.equal(JSON.parse(trusted.stdout).localBrokerConfig.trusted, true);
+
+    fs.appendFileSync(configFile, "\n");
+    assert.equal(JSON.parse(onb(iso, ["--probe"], { cwd: repo }).stdout).localBrokerConfig.trusted, false);
+  } finally {
+    iso.cleanup();
+  }
+});
+
+test("probeEnvironment without a cwd reports localBrokerConfig null and does not throw", () => {
+  const iso = isolatedEnv();
+  try {
+    const probed = probeEnvironment(iso.dirs.brokerHome, iso.dirs.brokerData, path.join(iso.dirs.root, "none.json"), iso.dirs.codexHome);
+    assert.equal(probed.localBrokerConfig, null);
+  } finally {
+    iso.cleanup();
+  }
 });

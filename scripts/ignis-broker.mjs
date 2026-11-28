@@ -25,8 +25,10 @@ import {
   loadOnboardingState,
   probeEnvironment,
   resetOnboarding,
-  saveOnboardingState,
+  parseOnboardingInput,
+  saveOnboardingInput,
   skipOnboarding,
+  summarizeServers,
 } from "./broker/onboarding.mjs";
 import { runDaemon } from "./broker/server.mjs";
 import {
@@ -83,47 +85,6 @@ function parseFlags(argv) {
     }
   }
   return { positional, flags };
-}
-
-function maskValues(obj) {
-  const out = {};
-  for (const key of Object.keys(obj && typeof obj === "object" ? obj : {})) out[key] = "***";
-  return out;
-}
-
-function redactUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.username || u.password) {
-      u.username = "***";
-      u.password = "";
-    }
-    for (const key of [...u.searchParams.keys()]) u.searchParams.set(key, "***");
-    u.hash = "";
-    return u.toString();
-  } catch {
-    return "***";
-  }
-}
-
-function summarizeServers(parsed) {
-  const servers = parsed?.servers && typeof parsed.servers === "object" ? parsed.servers : {};
-  return Object.keys(servers).map((name) => {
-    const raw = servers[name] && typeof servers[name] === "object" ? servers[name] : {};
-    const summary = {
-      name,
-      type: raw.transport || (raw.command ? "stdio" : raw.url ? "http" : "stdio"),
-      enabled: raw.enabled !== false,
-    };
-    if (typeof raw.command === "string") {
-      summary.command = raw.command;
-      summary.args = Array.isArray(raw.args) ? raw.args.map(String) : [];
-    }
-    if (typeof raw.url === "string") summary.url = redactUrl(raw.url);
-    if (raw.env) summary.env = maskValues(raw.env);
-    if (raw.headers) summary.headers = maskValues(raw.headers);
-    return summary;
-  });
 }
 
 function trustState(entry) {
@@ -419,7 +380,24 @@ function cmdUnregisterMcp({ home, positional, asJson }) {
   }
 }
 
-function cmdOnboarding({ home, dataDir, flags }) {
+function readOnboardingInput(flags) {
+  const given = [typeof flags.save === "string", typeof flags["save-file"] === "string", flags.stdin === true];
+  if (given.filter(Boolean).length > 1) {
+    throw new Error("onboarding takes only one of --save, --save-file and --stdin");
+  }
+  if (typeof flags.save === "string") return flags.save;
+  if (typeof flags["save-file"] === "string") {
+    try {
+      return fs.readFileSync(flags["save-file"], "utf8");
+    } catch (err) {
+      throw new Error(`cannot read ${flags["save-file"]}: ${err.code ?? "read error"}`);
+    }
+  }
+  if (flags.stdin === true) return fs.readFileSync(0, "utf8");
+  return null;
+}
+
+function cmdOnboarding({ home, dataDir, flags, cwd }) {
   if (flags.get) {
     console.log(JSON.stringify(loadOnboardingState(dataDir), null, 2));
     return;
@@ -427,12 +405,12 @@ function cmdOnboarding({ home, dataDir, flags }) {
   if (flags.probe) {
     const fromPath = typeof flags.from === "string" ? flags.from : undefined;
     const codexHome = typeof flags["codex-home"] === "string" ? flags["codex-home"] : undefined;
-    console.log(JSON.stringify(probeEnvironment(home, dataDir, fromPath, codexHome), null, 2));
+    console.log(JSON.stringify(probeEnvironment(home, dataDir, fromPath, codexHome, cwd), null, 2));
     return;
   }
-  if (typeof flags.save === "string") {
-    const patch = JSON.parse(flags.save);
-    console.log(JSON.stringify(saveOnboardingState(dataDir, patch), null, 2));
+  const raw = readOnboardingInput(flags);
+  if (raw !== null) {
+    console.log(JSON.stringify(saveOnboardingInput(dataDir, parseOnboardingInput(raw)), null, 2));
     return;
   }
   if (flags.skip) {
@@ -443,7 +421,7 @@ function cmdOnboarding({ home, dataDir, flags }) {
     console.log(JSON.stringify(resetOnboarding(dataDir), null, 2));
     return;
   }
-  throw new Error("usage: ignis-broker onboarding (--get | --probe | --save '<json>' | --skip | --reset)");
+  throw new Error("usage: ignis-broker onboarding (--get | --probe [--cwd <dir>] | --save '<json>' | --save-file <path> | --stdin | --skip | --reset)");
 }
 
 const COMMANDS = {
