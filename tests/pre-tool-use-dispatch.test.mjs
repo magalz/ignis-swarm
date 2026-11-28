@@ -18,7 +18,7 @@ function runHook(input, { hookPath = HOOK, state } = {}) {
     const res = runNode(hookPath, [], { input, env: iso.env, cwd: PLUGIN_ROOT, timeoutMs: 8000 });
     assert.equal(res.timedOut, false, "the hook timed out");
     assert.equal(res.status, 0, `the hook exited ${res.status}: ${res.stderr}`);
-    return { out: JSON.parse(res.stdout.trim()), stderr: res.stderr };
+    return { out: JSON.parse(res.stdout.trim()), raw: res.stdout, stderr: res.stderr };
   } finally {
     iso.cleanup();
   }
@@ -177,4 +177,33 @@ test("an error in the command rules is written to stderr and the hook gives no o
   } finally {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+const NO_OPINION_STDOUT = '{"decision":"allow"}';
+
+// The host treats a JSON object without `decision` as a deny (agy CLI 1.5.18, AGYSWM-16), so the
+// no-opinion output must be exactly {"decision":"allow"} and never {}.
+test("an unmatched command prints exactly the no-opinion string", () => {
+  const stdout = runHook(toolPayload("run_command", { CommandLine: "npm test" })).raw;
+  assert.equal(stdout, NO_OPINION_STDOUT);
+});
+
+test("an unrelated tool prints exactly the no-opinion string", () => {
+  const stdout = runHook(toolPayload("read_file", { AbsolutePath: "/tmp/a" })).raw;
+  assert.equal(stdout, NO_OPINION_STDOUT);
+});
+
+test("an unreadable payload prints exactly the no-opinion string", () => {
+  for (const input of ["", "{not json", "{}", "null"]) {
+    const stdout = runHook(input).raw;
+    assert.equal(stdout, NO_OPINION_STDOUT, JSON.stringify(input));
+    assert.notEqual(stdout, "{}", JSON.stringify(input));
+  }
+});
+
+test("a subagent type the gate has no opinion on prints exactly the no-opinion string", () => {
+  const otherType = toolPayload("invoke_subagent", { TypeName: "general-purpose" });
+  assert.equal(runHook(otherType, { state: HEADLESS_ALWAYS }).raw, NO_OPINION_STDOUT);
+  const hunter = toolPayload("invoke_subagent", { TypeName: "blind-edge-hunter" });
+  assert.equal(runHook(hunter).raw, NO_OPINION_STDOUT, "default routing is antigravity_gemini_only");
 });
