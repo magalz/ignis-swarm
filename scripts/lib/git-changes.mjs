@@ -75,6 +75,10 @@ function invalidOptions(base, unified, maxBytes) {
   return null;
 }
 
+export function gitEnv(env = process.env) {
+  return { ...env };
+}
+
 export function gitToplevel(cwd, { env, timeoutMs = 10_000 } = {}) {
   const res = git(cwd, ["rev-parse", "--show-toplevel"], { env, timeoutMs });
   if (!res.error && res.status !== 0 && /not a git repository/i.test(res.stderr?.toString("utf8") ?? "")) {

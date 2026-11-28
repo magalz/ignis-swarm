@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { collectChanges, gitToplevel, headSha } from "../scripts/lib/git-changes.mjs";
+import { collectChanges, gitEnv, gitToplevel, headSha } from "../scripts/lib/git-changes.mjs";
 import { initGitRepo, isolatedEnv, mkTemp, runGit } from "./helpers.mjs";
 
 const ESC = String.fromCharCode(27);
@@ -387,4 +387,13 @@ test("collectChanges keeps git's racy-clean protection: a same-size edit in a ra
     assert.equal(result.error, null);
     assert.ok(result.diff.includes("value = 2"), `expected the edit in the diff, got: ${JSON.stringify(result.diff)}`);
   });
+});
+
+test("gitEnv drops GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE and keeps the rest", () => {
+  const out = gitEnv({ GIT_DIR: "a", GIT_WORK_TREE: "b", GIT_INDEX_FILE: "c", GIT_CONFIG_GLOBAL: "d", PATH: "p" });
+  assert.deepEqual(out, { GIT_CONFIG_GLOBAL: "d", PATH: "p" });
+});
+
+test("gitEnv matches the names case-insensitively on win32", { skip: process.platform !== "win32" }, () => {
+  assert.deepEqual(gitEnv({ git_index_file: "c", Git_Dir: "a", Path: "p" }), { Path: "p" });
 });
