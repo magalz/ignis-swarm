@@ -10,7 +10,7 @@ Run this skill during `/plan` (recommended: high-reasoning planning tier) before
 ## Step 1: Deterministic Discovery
 1. **Codebase map:** Use targeted symbol search, caller/callee tracing, and connected code-intelligence MCPs (when available) to map dependencies and blast radius before broad file reads.
 2. **Opt-in Memtrace discovery:** Only when `~/.ignis-broker/onboarding.json` has `memtrace.enabled === true`, query Memtrace for prior slice context, decisions, or recurring gotchas before broad file reads.
-3. **Opt-in issue tracker context:** Issue-tracker sync is strictly **opt-in**—only when `onboarding.json` has `tracker.kind !== "none"` (see `ignis-audit-docs/references/tracker-profiles.md`), inspect the target epic/milestone/issues and linked docs. Otherwise work directly from the user's spec and repository docs.
+3. **Opt-in issue tracker context:** Issue-tracker sync is strictly **opt-in**—only when `onboarding.json` `trackers` is non-empty (see `ignis-audit-docs/references/tracker-profiles.md`), inspect the target epic/milestone/issues and linked docs in every listed tracker. Otherwise work directly from the user's spec and repository docs.
 4. **Existing decisions:** Read `docs/adr/INDEX.md` and `docs/bdr/INDEX.md` (if present). Open **only** the individual ADR/BDR files whose scope touches this slice.
 
 ## Step 2: YAGNI & Subtract-Before-You-Add Gate (Mandatory Section)
@@ -37,8 +37,8 @@ Each **nuclear task** must represent 1 cohesive responsibility (1–3 files, 0 i
 
 ## Step 5: Sync & Mandatory 2-Step Post-`/plan` Handoff
 After the user approves the plan:
-1. **Opt-in tracker sync:** Only if `onboarding.json` has `tracker.kind !== "none"` (see `ignis-audit-docs/references/tracker-profiles.md`), create/update issues and checklists so every nuclear task is tracked.
-2. **Explain the manual handoff clearly:** Antigravity requires the user to trigger `/compact` and `/swarm` themselves (agents cannot auto-launch native `/swarm`), and a pasted code block starting with `/compact` or `/swarm` is sent as plain text and does NOT trigger the command. Instruct in prose, and keep fenced blocks to the **payload only**, pre-filled with the exact live slice state (never `<placeholder>` text):
+1. **Opt-in tracker sync:** Only if `onboarding.json` `trackers` is non-empty (see `ignis-audit-docs/references/tracker-profiles.md`), create/update issues and checklists in every listed tracker so every nuclear task is tracked.
+2. **Explain the manual handoff clearly:** The user must type `/compact` and `/swarm` themselves via the slash menu (agents cannot launch them), and a pasted code block starting with either is plain text. Instruct in prose, and keep fenced blocks to the **payload only**, pre-filled with the exact live slice state (never `<placeholder>` text):
 
    - **Step 1 (Compact context first):** Tell the user: "Run `/compact` (via the slash menu) with the following text in the same message:"
      ```text

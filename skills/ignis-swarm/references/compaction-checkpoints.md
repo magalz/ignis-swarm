@@ -2,25 +2,25 @@
 
 Keeping the Coordinator's active context lean yields higher-quality summaries, lower latency, and sharper attention across multi-wave slices.
 
-> **Important Antigravity fact:** `/compact` **never removes** `AGENTS.md` / `GEMINI.md` rules, skills, built-in tools, MCP servers, artifacts, or live subagents. Do **not** waste compaction prompt tokens trying to preserve static rules or MCP lists—focus strictly on **dynamic workflow state**.
+> **Important Antigravity fact:** `/compact`, which only the user can run (via the slash menu), **never removes** `AGENTS.md` / `GEMINI.md` rules, skills, built-in tools, MCP servers, artifacts, or live subagents. Do **not** waste compaction prompt tokens trying to preserve static rules or MCP lists—focus strictly on **dynamic workflow state**.
 
 ## 1. Hard Checkpoints (Always Compact Regardless of Token Count)
-Trigger a clean `/compact` at every natural phase boundary:
-1. **Post-`/plan` (Mandatory 2-Step Handoff):** Right after plan approval and opt-in issue sync, before launching `/swarm`. Antigravity requires the user to trigger `/compact` and `/swarm` explicitly (agents cannot auto-launch native `/swarm`), and a pasted code block starting with `/compact` or `/swarm` is plain text that does NOT trigger the command. Always instruct in prose ("Run `/compact` (via the slash menu) with the following text in the same message:") and keep fenced blocks payload-only:
+Ask the user to run a clean `/compact` at every natural phase boundary:
+1. **Post-`/plan` (Mandatory 2-Step Handoff):** Right after plan approval and opt-in issue sync, before launching `/swarm`. Agents cannot launch `/compact` or `/swarm`, and a pasted code block starting with either is plain text. Always instruct in prose ("Run `/compact` (via the slash menu) with the following text in the same message:") and keep fenced blocks payload-only:
    - **Step 1:** a complete, pre-filled `Preserve: ...` payload.
    - **Step 2 (Required to start Swarm):** `/swarm` (via the slash menu) with payload `Execute the approved plan starting at Wave 0/1 using ignis-swarm.`
 2. **Pre-Phase 4:** Right after all coding waves and `@doc-auditor` (Phase 3) complete, before running the Phase 4 Final 3-Lens Audit.
 3. **Post-Slice / Post-PR Merge:** Right after Phase 4 Final Audit passes and the slice is closed/merged, before starting the next slice.
 
 ## 2. Deterministic Watcher & Active Threshold Checkpoints
-- **Deterministic `PostInvocation` watcher (`hooks/compaction-watch.mjs`):** Automatically tracks turn/invocation pressure and emits a compaction alert when the context threshold is approached.
-- At the end of each wave (or whenever `hooks/compaction-watch.mjs` alerts), the Coordinator must check context budget:
-  - Inspect current context usage (`/context` in CLI, or context indicator in App; if not directly visible, rely on `hooks/compaction-watch.mjs` alerts and wave count — e.g., after every 2 waves or 5+ verbose verifier reports).
+- **Deterministic `PostInvocation` watcher (`hooks/compaction-watch.mjs`):** On interactive sessions, counts transcript bytes since the last `CHECKPOINT` line; once that passes `compaction.transcriptThresholdKb` in `onboarding.json` (default 550 KB), it injects a `[ignis-swarm][Compaction Checkpoint]` message asking you to pause and have the user compact, then stays quiet until the transcript has grown another 150 KB.
+- At the end of each wave (or whenever the watcher alerts), `@coordinator` must check context budget:
+  - Inspect current context usage (`/context` in CLI, or context indicator in App; if not directly visible, rely on the watcher's alerts and wave count — e.g., after every 2 waves or 5+ verbose verifier reports).
   - **Target band:** keep active context well below 50% of the model's window (e.g., ~150k–250k tokens on a 512k window).
-  - If approaching or above the threshold: **do NOT start the next wave**. Pause at the wave boundary and present a ready-to-paste `Preserve: ...` payload for `/compact`.
+  - If approaching or above the threshold: **do NOT start the next wave**. Pause at the wave boundary and present a ready-to-paste `Preserve: ...` payload and ask the user to run `/compact`.
 
 ## 3. Mandatory Rule: Always Emit Complete, Pre-Filled Compact Payloads
-At **every** checkpoint (Post-`/plan`, Wave boundary alert, Pre-Phase 4, Post-Slice), the Coordinator **MUST** tell the user in prose to run `/compact` (via the slash menu) with the following text in the same message, and emit a **complete, pre-filled payload-only `Preserve: ...` block** populated with the real live state (actual issue IDs, task IDs, commit SHAs, file paths, contracts, and next action). **Never** emit raw `<placeholder>` text, and **never** emit a fenced block starting with `/compact` or `/swarm` (pasted, it is sent as plain text).
+At **every** checkpoint (Post-`/plan`, Wave boundary alert, Pre-Phase 4, Post-Slice), `@coordinator` **MUST** tell the user in prose to run `/compact` (via the slash menu) with the following text in the same message, and emit a **complete, pre-filled payload-only `Preserve: ...` block** populated with the real live state (actual issue IDs, task IDs, commit SHAs, file paths, contracts, and next action). **Never** emit raw `<placeholder>` text, and **never** emit a fenced block starting with `/compact` or `/swarm` (pasted, it is sent as plain text).
 
 ### Reference Shapes (Replace Every Detail With Live State Before Emitting)
 

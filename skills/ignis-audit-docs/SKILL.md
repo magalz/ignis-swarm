@@ -25,9 +25,9 @@ Code explains **what**; ADRs, BDRs, and Playbooks explain **why**.
 3. **Update `INDEX.md`:**
    - Add 1 row for every new file and update the `Status` / `Superseded By` columns of any affected older decision.
    - *(Enforced deterministically by `hooks/stop-gate.mjs`.)*
-4. **Opt-In Tracker Audit Trail (only when `onboarding.json` `tracker.kind !== "none"`):**
-   - Issue-tracker syncing is strictly **opt-in**. Follow [tracker-profiles.md](./references/tracker-profiles.md) for the active tracker profile (GitHub Issues, Jira, Linear, ClickUp, etc.).
-   - When enabled, link or mirror the ADR/BDR in the connected tracker and post a concise decision audit comment on each affected card containing:
+4. **Opt-In Tracker Audit Trail (only when `onboarding.json` `trackers` is non-empty):**
+   - Issue-tracker syncing is strictly **opt-in**. Follow [tracker-profiles.md](./references/tracker-profiles.md) for each entry of `trackers` (`kind`: `linear`, `itsaplan`, `github`, or `other`).
+   - When enabled, link or mirror the ADR/BDR in every tracker of the list and post a concise decision audit comment on each affected card containing:
      - Decision ID (`ADR-NNN` / `BDR-NNN`) & repo path
      - 1–2 line summary of the decision and why alternatives were rejected
      - Verification proof (test file / command)
