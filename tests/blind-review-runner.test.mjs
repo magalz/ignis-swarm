@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readReviewState, reviewGateDecision, reviewStatePath } from "../scripts/broker/review-state.mjs";
 import { buildClaudeArgs, buildCodexArgs } from "../scripts/run-blind-review.mjs";
-import { initGitRepo, isolatedEnv, runGit, runNode } from "./helpers.mjs";
+import { initGitRepo, isolatedEnv, runGit, runNode, writeOnboardingState } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, "..", "scripts");
@@ -21,15 +21,6 @@ const WINDOWS_ONLY = process.platform === "win32" ? false : "Windows only";
 
 function headlessRouting(overrides = {}) {
   return { strategy: "headless_always", headlessBackend: "claude", headlessModel: "opus", effort: "high", ...overrides };
-}
-
-function writeOnboarding(dataDir, reviewRouting) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dataDir, "onboarding.json"),
-    JSON.stringify({ version: 1, completed: true, reviewRouting }, null, 2),
-    "utf8"
-  );
 }
 
 function createFeatureRepo(dir, env, { file = "app.js", before = "export const value = 1;\n", after = "export const value = 2;\n" } = {}) {
@@ -151,7 +142,7 @@ function withFixture(fn, { routing = headlessRouting(), makeRepo = createFeature
     const shimDir = path.join(iso.dirs.root, "shims");
     fs.mkdirSync(shimDir, { recursive: true });
     const repo = makeRepo(path.join(iso.dirs.root, "repo"), iso.env);
-    if (routing) writeOnboarding(dataDir, routing);
+    if (routing) writeOnboardingState(dataDir, { reviewRouting: routing });
     const head = (dir = repo) => runGit(dir, ["rev-parse", "HEAD"], { env: iso.env });
     const assertState = (status, dir = repo) => {
       const record = readReviewState(dataDir, dir);
@@ -169,7 +160,7 @@ function withFixture(fn, { routing = headlessRouting(), makeRepo = createFeature
 describe("blind-review runner: strategy routing", () => {
   it("antigravity_gemini_only returns native with no fallback backend", async () => {
     await withIso(async ({ dataDir, run }) => {
-      writeOnboarding(dataDir, headlessRouting({ strategy: "antigravity_gemini_only", headlessBackend: null, headlessModel: null }));
+      writeOnboardingState(dataDir, { reviewRouting: headlessRouting({ strategy: "antigravity_gemini_only", headlessBackend: null, headlessModel: null }) });
       const out = parseOut(run(["--base", "base-ref", "--backend", "auto", "--json"]));
       assert.deepEqual(
         { useNative: out.useNative, fallbackToNative: out.fallbackToNative, fallbackBackend: out.fallbackBackend, reason: out.reason },
