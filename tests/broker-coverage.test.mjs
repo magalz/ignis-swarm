@@ -61,10 +61,11 @@ function startDaemon({ cli, readInfo }) {
   return readInfo();
 }
 
-function api(info, method, route, { token = info.token, body } = {}) {
+// `auth` is the whole Authorization header value; null sends no header.
+function api(info, method, route, { auth = `Bearer ${info.token}`, body } = {}) {
   return fetch(`http://127.0.0.1:${info.port}${route}`, {
     method,
-    headers: { "Content-Type": "application/json", ...(token === null ? {} : { Authorization: `Bearer ${token}` }) },
+    headers: { "Content-Type": "application/json", ...(auth === null ? {} : { Authorization: auth }) },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(20_000),
   });
@@ -85,18 +86,16 @@ test("every daemon route answers 401 without a token or with a wrong one, and 20
   const info = startDaemon(ctx);
 
   for (const [method, route, body] of [...ROUTES, ["POST", "/admin/shutdown", {}], ["GET", "/nope", undefined]]) {
-    for (const [label, token] of [["no token", null], ["wrong token", `${info.token}x`], ["empty token", ""]]) {
-      const res = await api(info, method, route, { token, body });
+    for (const [label, auth] of [
+      ["no token", null],
+      ["wrong token", `Bearer ${info.token}x`],
+      ["empty token", "Bearer "],
+      ["the token under another scheme", `Basic ${info.token}`],
+    ]) {
+      const res = await api(info, method, route, { auth, body });
       assert.equal(res.status, 401, `${method} ${route} with ${label}`);
       await res.text();
     }
-    const basic = await fetch(`http://127.0.0.1:${info.port}${route}`, {
-      method,
-      headers: { Authorization: `Basic ${info.token}`, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    assert.equal(basic.status, 401, `${method} ${route} with the token under another scheme`);
-    await basic.text();
   }
   assert.equal(isPidAlive(info.pid), true, "401 on /admin/shutdown did not stop the daemon");
 
@@ -137,9 +136,11 @@ test("a request body over the cap is refused and the daemon keeps serving", { ti
     };
     pump();
   });
-  // The daemon answers 400 and may drop the socket while the client is still writing, so a
-  // client-side reset is also a refusal; either way the body was not accepted.
-  if (!outcome.error) {
+  // The daemon answers 400 and destroys the request while the client is still writing, so a
+  // socket reset is the usual outcome; any other client error (refused, timeout) is a failure.
+  if (outcome.error) {
+    assert.match(String(outcome.error.code), /^(ECONNRESET|EPIPE)$/, `unexpected client error: ${outcome.error.message}`);
+  } else {
     assert.equal(outcome.status, 400, "oversized body is a protocol error (400)");
     assert.match(outcome.text, /exceeds/);
   }
